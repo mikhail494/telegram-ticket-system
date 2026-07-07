@@ -1,9 +1,16 @@
 node_modules
 dist
 .env
+.env.*
+!.env.example
 .git
 .gitignore
 data
+*.db
+*.sqlite
+*.sqlite3
 *.log
+npm-debug.log*
+.DS_Store
 work
 outputs

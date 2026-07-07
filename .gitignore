@@ -3,6 +3,9 @@ dist/
 .env
 .env.*
 !.env.example
+*.db
+*.sqlite
+*.sqlite3
 data/*.db
 data/*.db-*
 *.log
