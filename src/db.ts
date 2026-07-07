@@ -171,16 +171,16 @@ export class SupportDatabase {
       .get(telegramId) as UserRecord | undefined;
   }
 
-  createTicket(userTelegramId: number): TicketRecord {
+  createTicket(userTelegramId: number, staffChatId: number): TicketRecord {
     const timestamp = now();
     const result = this.db
       .prepare(
         `
-        INSERT INTO tickets (user_telegram_id, status, created_at, updated_at)
-        VALUES (?, 'OPEN', ?, ?)
+        INSERT INTO tickets (user_telegram_id, status, staff_chat_id, created_at, updated_at)
+        VALUES (?, 'OPEN', ?, ?, ?)
       `
       )
-      .run(userTelegramId, timestamp, timestamp);
+      .run(userTelegramId, staffChatId, timestamp, timestamp);
 
     return this.getTicket(Number(result.lastInsertRowid))!;
   }
@@ -208,43 +208,70 @@ export class SupportDatabase {
       .get(ticketId) as TicketWithUser | undefined;
   }
 
-  findActiveTicketForUser(userTelegramId: number): TicketRecord | undefined {
-    return this.db
-      .prepare(
-        `
-        SELECT * FROM tickets
-        WHERE user_telegram_id = ? AND status != 'CLOSED'
-        ORDER BY id DESC
-        LIMIT 1
-      `
-      )
-      .get(userTelegramId) as TicketRecord | undefined;
-  }
-
-  getLatestTicketForUser(userTelegramId: number): TicketRecord | undefined {
+  findActiveTicketForUser(userTelegramId: number, staffChatId: number): TicketRecord | undefined {
     return this.db
       .prepare(
         `
         SELECT * FROM tickets
         WHERE user_telegram_id = ?
+          AND staff_chat_id = ?
+          AND staff_message_id IS NOT NULL
+          AND status != 'CLOSED'
         ORDER BY id DESC
         LIMIT 1
       `
       )
-      .get(userTelegramId) as TicketRecord | undefined;
+      .get(userTelegramId, staffChatId) as TicketRecord | undefined;
   }
 
-  listTicketsForUser(userTelegramId: number, limit = 10): TicketRecord[] {
+  getLatestTicketForUser(userTelegramId: number, staffChatId: number): TicketRecord | undefined {
     return this.db
       .prepare(
         `
         SELECT * FROM tickets
-        WHERE user_telegram_id = ?
+        WHERE user_telegram_id = ? AND staff_chat_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+      `
+      )
+      .get(userTelegramId, staffChatId) as TicketRecord | undefined;
+  }
+
+  listTicketsForUser(userTelegramId: number, staffChatId: number, limit = 10): TicketRecord[] {
+    return this.db
+      .prepare(
+        `
+        SELECT * FROM tickets
+        WHERE user_telegram_id = ? AND staff_chat_id = ?
         ORDER BY id DESC
         LIMIT ?
       `
       )
-      .all(userTelegramId, limit) as TicketRecord[];
+      .all(userTelegramId, staffChatId, limit) as TicketRecord[];
+  }
+
+  closeOtherActiveTicketsForUserInStaffChat(
+    userTelegramId: number,
+    staffChatId: number,
+    keepTicketId: number
+  ): number {
+    const timestamp = now();
+    const result = this.db
+      .prepare(
+        `
+        UPDATE tickets
+        SET status = 'CLOSED',
+            updated_at = ?,
+            closed_at = COALESCE(closed_at, ?)
+        WHERE user_telegram_id = ?
+          AND staff_chat_id = ?
+          AND id != ?
+          AND status != 'CLOSED'
+      `
+      )
+      .run(timestamp, timestamp, userTelegramId, staffChatId, keepTicketId);
+
+    return result.changes;
   }
 
   updateTicketStaffMessage(ticketId: number, staffChatId: number, staffMessageId: number): void {
@@ -427,6 +454,9 @@ export class SupportDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_tickets_user_status
         ON tickets(user_telegram_id, status);
+
+      CREATE INDEX IF NOT EXISTS idx_tickets_user_staff_status
+        ON tickets(user_telegram_id, staff_chat_id, status);
 
       CREATE INDEX IF NOT EXISTS idx_tickets_staff_message
         ON tickets(staff_chat_id, staff_message_id);
