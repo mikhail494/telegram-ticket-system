@@ -8,3 +8,4 @@ data/*.db-*
 *.log
 npm-debug.log*
 .DS_Store
+work/

@@ -1,5 +1,4 @@
-import type { User } from "grammy/types";
-import type { Message } from "grammy/types";
+import type { Message, User } from "grammy/types";
 
 export interface MessageContent {
   text: string | null;
@@ -49,7 +48,7 @@ export function getMessageContent(message: Message): MessageContent {
 }
 
 export function getMessageText(message: Message): string | null {
-  if ("text" in message) {
+  if ("text" in message && typeof message.text === "string") {
     return message.text;
   }
 
@@ -62,32 +61,39 @@ export function getMessageText(message: Message): string | null {
 
 function getMediaInfo(message: Message): { type: string; fileId: string } | null {
   if ("photo" in message) {
-    const largestPhoto = message.photo.at(-1);
+    const photos = message.photo ?? [];
+    const largestPhoto = photos.at(-1);
     return largestPhoto ? { type: "photo", fileId: largestPhoto.file_id } : null;
   }
 
   if ("document" in message) {
-    return { type: "document", fileId: message.document.file_id };
+    const document = message.document ?? null;
+    return document ? { type: "document", fileId: document.file_id } : null;
   }
 
   if ("video" in message) {
-    return { type: "video", fileId: message.video.file_id };
+    const video = message.video ?? null;
+    return video ? { type: "video", fileId: video.file_id } : null;
   }
 
   if ("animation" in message) {
-    return { type: "animation", fileId: message.animation.file_id };
+    const animation = message.animation ?? null;
+    return animation ? { type: "animation", fileId: animation.file_id } : null;
   }
 
   if ("audio" in message) {
-    return { type: "audio", fileId: message.audio.file_id };
+    const audio = message.audio ?? null;
+    return audio ? { type: "audio", fileId: audio.file_id } : null;
   }
 
   if ("voice" in message) {
-    return { type: "voice", fileId: message.voice.file_id };
+    const voice = message.voice ?? null;
+    return voice ? { type: "voice", fileId: voice.file_id } : null;
   }
 
   if ("video_note" in message) {
-    return { type: "video_note", fileId: message.video_note.file_id };
+    const videoNote = message.video_note ?? null;
+    return videoNote ? { type: "video_note", fileId: videoNote.file_id } : null;
   }
 
   return null;
