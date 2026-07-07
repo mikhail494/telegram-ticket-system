@@ -4,6 +4,7 @@ import path from "node:path";
 
 export type TicketStatus = "OPEN" | "WAITING_USER" | "IN_PROGRESS" | "CLOSED";
 export type MessageDirection = "USER_TO_STAFF" | "STAFF_TO_USER" | "SYSTEM";
+export type MessageSenderType = "USER" | "STAFF" | "SYSTEM";
 
 export interface UserRecord {
   telegram_id: number;
@@ -21,6 +22,12 @@ export interface TicketRecord {
   staff_chat_id: number | null;
   message_thread_id: number | null;
   staff_message_id: number | null;
+  logs_message_id: number | null;
+  transcript_message_id: number | null;
+  archived_at: string | null;
+  closed_by_type: MessageSenderType | null;
+  closed_by_display_name: string | null;
+  closed_by_username: string | null;
   created_at: string;
   updated_at: string;
   closed_at: string | null;
@@ -42,18 +49,13 @@ export interface TicketMessageRecord {
   delivery_message_id: number | null;
   from_telegram_id: number | null;
   from_username: string | null;
+  sender_type: MessageSenderType | null;
+  sender_display_name: string | null;
+  sender_username: string | null;
   text: string | null;
   media_type: string | null;
+  filename: string | null;
   file_id: string | null;
-  created_at: string;
-}
-
-export interface StaffMessageLink {
-  id: number;
-  ticket_id: number;
-  staff_chat_id: number;
-  staff_message_id: number;
-  kind: string;
   created_at: string;
 }
 
@@ -81,8 +83,12 @@ export interface AddMessageInput {
   deliveryMessageId?: number | null;
   fromTelegramId?: number | null;
   fromUsername?: string | null;
+  senderType?: MessageSenderType | null;
+  senderDisplayName?: string | null;
+  senderUsername?: string | null;
   text?: string | null;
   mediaType?: string | null;
+  filename?: string | null;
   fileId?: string | null;
 }
 
@@ -91,6 +97,12 @@ export interface BanUserInput {
   username?: string | null;
   reason: string;
   bannedBy?: number | null;
+}
+
+export interface CloseTicketInput {
+  type: MessageSenderType;
+  displayName: string;
+  username?: string | null;
 }
 
 interface TableColumnInfo {
@@ -107,6 +119,18 @@ const TICKET_STATUSES: TicketStatus[] = ["OPEN", "WAITING_USER", "IN_PROGRESS", 
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function senderTypeForDirection(direction: MessageDirection): MessageSenderType {
+  if (direction === "USER_TO_STAFF") {
+    return "USER";
+  }
+
+  if (direction === "STAFF_TO_USER") {
+    return "STAFF";
+  }
+
+  return "SYSTEM";
 }
 
 function normalizeDatabasePath(databaseUrl: string): string {
@@ -354,13 +378,78 @@ export class SupportDatabase {
         UPDATE tickets
         SET status = ?,
             updated_at = ?,
-            closed_at = CASE WHEN ? = 'CLOSED' THEN ? ELSE NULL END
+            closed_at = CASE WHEN ? = 'CLOSED' THEN COALESCE(closed_at, ?) ELSE NULL END,
+            closed_by_type = CASE WHEN ? = 'CLOSED' THEN closed_by_type ELSE NULL END,
+            closed_by_display_name = CASE WHEN ? = 'CLOSED' THEN closed_by_display_name ELSE NULL END,
+            closed_by_username = CASE WHEN ? = 'CLOSED' THEN closed_by_username ELSE NULL END
         WHERE id = ?
       `
       )
-      .run(status, timestamp, status, status === "CLOSED" ? timestamp : null, ticketId);
+      .run(
+        status,
+        timestamp,
+        status,
+        status === "CLOSED" ? timestamp : null,
+        status,
+        status,
+        status,
+        ticketId
+      );
 
     return this.getTicket(ticketId);
+  }
+
+  closeTicketRecord(ticketId: number, input: CloseTicketInput): TicketRecord | undefined {
+    const timestamp = now();
+    this.db
+      .prepare(
+        `
+        UPDATE tickets
+        SET status = 'CLOSED',
+            updated_at = ?,
+            closed_at = COALESCE(closed_at, ?),
+            closed_by_type = ?,
+            closed_by_display_name = ?,
+            closed_by_username = ?
+        WHERE id = ?
+      `
+      )
+      .run(
+        timestamp,
+        timestamp,
+        input.type,
+        input.displayName,
+        input.username ?? null,
+        ticketId
+      );
+
+    return this.getTicket(ticketId);
+  }
+
+  markTicketArchivedAndDeleteMessages(
+    ticketId: number,
+    logsMessageId: number,
+    transcriptMessageId: number
+  ): void {
+    const tx = this.db.transaction(() => {
+      const timestamp = now();
+      this.db
+        .prepare(
+          `
+          UPDATE tickets
+          SET logs_message_id = ?,
+              transcript_message_id = ?,
+              archived_at = ?,
+              updated_at = ?
+          WHERE id = ?
+        `
+        )
+        .run(logsMessageId, transcriptMessageId, timestamp, timestamp, ticketId);
+
+      this.db.prepare("DELETE FROM messages WHERE ticket_id = ?").run(ticketId);
+    });
+
+    tx();
   }
 
   addMessage(input: AddMessageInput): number {
@@ -377,8 +466,12 @@ export class SupportDatabase {
             delivery_message_id,
             from_telegram_id,
             from_username,
+            sender_type,
+            sender_display_name,
+            sender_username,
             text,
             media_type,
+            filename,
             file_id,
             created_at
           )
@@ -391,8 +484,12 @@ export class SupportDatabase {
             @deliveryMessageId,
             @fromTelegramId,
             @fromUsername,
+            @senderType,
+            @senderDisplayName,
+            @senderUsername,
             @text,
             @mediaType,
+            @filename,
             @fileId,
             @createdAt
           )
@@ -407,8 +504,12 @@ export class SupportDatabase {
           deliveryMessageId: message.deliveryMessageId ?? null,
           fromTelegramId: message.fromTelegramId ?? null,
           fromUsername: message.fromUsername ?? null,
+          senderType: message.senderType ?? senderTypeForDirection(message.direction),
+          senderDisplayName: message.senderDisplayName ?? null,
+          senderUsername: message.senderUsername ?? message.fromUsername ?? null,
           text: message.text ?? null,
           mediaType: message.mediaType ?? null,
+          filename: message.filename ?? null,
           fileId: message.fileId ?? null,
           createdAt: now()
         });
@@ -421,19 +522,6 @@ export class SupportDatabase {
     });
 
     return tx(input);
-  }
-
-  getFirstUserMessage(ticketId: number): TicketMessageRecord | undefined {
-    return this.db
-      .prepare(
-        `
-        SELECT * FROM messages
-        WHERE ticket_id = ? AND direction = 'USER_TO_STAFF'
-        ORDER BY id ASC
-        LIMIT 1
-      `
-      )
-      .get(ticketId) as TicketMessageRecord | undefined;
   }
 
   listMessages(ticketId: number, limit = 10): TicketMessageRecord[] {
@@ -449,40 +537,67 @@ export class SupportDatabase {
       .all(ticketId, limit) as TicketMessageRecord[];
   }
 
-  linkStaffMessage(
-    ticketId: number,
-    staffChatId: number,
-    staffMessageId: number,
-    kind: string
-  ): void {
-    this.db
-      .prepare(
-        `
-        INSERT OR IGNORE INTO staff_message_links (
-          ticket_id,
-          staff_chat_id,
-          staff_message_id,
-          kind,
-          created_at
-        )
-        VALUES (?, ?, ?, ?, ?)
-      `
-      )
-      .run(ticketId, staffChatId, staffMessageId, kind, now());
-  }
-
-  findTicketByStaffMessage(
-    staffChatId: number,
-    staffMessageId: number
-  ): StaffMessageLink | undefined {
+  listMessagesChronological(ticketId: number): TicketMessageRecord[] {
     return this.db
       .prepare(
         `
-        SELECT * FROM staff_message_links
-        WHERE staff_chat_id = ? AND staff_message_id = ?
+        SELECT * FROM messages
+        WHERE ticket_id = ?
+        ORDER BY created_at ASC, id ASC
       `
       )
-      .get(staffChatId, staffMessageId) as StaffMessageLink | undefined;
+      .all(ticketId) as TicketMessageRecord[];
+  }
+
+  deleteMessagesForTicket(ticketId: number): number {
+    const result = this.db.prepare("DELETE FROM messages WHERE ticket_id = ?").run(ticketId);
+    return result.changes;
+  }
+
+  listClosedTicketsPendingArchive(staffChatId: number, limit = 1000): TicketWithUser[] {
+    return this.db
+      .prepare(
+        `
+        SELECT
+          tickets.*,
+          users.username,
+          users.first_name,
+          users.last_name
+        FROM tickets
+        JOIN users ON users.telegram_id = tickets.user_telegram_id
+        WHERE tickets.staff_chat_id = ?
+          AND tickets.status = 'CLOSED'
+          AND tickets.archived_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM messages WHERE messages.ticket_id = tickets.id
+          )
+        ORDER BY tickets.closed_at ASC, tickets.id ASC
+        LIMIT ?
+      `
+      )
+      .all(staffChatId, limit) as TicketWithUser[];
+  }
+
+  getSetting(key: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = ?")
+      .get(key) as { value: string } | undefined;
+
+    return row?.value;
+  }
+
+  setSetting(key: string, value: string): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          updated_at = excluded.updated_at
+      `
+      )
+      .run(key, value, now());
   }
 
   getBannedUser(userTelegramId: number): BannedUserRecord | undefined {
@@ -564,6 +679,12 @@ export class SupportDatabase {
               staff_chat_id INTEGER,
               message_thread_id INTEGER,
               staff_message_id INTEGER,
+              logs_message_id INTEGER,
+              transcript_message_id INTEGER,
+              archived_at TEXT,
+              closed_by_type TEXT CHECK(closed_by_type IN ('USER', 'STAFF', 'SYSTEM')),
+              closed_by_display_name TEXT,
+              closed_by_username TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               closed_at TEXT,
@@ -580,22 +701,21 @@ export class SupportDatabase {
               delivery_message_id INTEGER,
               from_telegram_id INTEGER,
               from_username TEXT,
+              sender_type TEXT CHECK(sender_type IN ('USER', 'STAFF', 'SYSTEM')),
+              sender_display_name TEXT,
+              sender_username TEXT,
               text TEXT,
               media_type TEXT,
+              filename TEXT,
               file_id TEXT,
               created_at TEXT NOT NULL,
               FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
             );
 
-            CREATE TABLE IF NOT EXISTS staff_message_links (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              ticket_id INTEGER NOT NULL,
-              staff_chat_id INTEGER NOT NULL,
-              staff_message_id INTEGER NOT NULL,
-              kind TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              UNIQUE(staff_chat_id, staff_message_id),
-              FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            CREATE TABLE IF NOT EXISTS settings (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_at TEXT NOT NULL
             );
           `);
         }
@@ -608,6 +728,12 @@ export class SupportDatabase {
           this.addColumnIfMissing("tickets", "message_thread_id", "INTEGER");
           this.addColumnIfMissing("tickets", "staff_message_id", "INTEGER");
           this.addColumnIfMissing("tickets", "closed_at", "TEXT");
+          this.addColumnIfMissing("tickets", "logs_message_id", "INTEGER");
+          this.addColumnIfMissing("tickets", "transcript_message_id", "INTEGER");
+          this.addColumnIfMissing("tickets", "archived_at", "TEXT");
+          this.addColumnIfMissing("tickets", "closed_by_type", "TEXT");
+          this.addColumnIfMissing("tickets", "closed_by_display_name", "TEXT");
+          this.addColumnIfMissing("tickets", "closed_by_username", "TEXT");
         }
       },
       {
@@ -644,9 +770,6 @@ export class SupportDatabase {
 
             CREATE INDEX IF NOT EXISTS idx_messages_ticket_created
               ON messages(ticket_id, created_at);
-
-            CREATE INDEX IF NOT EXISTS idx_staff_message_links_ticket
-              ON staff_message_links(ticket_id);
           `);
         }
       },
@@ -698,16 +821,48 @@ export class SupportDatabase {
             )
             .run(timestamp, timestamp);
 
-          this.db.exec(`
-            DELETE FROM staff_message_links
-            WHERE id NOT IN (
-              SELECT MIN(id)
-              FROM staff_message_links
-              GROUP BY staff_chat_id, staff_message_id
-            );
+          if (this.hasTable("staff_message_links")) {
+            this.db.exec(`
+              DELETE FROM staff_message_links
+              WHERE id NOT IN (
+                SELECT MIN(id)
+                FROM staff_message_links
+                GROUP BY staff_chat_id, staff_message_id
+              );
 
-            CREATE UNIQUE INDEX IF NOT EXISTS uniq_staff_message_links_staff_message
-              ON staff_message_links(staff_chat_id, staff_message_id);
+              CREATE UNIQUE INDEX IF NOT EXISTS uniq_staff_message_links_staff_message
+                ON staff_message_links(staff_chat_id, staff_message_id);
+            `);
+          }
+        }
+      },
+      {
+        id: 7,
+        name: "add_archive_settings_and_transcript_columns",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS settings (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+          `);
+
+          this.addColumnIfMissing("tickets", "logs_message_id", "INTEGER");
+          this.addColumnIfMissing("tickets", "transcript_message_id", "INTEGER");
+          this.addColumnIfMissing("tickets", "archived_at", "TEXT");
+          this.addColumnIfMissing("tickets", "closed_by_type", "TEXT");
+          this.addColumnIfMissing("tickets", "closed_by_display_name", "TEXT");
+          this.addColumnIfMissing("tickets", "closed_by_username", "TEXT");
+
+          this.addColumnIfMissing("messages", "sender_type", "TEXT");
+          this.addColumnIfMissing("messages", "sender_display_name", "TEXT");
+          this.addColumnIfMissing("messages", "sender_username", "TEXT");
+          this.addColumnIfMissing("messages", "filename", "TEXT");
+
+          this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_tickets_archive_pending
+              ON tickets(staff_chat_id, status, archived_at);
           `);
         }
       }
@@ -737,12 +892,24 @@ export class SupportDatabase {
     return Boolean(row);
   }
 
-  private hasColumn(tableName: "tickets", columnName: string): boolean {
+  private hasColumn(tableName: "tickets" | "messages", columnName: string): boolean {
     const rows = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as TableColumnInfo[];
     return rows.some((row) => row.name === columnName);
   }
 
-  private addColumnIfMissing(tableName: "tickets", columnName: string, columnDefinition: string): void {
+  private hasTable(tableName: string): boolean {
+    const row = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(tableName) as { name: string } | undefined;
+
+    return Boolean(row);
+  }
+
+  private addColumnIfMissing(
+    tableName: "tickets" | "messages",
+    columnName: string,
+    columnDefinition: string
+  ): void {
     if (this.hasColumn(tableName, columnName)) {
       return;
     }
