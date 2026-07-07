@@ -3,6 +3,7 @@ import type { Message, User } from "grammy/types";
 export interface MessageContent {
   text: string | null;
   mediaType: string | null;
+  filename: string | null;
   fileId: string | null;
   shouldCopyOriginal: boolean;
 }
@@ -42,6 +43,7 @@ export function getMessageContent(message: Message): MessageContent {
   return {
     text,
     mediaType: media?.type ?? null,
+    filename: media?.filename ?? null,
     fileId: media?.fileId ?? null,
     shouldCopyOriginal: Boolean(media) || (text?.length ?? 0) > 2500
   };
@@ -59,41 +61,43 @@ export function getMessageText(message: Message): string | null {
   return null;
 }
 
-function getMediaInfo(message: Message): { type: string; fileId: string } | null {
+function getMediaInfo(message: Message): { type: string; fileId: string; filename: string | null } | null {
   if ("photo" in message) {
     const photos = message.photo ?? [];
     const largestPhoto = photos.at(-1);
-    return largestPhoto ? { type: "photo", fileId: largestPhoto.file_id } : null;
+    return largestPhoto ? { type: "photo", fileId: largestPhoto.file_id, filename: null } : null;
   }
 
   if ("document" in message) {
     const document = message.document ?? null;
-    return document ? { type: "document", fileId: document.file_id } : null;
+    return document
+      ? { type: "document", fileId: document.file_id, filename: document.file_name ?? null }
+      : null;
   }
 
   if ("video" in message) {
     const video = message.video ?? null;
-    return video ? { type: "video", fileId: video.file_id } : null;
+    return video ? { type: "video", fileId: video.file_id, filename: null } : null;
   }
 
   if ("animation" in message) {
     const animation = message.animation ?? null;
-    return animation ? { type: "animation", fileId: animation.file_id } : null;
+    return animation ? { type: "animation", fileId: animation.file_id, filename: null } : null;
   }
 
   if ("audio" in message) {
     const audio = message.audio ?? null;
-    return audio ? { type: "audio", fileId: audio.file_id } : null;
+    return audio ? { type: "audio", fileId: audio.file_id, filename: null } : null;
   }
 
   if ("voice" in message) {
     const voice = message.voice ?? null;
-    return voice ? { type: "voice", fileId: voice.file_id } : null;
+    return voice ? { type: "voice", fileId: voice.file_id, filename: null } : null;
   }
 
   if ("video_note" in message) {
     const videoNote = message.video_note ?? null;
-    return videoNote ? { type: "video_note", fileId: videoNote.file_id } : null;
+    return videoNote ? { type: "video_note", fileId: videoNote.file_id, filename: null } : null;
   }
 
   return null;

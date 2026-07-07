@@ -2,12 +2,15 @@ import { config } from "./config.js";
 import { SupportDatabase } from "./db.js";
 import { createBot, setBotCommands } from "./bot.js";
 import { logger } from "./logger.js";
+import { archiveClosedTicketsPendingUpload, initializeSupportLogsTopic } from "./archive.js";
 
 const db = new SupportDatabase(config.databaseUrl);
 const bot = createBot(db);
 
 async function main(): Promise<void> {
   await bot.api.deleteWebhook({ drop_pending_updates: false });
+  await initializeSupportLogsTopic(bot.api, db);
+  await archiveClosedTicketsPendingUpload(bot.api, db);
   await setBotCommands(bot);
 
   const shutdown = (signal: NodeJS.Signals) => {
