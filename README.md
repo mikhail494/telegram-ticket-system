@@ -1,44 +1,170 @@
 # Telegram Support Ticket Bot
 
-A production-ready Telegram support ticket bot built with Node.js 20, TypeScript, grammY, SQLite, better-sqlite3, and dotenv.
+Production-ready Telegram support bot for private user support requests and staff replies in Telegram Forum Topics.
 
-Users message the bot in private chat. The bot creates or updates a support ticket, posts it to a private staff Telegram group, and forwards staff replies back to the original user from the bot account.
+Users message the bot in private chat. The bot creates a ticket, creates a dedicated forum topic in the staff supergroup, pins a permanent ticket summary, and copies staff replies from that topic back to the original user.
 
 ## Features
 
-- Private-chat ticket intake with `/start`
-- SQLite storage for users, tickets, messages, and staff message mappings
-- One active ticket per user; new user messages are appended to the existing active ticket
-- Staff replies in the staff group are delivered back to the user
-- Staff photo/document/media replies are copied back to users
-- User photos/documents are copied into the staff ticket reply chain
-- Inline staff buttons: close, waiting user, in progress
-- General commands: `/chatid`
-- User commands: `/status`, `/mytickets`
-- Staff commands: `/ticket ID`, `/close ID`
-- Error logging with pino and staff-group delivery failure notices
-- Dockerfile and Railway-ready config
+- One ticket equals one Telegram forum topic.
+- New user tickets create exactly one new topic.
+- Follow-up user messages are appended to the same open ticket topic.
+- Closed tickets and closed topics are never reused.
+- First message in every ticket topic is pinned as a permanent ticket summary.
+- User-side `Close ticket` inline button.
+- Staff topic controls:
+  - Close ticket
+  - Mark waiting user
+  - Mark in progress
+  - Ban user
+- Staff commands:
+  - `/chatid`
+  - `/ticket ID`
+  - `/close ID`
+  - `/whois`
+  - `/ban USER_ID reason`
+  - `/unban USER_ID`
+  - `/bans`
+- Ban list blocks restricted users from opening tickets.
+- Media support in both directions:
+  - photos
+  - documents
+  - videos
+  - animations
+  - audio
+  - voice
+  - video notes
+- SQLite persistence with idempotent schema migrations.
+- Railway and Docker deployment support.
+- Structured logging with pino.
 
-## Project Structure
+## Architecture
 
 ```text
-.
-|-- src
-|   |-- bot.ts        # grammY handlers and ticket flow
-|   |-- config.ts     # dotenv + environment validation
-|   |-- db.ts         # SQLite schema, migrations, and prepared statements
-|   |-- format.ts     # user/staff message formatting
-|   |-- index.ts      # app entrypoint
-|   |-- logger.ts     # pino logger
-|   `-- telegram.ts   # Telegram message/user helpers
-|-- Dockerfile
-|-- railway.json
-|-- package.json
-|-- tsconfig.json
-`-- .env.example
+User private chat
+  -> grammY bot
+  -> SQLite
+  -> Staff supergroup forum topic
+  -> Staff topic message copied back to user
 ```
 
-## Environment
+Core database tables:
+
+- `users`
+- `tickets`
+- `messages`
+- `staff_message_links`
+- `banned_users`
+- `schema_migrations`
+
+Every ticket stores:
+
+- `user_telegram_id`
+- `staff_chat_id`
+- `message_thread_id`
+- `status`
+- timestamps
+
+Routing is based on `message_thread_id`, not on Telegram replies.
+
+## Forum Topics Workflow
+
+Expected lifecycle:
+
+1. User sends a private message to the bot.
+2. Bot creates a ticket row.
+3. Bot creates one new forum topic in `STAFF_CHAT_ID`.
+4. Topic title format:
+
+```text
+#123 | @username
+```
+
+If username is missing:
+
+```text
+#123 | user_123456789
+```
+
+5. Bot sends and pins the first topic message:
+
+```text
+Ticket #123
+
+User:
+@username
+
+Telegram ID:
+123456789
+
+Created:
+2026-07-07 12:00:00 UTC
+
+Status:
+OPEN
+```
+
+6. Bot sends the user message into the same topic.
+7. Staff writes inside the topic to answer the user.
+8. While the ticket is open, later user messages go into the same topic.
+9. Closing the ticket marks it `CLOSED` in SQLite and calls `closeForumTopic`.
+10. The next user message after close creates a new ticket and a new topic.
+
+Telegram Bot API supports closing individual forum topics. It does not provide a separate archive/hide method for ordinary topics, so the bot closes the topic and never reuses it.
+
+## Telegram Group Configuration
+
+`STAFF_CHAT_ID` must point to a Telegram supergroup with Topics enabled.
+
+To create one:
+
+1. Create a Telegram group.
+2. Open group settings.
+3. Convert it to a supergroup if Telegram prompts you.
+4. Enable Topics.
+5. Add the bot.
+6. Promote the bot to administrator.
+
+Required bot permissions:
+
+- Manage topics
+- Send messages
+- Read messages
+- Pin messages, recommended for pinned ticket summaries
+- Delete messages, optional
+- Ban users, optional
+
+The bot needs `Manage topics` for `createForumTopic` and `closeForumTopic`.
+
+## BotFather Setup
+
+1. Message `@BotFather`.
+2. Run `/newbot`.
+3. Copy the token into `BOT_TOKEN`.
+4. Add the bot to the staff supergroup.
+5. Promote the bot to admin with the permissions above.
+
+Do not paste the bot token into source code.
+
+## Getting STAFF_CHAT_ID
+
+After the bot is configured for the staff group, run:
+
+```text
+/chatid
+```
+
+inside the staff group. The bot replies:
+
+```text
+Chat ID: -1001234567890
+```
+
+Use that value as `STAFF_CHAT_ID`.
+
+For first-time discovery, use Telegram `getUpdates` while the bot is not running, or temporarily test in a known group. After `STAFF_CHAT_ID` is correct, `/chatid` works only in the configured staff group.
+
+## Environment Variables
 
 Create `.env` from `.env.example`:
 
@@ -49,80 +175,49 @@ DATABASE_URL=file:./data/support.db
 LOG_LEVEL=info
 ```
 
-`STAFF_CHAT_ID` must be the private staff group or supergroup id. For Railway with a persistent volume mounted at `/data`, use:
+Required:
 
-```bash
-DATABASE_URL=file:/data/support.db
-```
+- `BOT_TOKEN`
+- `STAFF_CHAT_ID`
+- `DATABASE_URL`
 
-## BotFather Setup
+Optional:
 
-1. Open Telegram and message `@BotFather`.
-2. Run `/newbot` and copy the bot token into `BOT_TOKEN`.
-3. Add the bot to your private staff group.
-4. Keep BotFather privacy mode enabled or disable it; this bot only needs commands and replies to its own ticket messages in the staff group.
-5. Make sure staff reply directly to the bot's ticket message or to messages in that ticket reply chain.
+- `LOG_LEVEL`
 
-To find `STAFF_CHAT_ID`, add the bot to the staff group and run `/chatid` in that group. Copy the returned `Chat ID` value into `.env`.
+`.env` must never be committed.
+
+`.env.example` is safe to commit because it contains placeholders only.
 
 ## Local Development
 
 ```bash
 npm install
-cp .env.example .env
+npm run build
 npm run dev
 ```
 
-Build and run:
+Production run:
 
 ```bash
-npm run build
 npm start
-```
-
-## Staff Workflow
-
-When a user sends a private message, staff receive:
-
-```text
-New ticket #ID
-From: @username
-User ID: telegram_id
-Status: OPEN
-Message: user message
-
-Reply to this message to answer the user.
-```
-
-Staff can:
-
-- Reply to the ticket message to answer the user
-- Reply with text, photo, document, or other copyable Telegram media
-- Click `Close ticket`, `Mark waiting user`, or `Mark in progress`
-- Run `/chatid` to show the current Telegram chat id
-- Run `/ticket ID` to view details and recent messages
-- Run `/close ID` to close a ticket
-
-When a ticket is closed, the user receives:
-
-```text
-Your ticket has been closed. If you still need help, send a new message.
 ```
 
 ## Railway Deployment
 
-1. Push this project to GitHub.
-2. Create a new Railway project from the repository.
-3. Railway will use the included `Dockerfile` and `railway.json`.
-4. Add variables:
+1. Push the repository to GitHub.
+2. Create a Railway project from the repository.
+3. Add a Railway volume mounted at `/data`.
+4. Set Railway variables:
    - `BOT_TOKEN`
    - `STAFF_CHAT_ID`
    - `DATABASE_URL=file:/data/support.db`
    - `LOG_LEVEL=info`
-5. Add a Railway volume mounted at `/data`.
-6. Deploy one replica only. Long polling should not run from multiple instances at the same time.
+5. Deploy one replica only.
 
-SQLite needs persistent storage. Without a Railway volume, tickets will be lost when the container is rebuilt or restarted on a fresh filesystem.
+Long polling should not run from multiple replicas.
+
+SQLite needs persistent storage. Without a Railway volume, tickets, messages, bans, and migration state can be lost after rebuilds or restarts.
 
 ## Docker
 
@@ -131,16 +226,96 @@ docker build -t telegram-support-ticket-bot .
 docker run --env-file .env -v support-data:/data telegram-support-ticket-bot
 ```
 
-For Docker with the volume above, set:
+For Docker with a volume:
 
 ```bash
 DATABASE_URL=file:/data/support.db
 ```
 
-## Notes
+## Screenshots
 
-- The bot accepts new tickets only in private chats.
-- Random group messages are ignored unless they are replies to known ticket messages in `STAFF_CHAT_ID`.
-- Active tickets are scoped to the current `STAFF_CHAT_ID`, so changing the staff group starts a fresh support queue without deleting the database.
-- The database schema is created automatically on startup.
-- No secrets are hardcoded; all runtime configuration comes from environment variables.
+Add screenshots here before public release:
+
+### User Start
+
+Placeholder: private chat `/start` response.
+
+### Ticket Created
+
+Placeholder: user confirmation with `Close ticket` button.
+
+### Staff Topic
+
+Placeholder: staff forum topic with pinned ticket summary.
+
+### Staff Reply
+
+Placeholder: staff reply copied to user.
+
+### Ban Flow
+
+Placeholder: ban button or `/ban` command result.
+
+## Troubleshooting
+
+### Telegram API timeout
+
+Telegram API calls can time out because of network latency or Telegram-side issues. Restart the process, check logs, and make sure only one bot replica is running.
+
+### Wrong STAFF_CHAT_ID
+
+If `STAFF_CHAT_ID` is wrong, staff commands and buttons are ignored outside the configured chat. Confirm the id with `/chatid` in the staff group.
+
+### Bot does not create topics
+
+Check that:
+
+- the staff chat is a supergroup
+- Topics are enabled
+- the bot is an admin
+- the bot has Manage topics permission
+- `STAFF_CHAT_ID` starts with `-100`
+
+### Pinned message is not pinned
+
+The bot needs permission to pin messages. Ticket routing still works if pinning fails, but the summary may not stay pinned.
+
+### message_thread_id problems
+
+Each ticket stores `message_thread_id`. If a topic was deleted or becomes unavailable, the bot closes the broken active ticket and creates a fresh ticket on the next user message.
+
+### Duplicate topic creation
+
+The database enforces one active ticket per `user_telegram_id + staff_chat_id`. If simultaneous messages race, the second message waits briefly for the first topic to be created and then appends to it.
+
+### SQLite persistence on Railway
+
+Use:
+
+```bash
+DATABASE_URL=file:/data/support.db
+```
+
+with a Railway volume mounted at `/data`.
+
+## Security Notes
+
+- `.env` is ignored by git.
+- `.env.example` is safe to commit.
+- Database files are ignored by git.
+- Build artifacts are ignored by git.
+- Do not log `BOT_TOKEN`.
+- Do not commit real Telegram tokens.
+- Restrict staff group access to trusted staff.
+- Use one production bot token per deployment.
+- Keep Railway variables private.
+- User message bodies are stored in SQLite for support history and should not be added to logs.
+
+## Release Checklist
+
+- `npm run build` passes.
+- `BOT_TOKEN`, `STAFF_CHAT_ID`, and `DATABASE_URL` are configured.
+- Staff group is a supergroup with Topics enabled.
+- Bot admin permissions are correct.
+- Railway volume is mounted if deploying to Railway.
+- No real `.env` or database files are committed.

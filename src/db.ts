@@ -19,6 +19,7 @@ export interface TicketRecord {
   user_telegram_id: number;
   status: TicketStatus;
   staff_chat_id: number | null;
+  message_thread_id: number | null;
   staff_message_id: number | null;
   created_at: string;
   updated_at: string;
@@ -56,6 +57,14 @@ export interface StaffMessageLink {
   created_at: string;
 }
 
+export interface BannedUserRecord {
+  user_telegram_id: number;
+  username: string | null;
+  reason: string;
+  banned_by: number | null;
+  created_at: string;
+}
+
 export interface UserInput {
   telegramId: number;
   username?: string | null;
@@ -75,6 +84,23 @@ export interface AddMessageInput {
   text?: string | null;
   mediaType?: string | null;
   fileId?: string | null;
+}
+
+export interface BanUserInput {
+  userTelegramId: number;
+  username?: string | null;
+  reason: string;
+  bannedBy?: number | null;
+}
+
+interface TableColumnInfo {
+  name: string;
+}
+
+interface Migration {
+  id: number;
+  name: string;
+  up: () => void;
 }
 
 const TICKET_STATUSES: TicketStatus[] = ["OPEN", "WAITING_USER", "IN_PROGRESS", "CLOSED"];
@@ -215,7 +241,6 @@ export class SupportDatabase {
         SELECT * FROM tickets
         WHERE user_telegram_id = ?
           AND staff_chat_id = ?
-          AND staff_message_id IS NOT NULL
           AND status != 'CLOSED'
         ORDER BY id DESC
         LIMIT 1
@@ -248,6 +273,25 @@ export class SupportDatabase {
       `
       )
       .all(userTelegramId, staffChatId, limit) as TicketRecord[];
+  }
+
+  findTicketByStaffThread(staffChatId: number, messageThreadId: number): TicketWithUser | undefined {
+    return this.db
+      .prepare(
+        `
+        SELECT
+          tickets.*,
+          users.username,
+          users.first_name,
+          users.last_name
+        FROM tickets
+        JOIN users ON users.telegram_id = tickets.user_telegram_id
+        WHERE tickets.staff_chat_id = ? AND tickets.message_thread_id = ?
+        ORDER BY tickets.id DESC
+        LIMIT 1
+      `
+      )
+      .get(staffChatId, messageThreadId) as TicketWithUser | undefined;
   }
 
   closeOtherActiveTicketsForUserInStaffChat(
@@ -284,6 +328,18 @@ export class SupportDatabase {
       `
       )
       .run(staffChatId, staffMessageId, now(), ticketId);
+  }
+
+  updateTicketForumTopic(ticketId: number, staffChatId: number, messageThreadId: number): void {
+    this.db
+      .prepare(
+        `
+        UPDATE tickets
+        SET staff_chat_id = ?, message_thread_id = ?, updated_at = ?
+        WHERE id = ?
+      `
+      )
+      .run(staffChatId, messageThreadId, now(), ticketId);
   }
 
   updateTicketStatus(ticketId: number, status: TicketStatus): TicketRecord | undefined {
@@ -429,71 +485,268 @@ export class SupportDatabase {
       .get(staffChatId, staffMessageId) as StaffMessageLink | undefined;
   }
 
+  getBannedUser(userTelegramId: number): BannedUserRecord | undefined {
+    return this.db
+      .prepare("SELECT * FROM banned_users WHERE user_telegram_id = ?")
+      .get(userTelegramId) as BannedUserRecord | undefined;
+  }
+
+  banUser(input: BanUserInput): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO banned_users (user_telegram_id, username, reason, banned_by, created_at)
+        VALUES (@userTelegramId, @username, @reason, @bannedBy, @createdAt)
+        ON CONFLICT(user_telegram_id) DO UPDATE SET
+          username = excluded.username,
+          reason = excluded.reason,
+          banned_by = excluded.banned_by,
+          created_at = excluded.created_at
+      `
+      )
+      .run({
+        userTelegramId: input.userTelegramId,
+        username: input.username ?? null,
+        reason: input.reason,
+        bannedBy: input.bannedBy ?? null,
+        createdAt: now()
+      });
+  }
+
+  unbanUser(userTelegramId: number): boolean {
+    const result = this.db
+      .prepare("DELETE FROM banned_users WHERE user_telegram_id = ?")
+      .run(userTelegramId);
+
+    return result.changes > 0;
+  }
+
+  listBannedUsers(limit = 50): BannedUserRecord[] {
+    return this.db
+      .prepare(
+        `
+        SELECT * FROM banned_users
+        ORDER BY created_at DESC
+        LIMIT ?
+      `
+      )
+      .all(limit) as BannedUserRecord[];
+  }
+
   private migrate(): void {
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS users (
-        telegram_id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        last_name TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
       );
-
-      CREATE TABLE IF NOT EXISTS tickets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_telegram_id INTEGER NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('OPEN', 'WAITING_USER', 'IN_PROGRESS', 'CLOSED')),
-        staff_chat_id INTEGER,
-        staff_message_id INTEGER,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        closed_at TEXT,
-        FOREIGN KEY(user_telegram_id) REFERENCES users(telegram_id) ON DELETE CASCADE
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_tickets_user_status
-        ON tickets(user_telegram_id, status);
-
-      CREATE INDEX IF NOT EXISTS idx_tickets_user_staff_status
-        ON tickets(user_telegram_id, staff_chat_id, status);
-
-      CREATE INDEX IF NOT EXISTS idx_tickets_staff_message
-        ON tickets(staff_chat_id, staff_message_id);
-
-      CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ticket_id INTEGER NOT NULL,
-        direction TEXT NOT NULL CHECK(direction IN ('USER_TO_STAFF', 'STAFF_TO_USER', 'SYSTEM')),
-        source_chat_id INTEGER,
-        source_message_id INTEGER,
-        delivery_chat_id INTEGER,
-        delivery_message_id INTEGER,
-        from_telegram_id INTEGER,
-        from_username TEXT,
-        text TEXT,
-        media_type TEXT,
-        file_id TEXT,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_messages_ticket_created
-        ON messages(ticket_id, created_at);
-
-      CREATE TABLE IF NOT EXISTS staff_message_links (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ticket_id INTEGER NOT NULL,
-        staff_chat_id INTEGER NOT NULL,
-        staff_message_id INTEGER NOT NULL,
-        kind TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        UNIQUE(staff_chat_id, staff_message_id),
-        FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_staff_message_links_ticket
-        ON staff_message_links(ticket_id);
     `);
+
+    const migrations: Migration[] = [
+      {
+        id: 1,
+        name: "create_core_tables",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS users (
+              telegram_id INTEGER PRIMARY KEY,
+              username TEXT,
+              first_name TEXT,
+              last_name TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS tickets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_telegram_id INTEGER NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ('OPEN', 'WAITING_USER', 'IN_PROGRESS', 'CLOSED')),
+              staff_chat_id INTEGER,
+              message_thread_id INTEGER,
+              staff_message_id INTEGER,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              closed_at TEXT,
+              FOREIGN KEY(user_telegram_id) REFERENCES users(telegram_id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ticket_id INTEGER NOT NULL,
+              direction TEXT NOT NULL CHECK(direction IN ('USER_TO_STAFF', 'STAFF_TO_USER', 'SYSTEM')),
+              source_chat_id INTEGER,
+              source_message_id INTEGER,
+              delivery_chat_id INTEGER,
+              delivery_message_id INTEGER,
+              from_telegram_id INTEGER,
+              from_username TEXT,
+              text TEXT,
+              media_type TEXT,
+              file_id TEXT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS staff_message_links (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ticket_id INTEGER NOT NULL,
+              staff_chat_id INTEGER NOT NULL,
+              staff_message_id INTEGER NOT NULL,
+              kind TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE(staff_chat_id, staff_message_id),
+              FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            );
+          `);
+        }
+      },
+      {
+        id: 2,
+        name: "ensure_ticket_topic_columns",
+        up: () => {
+          this.addColumnIfMissing("tickets", "staff_chat_id", "INTEGER");
+          this.addColumnIfMissing("tickets", "message_thread_id", "INTEGER");
+          this.addColumnIfMissing("tickets", "staff_message_id", "INTEGER");
+          this.addColumnIfMissing("tickets", "closed_at", "TEXT");
+        }
+      },
+      {
+        id: 3,
+        name: "create_banned_users",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS banned_users (
+              user_telegram_id INTEGER PRIMARY KEY,
+              username TEXT,
+              reason TEXT NOT NULL,
+              banned_by INTEGER,
+              created_at TEXT NOT NULL
+            );
+          `);
+        }
+      },
+      {
+        id: 4,
+        name: "create_indexes",
+        up: () => {
+          this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_tickets_user_status
+              ON tickets(user_telegram_id, status);
+
+            CREATE INDEX IF NOT EXISTS idx_tickets_user_staff_status
+              ON tickets(user_telegram_id, staff_chat_id, status);
+
+            CREATE INDEX IF NOT EXISTS idx_tickets_staff_thread
+              ON tickets(staff_chat_id, message_thread_id);
+
+            CREATE INDEX IF NOT EXISTS idx_tickets_staff_message
+              ON tickets(staff_chat_id, staff_message_id);
+
+            CREATE INDEX IF NOT EXISTS idx_messages_ticket_created
+              ON messages(ticket_id, created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_staff_message_links_ticket
+              ON staff_message_links(ticket_id);
+          `);
+        }
+      },
+      {
+        id: 5,
+        name: "enforce_single_active_ticket_per_staff_chat",
+        up: () => {
+          const timestamp = now();
+          this.db
+            .prepare(
+              `
+              UPDATE tickets
+              SET status = 'CLOSED',
+                  updated_at = ?,
+                  closed_at = COALESCE(closed_at, ?)
+              WHERE status != 'CLOSED'
+                AND id NOT IN (
+                  SELECT MAX(id)
+                  FROM tickets
+                  WHERE status != 'CLOSED'
+                  GROUP BY user_telegram_id, staff_chat_id
+                )
+            `
+            )
+            .run(timestamp, timestamp);
+
+          this.db.exec(`
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_ticket_user_staff
+              ON tickets(user_telegram_id, staff_chat_id)
+              WHERE status != 'CLOSED';
+          `);
+        }
+      },
+      {
+        id: 6,
+        name: "harden_existing_forum_topic_schema",
+        up: () => {
+          const timestamp = now();
+          this.db
+            .prepare(
+              `
+              UPDATE tickets
+              SET status = 'CLOSED',
+                  updated_at = ?,
+                  closed_at = COALESCE(closed_at, ?)
+              WHERE status != 'CLOSED'
+                AND (staff_chat_id IS NULL OR message_thread_id IS NULL)
+            `
+            )
+            .run(timestamp, timestamp);
+
+          this.db.exec(`
+            DELETE FROM staff_message_links
+            WHERE id NOT IN (
+              SELECT MIN(id)
+              FROM staff_message_links
+              GROUP BY staff_chat_id, staff_message_id
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_staff_message_links_staff_message
+              ON staff_message_links(staff_chat_id, staff_message_id);
+          `);
+        }
+      }
+    ];
+
+    for (const migration of migrations) {
+      if (this.hasMigration(migration.id)) {
+        continue;
+      }
+
+      const applyMigration = this.db.transaction(() => {
+        migration.up();
+        this.db
+          .prepare("INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)")
+          .run(migration.id, migration.name, now());
+      });
+
+      applyMigration();
+    }
+  }
+
+  private hasMigration(id: number): boolean {
+    const row = this.db
+      .prepare("SELECT id FROM schema_migrations WHERE id = ?")
+      .get(id) as { id: number } | undefined;
+
+    return Boolean(row);
+  }
+
+  private hasColumn(tableName: "tickets", columnName: string): boolean {
+    const rows = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as TableColumnInfo[];
+    return rows.some((row) => row.name === columnName);
+  }
+
+  private addColumnIfMissing(tableName: "tickets", columnName: string, columnDefinition: string): void {
+    if (this.hasColumn(tableName, columnName)) {
+      return;
+    }
+
+    this.db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition};`);
   }
 }

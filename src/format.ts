@@ -1,4 +1,10 @@
-import type { TicketMessageRecord, TicketRecord, TicketStatus, TicketWithUser } from "./db.js";
+import type {
+  BannedUserRecord,
+  TicketMessageRecord,
+  TicketRecord,
+  TicketStatus,
+  TicketWithUser
+} from "./db.js";
 import { displayTelegramUser } from "./telegram.js";
 
 export const START_TEXT =
@@ -30,7 +36,25 @@ export function formatTicketPost(ticket: TicketWithUser, initialMessage?: string
     `Status: ${ticket.status}`,
     `Message: ${message}`,
     "",
-    "Reply to this message to answer the user."
+    "Write in this topic to answer the user."
+  ].join("\n");
+}
+
+export function formatPinnedTicketSummary(ticket: TicketWithUser): string {
+  return [
+    `Ticket #${ticket.id}`,
+    "",
+    "User:",
+    displayTelegramUser(ticket),
+    "",
+    "Telegram ID:",
+    String(ticket.user_telegram_id),
+    "",
+    "Created:",
+    formatDate(ticket.created_at),
+    "",
+    "Status:",
+    ticket.status
   ].join("\n");
 }
 
@@ -46,7 +70,7 @@ export function formatTicketUpdate(
     `Status: ${ticket.status}`,
     `Message: ${truncate(message?.trim() || NO_TEXT, 2600)}`,
     "",
-    "Reply to this message to answer the user."
+    "Write in this topic to answer the user."
   ].join("\n");
 }
 
@@ -71,6 +95,23 @@ export function formatTicketDetails(ticket: TicketWithUser, messages: TicketMess
       const body = truncate(message.text?.trim() || message.media_type || NO_TEXT, 500);
       lines.push(`- ${formatDate(message.created_at)} ${author}: ${body}`);
     }
+  }
+
+  return lines.join("\n");
+}
+
+export function formatWhois(ticket: TicketWithUser, ban?: BannedUserRecord): string {
+  const lines = [
+    `Ticket ID: ${ticket.id}`,
+    `Username: ${ticket.username ? `@${ticket.username}` : "none"}`,
+    `Telegram ID: ${ticket.user_telegram_id}`,
+    `Status: ${ticket.status}`,
+    `Created: ${formatDate(ticket.created_at)}`,
+    `Ban status: ${ban ? "BANNED" : "not banned"}`
+  ];
+
+  if (ban) {
+    lines.push(`Ban reason: ${ban.reason}`, `Banned at: ${formatDate(ban.created_at)}`);
   }
 
   return lines.join("\n");
