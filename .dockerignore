@@ -1,0 +1,9 @@
+node_modules
+dist
+.env
+.git
+.gitignore
+data
+*.log
+work
+outputs
