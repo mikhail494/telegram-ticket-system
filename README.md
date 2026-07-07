@@ -13,6 +13,7 @@ Users message the bot in private chat. The bot creates or updates a support tick
 - Staff photo/document/media replies are copied back to users
 - User photos/documents are copied into the staff ticket reply chain
 - Inline staff buttons: close, waiting user, in progress
+- General commands: `/chatid`
 - User commands: `/status`, `/mytickets`
 - Staff commands: `/ticket ID`, `/close ID`
 - Error logging with pino and staff-group delivery failure notices
@@ -62,7 +63,7 @@ DATABASE_URL=file:/data/support.db
 4. Keep BotFather privacy mode enabled or disable it; this bot only needs commands and replies to its own ticket messages in the staff group.
 5. Make sure staff reply directly to the bot's ticket message or to messages in that ticket reply chain.
 
-To find `STAFF_CHAT_ID`, add the bot to the staff group, send a message in the group, then temporarily run the bot locally and check logs or call Telegram `getUpdates` while the bot is not running.
+To find `STAFF_CHAT_ID`, add the bot to the staff group and run `/chatid` in that group. Copy the returned `Chat ID` value into `.env`.
 
 ## Local Development
 
@@ -98,6 +99,7 @@ Staff can:
 - Reply to the ticket message to answer the user
 - Reply with text, photo, document, or other copyable Telegram media
 - Click `Close ticket`, `Mark waiting user`, or `Mark in progress`
+- Run `/chatid` to show the current Telegram chat id
 - Run `/ticket ID` to view details and recent messages
 - Run `/close ID` to close a ticket
 
@@ -139,5 +141,6 @@ DATABASE_URL=file:/data/support.db
 
 - The bot accepts new tickets only in private chats.
 - Random group messages are ignored unless they are replies to known ticket messages in `STAFF_CHAT_ID`.
+- Active tickets are scoped to the current `STAFF_CHAT_ID`, so changing the staff group starts a fresh support queue without deleting the database.
 - The database schema is created automatically on startup.
 - No secrets are hardcoded; all runtime configuration comes from environment variables.

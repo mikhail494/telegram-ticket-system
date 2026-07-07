@@ -33,13 +33,21 @@ export function createBot(db: SupportDatabase): Bot<Context> {
     await ctx.reply(START_TEXT);
   });
 
+  bot.command("chatid", async (ctx) => {
+    if (!ctx.chat) {
+      return;
+    }
+
+    await ctx.reply(`Chat ID: ${ctx.chat.id}`);
+  });
+
   bot.command("status", async (ctx) => {
     if (!isPrivateChat(ctx) || !ctx.from) {
       return;
     }
 
     persistUserFromContext(db, ctx);
-    const ticket = db.getLatestTicketForUser(ctx.from.id);
+    const ticket = db.getLatestTicketForUser(ctx.from.id, config.staffChatId);
     if (!ticket) {
       await ctx.reply("You do not have any tickets yet. Send a message here to create one.");
       return;
@@ -54,7 +62,7 @@ export function createBot(db: SupportDatabase): Bot<Context> {
     }
 
     persistUserFromContext(db, ctx);
-    await ctx.reply(formatUserTicketList(db.listTicketsForUser(ctx.from.id)));
+    await ctx.reply(formatUserTicketList(db.listTicketsForUser(ctx.from.id, config.staffChatId)));
   });
 
   bot.command("ticket", async (ctx) => {
@@ -72,8 +80,8 @@ export function createBot(db: SupportDatabase): Bot<Context> {
     }
 
     const ticket = db.getTicketWithUser(ticketId);
-    if (!ticket) {
-      await ctx.reply(`Ticket #${ticketId} was not found.`);
+    if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+      await ctx.reply(`Ticket #${ticketId} was not found in this staff chat.`);
       return;
     }
 
@@ -126,6 +134,12 @@ export function createBot(db: SupportDatabase): Bot<Context> {
     }
 
     if (action === "close") {
+      const ticket = db.getTicket(ticketId);
+      if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+        await ctx.answerCallbackQuery({ text: "Ticket not found in this staff chat." });
+        return;
+      }
+
       const result = await closeTicket(
         db,
         ctx.api,
@@ -140,6 +154,11 @@ export function createBot(db: SupportDatabase): Bot<Context> {
       const currentTicket = db.getTicket(ticketId);
       if (!currentTicket) {
         await ctx.answerCallbackQuery({ text: "Ticket not found." });
+        return;
+      }
+
+      if (currentTicket.staff_chat_id !== config.staffChatId) {
+        await ctx.answerCallbackQuery({ text: "Ticket not found in this staff chat." });
         return;
       }
 
@@ -202,6 +221,7 @@ export function createBot(db: SupportDatabase): Bot<Context> {
 export async function setBotCommands(bot: Bot<Context>): Promise<void> {
   await bot.api.setMyCommands([
     { command: "start", description: "Start support" },
+    { command: "chatid", description: "Show this chat id" },
     { command: "status", description: "Show your latest ticket status" },
     { command: "mytickets", description: "Show your recent tickets" }
   ]);
@@ -219,13 +239,21 @@ async function handlePrivateUserMessage(db: SupportDatabase, ctx: Context): Prom
 
   persistUserFromContext(db, ctx);
 
-  const activeTicket = db.findActiveTicketForUser(ctx.from.id);
+  const activeTicket = db.findActiveTicketForUser(ctx.from.id, config.staffChatId);
   if (activeTicket) {
     await appendToExistingTicket(db, ctx, activeTicket);
     return;
   }
 
-  const ticket = db.createTicket(ctx.from.id);
+  await createFreshTicketFromUserMessage(db, ctx);
+}
+
+async function createFreshTicketFromUserMessage(db: SupportDatabase, ctx: Context): Promise<void> {
+  if (!ctx.from || !ctx.chat || !ctx.message) {
+    return;
+  }
+
+  const ticket = db.createTicket(ctx.from.id, config.staffChatId);
   const content = getMessageContent(ctx.message);
   db.addMessage({
     ticketId: ticket.id,
@@ -241,10 +269,12 @@ async function handlePrivateUserMessage(db: SupportDatabase, ctx: Context): Prom
 
   const staffMessageId = await ensureStaffTicketMessage(db, ctx.api, ticket.id);
   if (!staffMessageId) {
+    db.updateTicketStatus(ticket.id, "CLOSED");
     await ctx.reply("Sorry, we could not route your request to support. Please try again later.");
     return;
   }
 
+  db.closeOtherActiveTicketsForUserInStaffChat(ctx.from.id, config.staffChatId, ticket.id);
   await maybeCopyOriginalMessageToStaff(db, ctx, ticket.id, staffMessageId, content.shouldCopyOriginal);
   await ctx.reply(RECEIVED_TEXT);
 }
@@ -258,52 +288,79 @@ async function appendToExistingTicket(
     return;
   }
 
+  if (
+    activeTicket.staff_chat_id !== config.staffChatId ||
+    activeTicket.staff_message_id === null
+  ) {
+    logger.warn(
+      { ticketId: activeTicket.id, staffChatId: activeTicket.staff_chat_id },
+      "Active ticket is not attached to the current staff chat"
+    );
+    db.updateTicketStatus(activeTicket.id, "CLOSED");
+    await createFreshTicketFromUserMessage(db, ctx);
+    return;
+  }
+
   const content = getMessageContent(ctx.message);
-  db.addMessage({
-    ticketId: activeTicket.id,
-    direction: "USER_TO_STAFF",
-    sourceChatId: ctx.chat.id,
-    sourceMessageId: ctx.message.message_id,
-    fromTelegramId: ctx.from.id,
-    fromUsername: usernameOf(ctx.from),
-    text: content.text,
-    mediaType: content.mediaType,
-    fileId: content.fileId
-  });
 
   const ticket =
     activeTicket.status === "WAITING_USER"
-      ? db.updateTicketStatus(activeTicket.id, "OPEN") ?? activeTicket
+      ? { ...activeTicket, status: "OPEN" as const }
       : activeTicket;
 
-  const staffMessageId = await ensureStaffTicketMessage(db, ctx.api, ticket.id);
-  if (staffMessageId) {
-    try {
-      const sent = await ctx.api.sendMessage(
-        config.staffChatId,
-        formatTicketUpdate(ticket, ctx.from, content.text),
-        {
-          reply_parameters: { message_id: staffMessageId }
-        }
-      );
-      db.linkStaffMessage(ticket.id, sent.chat.id, sent.message_id, "user_update");
-      await maybeCopyOriginalMessageToStaff(
-        db,
-        ctx,
-        ticket.id,
-        sent.message_id,
-        content.shouldCopyOriginal
-      );
-      await refreshStaffTicketMessage(db, ctx.api, ticket.id);
-    } catch (error) {
-      logger.error({ err: error, ticketId: ticket.id }, "Could not notify staff about user update");
+  try {
+    const sent = await ctx.api.sendMessage(
+      config.staffChatId,
+      formatTicketUpdate(ticket, ctx.from, content.text),
+      {
+        reply_parameters: { message_id: activeTicket.staff_message_id }
+      }
+    );
+
+    db.addMessage({
+      ticketId: activeTicket.id,
+      direction: "USER_TO_STAFF",
+      sourceChatId: ctx.chat.id,
+      sourceMessageId: ctx.message.message_id,
+      fromTelegramId: ctx.from.id,
+      fromUsername: usernameOf(ctx.from),
+      text: content.text,
+      mediaType: content.mediaType,
+      fileId: content.fileId
+    });
+
+    if (activeTicket.status === "WAITING_USER") {
+      db.updateTicketStatus(activeTicket.id, "OPEN");
     }
-  } else {
-    logger.error({ ticketId: ticket.id }, "Could not create or find staff ticket message");
+
+    db.linkStaffMessage(activeTicket.id, sent.chat.id, sent.message_id, "user_update");
+    await maybeCopyOriginalMessageToStaff(
+      db,
+      ctx,
+      activeTicket.id,
+      sent.message_id,
+      content.shouldCopyOriginal
+    );
+    await refreshStaffTicketMessage(db, ctx.api, activeTicket.id);
+    db.closeOtherActiveTicketsForUserInStaffChat(ctx.from.id, config.staffChatId, activeTicket.id);
+  } catch (error) {
+    if (isReplyMessageNotFound(error)) {
+      logger.warn(
+        { err: error, ticketId: activeTicket.id, staffMessageId: activeTicket.staff_message_id },
+        "Staff ticket message is missing; creating a fresh ticket"
+      );
+      db.updateTicketStatus(activeTicket.id, "CLOSED");
+      await createFreshTicketFromUserMessage(db, ctx);
+      return;
+    }
+
+    logger.error({ err: error, ticketId: activeTicket.id }, "Could not notify staff about user update");
+    await ctx.reply("Sorry, we could not route your update to support. Please try again later.");
+    return;
   }
 
   await ctx.reply(
-    `We added your message to your existing ticket #${ticket.id}. Our support team will get back to you soon.`
+    `We added your message to your existing ticket #${activeTicket.id}. Our support team will get back to you soon.`
   );
 }
 
@@ -323,7 +380,7 @@ async function handleStaffGroupMessage(db: SupportDatabase, ctx: Context): Promi
   }
 
   const ticket = db.getTicketWithUser(link.ticket_id);
-  if (!ticket) {
+  if (!ticket || ticket.staff_chat_id !== ctx.chat.id) {
     await ctx.reply("This ticket no longer exists.", {
       reply_parameters: { message_id: ctx.message.message_id }
     });
@@ -391,12 +448,16 @@ async function ensureStaffTicketMessage(
   ticketId: number
 ): Promise<number | null> {
   const existing = db.getTicket(ticketId);
-  if (existing?.staff_message_id) {
+  if (!existing || existing.staff_chat_id !== config.staffChatId) {
+    return null;
+  }
+
+  if (existing.staff_message_id) {
     return existing.staff_message_id;
   }
 
   const ticket = db.getTicketWithUser(ticketId);
-  if (!ticket) {
+  if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
     return null;
   }
 
@@ -447,7 +508,11 @@ async function refreshStaffTicketMessage(
   ticketId: number
 ): Promise<void> {
   const ticket = db.getTicketWithUser(ticketId);
-  if (!ticket?.staff_chat_id || !ticket.staff_message_id) {
+  if (
+    !ticket?.staff_chat_id ||
+    ticket.staff_chat_id !== config.staffChatId ||
+    !ticket.staff_message_id
+  ) {
     return;
   }
 
@@ -478,8 +543,8 @@ async function closeTicket(
   replyToMessageId?: number
 ): Promise<string> {
   const ticket = db.getTicketWithUser(ticketId);
-  if (!ticket) {
-    return `Ticket #${ticketId} was not found.`;
+  if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+    return `Ticket #${ticketId} was not found in this staff chat.`;
   }
 
   if (ticket.status === "CLOSED") {
@@ -574,6 +639,15 @@ function describeError(error: unknown): string {
   }
 
   return String(error);
+}
+
+function isReplyMessageNotFound(error: unknown): boolean {
+  const message = describeError(error).toLowerCase();
+  return (
+    message.includes("message to be replied not found") ||
+    message.includes("reply message not found") ||
+    message.includes("replied message not found")
+  );
 }
 
 function messageHasTextOrSupportedMedia(message: Message | undefined): boolean {
