@@ -11,7 +11,7 @@ export const START_TEXT =
   "Hi! Please describe your issue in one message. Include your AgentOn UID, wallet address, quest link, screenshots or transaction hash if relevant.";
 
 export const RECEIVED_TEXT =
-  "Thanks, your request has been received. Our support team will get back to you soon.";
+  "Thanks, your request has been received.\n\nOur support team will get back to you soon.\n\nYou can continue sending messages in this chat until your ticket is closed.";
 
 export const CLOSED_TEXT =
   "Your ticket has been closed. If you still need help, send a new message.";
@@ -59,19 +59,38 @@ export function formatPinnedTicketSummary(ticket: TicketWithUser): string {
 }
 
 export function formatTicketUpdate(
-  ticket: TicketRecord,
   user: { username?: string | null; first_name?: string | null; last_name?: string | null },
-  message?: string | null
+  message?: string | null,
+  mediaType?: string | null,
+  filename?: string | null
 ): string {
-  return [
-    `New message for ticket #${ticket.id}`,
-    `From: ${displayTelegramUser(user)}`,
-    `User ID: ${ticket.user_telegram_id}`,
-    `Status: ${ticket.status}`,
-    `Message: ${truncate(message?.trim() || NO_TEXT, 2600)}`,
-    "",
-    "Write in this topic to answer the user."
-  ].join("\n");
+  const lines = [displayTelegramUser(user), ""];
+  const text = message?.trim();
+
+  if (text) {
+    lines.push(truncate(text, 2600));
+  }
+
+  if (mediaType) {
+    if (text) {
+      lines.push("");
+    }
+    lines.push(formatAttachment(mediaType, filename));
+  }
+
+  if (!text && !mediaType) {
+    lines.push(NO_TEXT);
+  }
+
+  return lines.join("\n");
+}
+
+function formatAttachment(mediaType: string, filename?: string | null): string {
+  if (mediaType === "document" && filename) {
+    return `Attachment: document: ${filename}`;
+  }
+
+  return `Attachment: ${mediaType}`;
 }
 
 export function formatTicketDetails(ticket: TicketWithUser, messages: TicketMessageRecord[]): string {

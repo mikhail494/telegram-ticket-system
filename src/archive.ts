@@ -15,9 +15,18 @@ import { displayTelegramUser } from "./telegram.js";
 import { logger } from "./logger.js";
 
 const SUPPORT_LOGS_TOPIC_NAME = "📜 Support Logs";
-const SUPPORT_LOGS_THREAD_SETTING = "support_logs_message_thread_id";
+const SUPPORT_LOGS_THREAD_SETTING_PREFIX = "support_logs_message_thread_id";
 
 type BotApi = Context["api"];
+
+interface TranscriptDelivery {
+  summaryMessageId: number;
+  documentMessageId: number;
+}
+
+interface SendTranscriptOptions {
+  recreateTopic?: boolean;
+}
 
 export interface ArchiveActor {
   type: MessageSenderType;
@@ -35,22 +44,46 @@ export interface BanLogInput {
 }
 
 type TopicVerification = "ok" | "closed" | "missing";
+type SupportLogsTopicState = "reachable" | "reopened" | "created";
+
+export interface SupportLogsTopicInfo {
+  threadId: number;
+  previousThreadId: number | null;
+  state: SupportLogsTopicState;
+}
 
 export async function initializeSupportLogsTopic(
   api: BotApi,
   db: SupportDatabase
 ): Promise<number> {
-  const storedThreadId = parseStoredThreadId(db.getSetting(SUPPORT_LOGS_THREAD_SETTING));
+  const topic = await getSupportLogsTopicInfo(api, db);
+  return topic.threadId;
+}
+
+export async function getSupportLogsTopicInfo(
+  api: BotApi,
+  db: SupportDatabase
+): Promise<SupportLogsTopicInfo> {
+  const settingKey = supportLogsThreadSettingKey();
+  const storedThreadId = parseStoredThreadId(db.getSetting(settingKey));
   if (storedThreadId) {
     const verification = await verifyForumTopic(api, storedThreadId);
     if (verification === "ok") {
-      return storedThreadId;
+      return {
+        threadId: storedThreadId,
+        previousThreadId: null,
+        state: "reachable"
+      };
     }
 
     if (verification === "closed") {
       try {
         await api.reopenForumTopic(config.staffChatId, storedThreadId);
-        return storedThreadId;
+        return {
+          threadId: storedThreadId,
+          previousThreadId: null,
+          state: "reopened"
+        };
       } catch (error) {
         if (!isForumTopicUnavailable(error)) {
           throw error;
@@ -60,7 +93,21 @@ export async function initializeSupportLogsTopic(
   }
 
   const topic = await api.createForumTopic(config.staffChatId, SUPPORT_LOGS_TOPIC_NAME);
-  db.setSetting(SUPPORT_LOGS_THREAD_SETTING, String(topic.message_thread_id));
+  db.setSetting(settingKey, String(topic.message_thread_id));
+  return {
+    threadId: topic.message_thread_id,
+    previousThreadId: storedThreadId ?? null,
+    state: "created"
+  };
+}
+
+export function setSupportLogsTopicOverride(db: SupportDatabase, messageThreadId: number): void {
+  db.setSetting(supportLogsThreadSettingKey(), String(messageThreadId));
+}
+
+async function recreateSupportLogsTopic(api: BotApi, db: SupportDatabase): Promise<number> {
+  const topic = await api.createForumTopic(config.staffChatId, SUPPORT_LOGS_TOPIC_NAME);
+  db.setSetting(supportLogsThreadSettingKey(), String(topic.message_thread_id));
   return topic.message_thread_id;
 }
 
@@ -97,31 +144,34 @@ export async function archiveTicketIfPossible(
   const transcript = buildTranscript(ticket, messages);
   const filename = `ticket-${ticket.id}-transcript.txt`;
   const tempFile = await writeTemporaryTranscript(filename, transcript);
-  let summaryMessageId: number | null = null;
 
   try {
-    const logsThreadId = await initializeSupportLogsTopic(api, db);
-    const summary = await api.sendMessage(config.staffChatId, formatTicketClosedLog(ticket), {
-      message_thread_id: logsThreadId
-    });
-    summaryMessageId = summary.message_id;
-
-    const document = await api.sendDocument(
-      config.staffChatId,
-      new InputFile(tempFile.filePath, filename),
-      {
-        message_thread_id: logsThreadId
-      }
-    );
-
-    db.markTicketArchivedAndDeleteMessages(ticket.id, summary.message_id, document.message_id);
+    const delivery = await sendTranscriptToSupportLogs(api, db, ticket, tempFile.filePath, filename);
+    db.markTicketArchivedAndDeleteMessages(ticket.id, delivery.summaryMessageId, delivery.documentMessageId);
     await removeTicketTopicAfterArchive(api, ticket);
     return true;
   } catch (error) {
-    logger.error({ err: error, ticketId: ticket.id }, "Could not archive ticket transcript");
-    if (summaryMessageId !== null) {
-      await deleteMessageSafely(api, config.staffChatId, summaryMessageId);
+    if (isForumTopicUnavailable(error)) {
+      logger.warn(
+        { err: error, ticketId: ticket.id },
+        "Support Logs topic is unavailable; recreating and retrying transcript upload"
+      );
+
+      try {
+        const delivery = await sendTranscriptToSupportLogs(api, db, ticket, tempFile.filePath, filename, {
+          recreateTopic: true
+        });
+        db.markTicketArchivedAndDeleteMessages(ticket.id, delivery.summaryMessageId, delivery.documentMessageId);
+        await removeTicketTopicAfterArchive(api, ticket);
+        return true;
+      } catch (retryError) {
+        logger.error({ err: retryError, ticketId: ticket.id }, "Could not archive ticket transcript after retry");
+        await notifyTicketTopicArchiveFailure(api, ticket, describeError(retryError));
+        return false;
+      }
     }
+
+    logger.error({ err: error, ticketId: ticket.id }, "Could not archive ticket transcript");
     await notifyTicketTopicArchiveFailure(api, ticket, describeError(error));
     return false;
   } finally {
@@ -194,6 +244,50 @@ function parseStoredThreadId(value: string | undefined): number | null {
 
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function supportLogsThreadSettingKey(): string {
+  return `${SUPPORT_LOGS_THREAD_SETTING_PREFIX}:${config.staffChatId}`;
+}
+
+async function sendTranscriptToSupportLogs(
+  api: BotApi,
+  db: SupportDatabase,
+  ticket: TicketWithUser,
+  filePath: string,
+  filename: string,
+  options: SendTranscriptOptions = {}
+): Promise<TranscriptDelivery> {
+  const logsThreadId = options.recreateTopic
+    ? await recreateSupportLogsTopic(api, db)
+    : await initializeSupportLogsTopic(api, db);
+  let summaryMessageId: number | null = null;
+
+  try {
+    const summary = await api.sendMessage(config.staffChatId, formatTicketClosedLog(ticket), {
+      message_thread_id: logsThreadId
+    });
+    summaryMessageId = summary.message_id;
+
+    const document = await api.sendDocument(
+      config.staffChatId,
+      new InputFile(filePath, filename),
+      {
+        message_thread_id: logsThreadId
+      }
+    );
+
+    return {
+      summaryMessageId: summary.message_id,
+      documentMessageId: document.message_id
+    };
+  } catch (error) {
+    if (summaryMessageId !== null) {
+      await deleteMessageSafely(api, config.staffChatId, summaryMessageId);
+    }
+
+    throw error;
+  }
 }
 
 function buildTranscript(ticket: TicketWithUser, messages: TicketMessageRecord[]): string {

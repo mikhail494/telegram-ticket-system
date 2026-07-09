@@ -1,6 +1,6 @@
 import { config } from "./config.js";
 import { SupportDatabase } from "./db.js";
-import { createBot, setBotCommands } from "./bot.js";
+import { createBot, sendStaffOnboardingIfNeeded, setBotCommands } from "./bot.js";
 import { logger } from "./logger.js";
 import { archiveClosedTicketsPendingUpload, initializeSupportLogsTopic } from "./archive.js";
 
@@ -12,6 +12,7 @@ async function main(): Promise<void> {
   await initializeSupportLogsTopic(bot.api, db);
   await archiveClosedTicketsPendingUpload(bot.api, db);
   await setBotCommands(bot);
+  await sendStaffOnboardingIfNeeded(bot.api, db);
 
   const shutdown = (signal: NodeJS.Signals) => {
     logger.info({ signal }, "Stopping bot");

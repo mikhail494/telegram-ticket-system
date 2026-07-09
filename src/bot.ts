@@ -3,7 +3,10 @@ import type { CommandContext, Context } from "grammy";
 import type { Message } from "grammy/types";
 import {
   archiveTicketIfPossible,
+  getSupportLogsTopicInfo,
   logBanEvent,
+  setSupportLogsTopicOverride,
+  type SupportLogsTopicInfo,
   type ArchiveActor
 } from "./archive.js";
 import { config } from "./config.js";
@@ -33,6 +36,71 @@ import {
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
 const DEFAULT_BAN_REASON = "No reason provided.";
+const STAFF_HELP_SENT_SETTING_PREFIX = "staff_help_sent";
+
+const USER_HELP_TEXT = [
+  "Support help",
+  "",
+  "Send one message here to open a ticket. You can include your AgentOn UID, wallet address, quest link, screenshots, documents, or transaction hash.",
+  "",
+  "Only one open ticket is active at a time. While it is open, keep sending messages in this chat and they will be added to the same ticket.",
+  "",
+  "Use the Close ticket button when the issue is solved. After the ticket is closed, your next message opens a new ticket.",
+  "",
+  "Commands:",
+  "/start - show the initial instructions",
+  "/status - show your latest ticket status",
+  "/mytickets - show your recent tickets",
+  "/help - show this help"
+].join("\n");
+
+const STAFF_HELP_TEXT = [
+  "Staff help",
+  "",
+  "Workflow:",
+  "- One ticket = one forum topic.",
+  "- The first ticket message contains metadata and controls.",
+  "- Follow-up user messages are compact.",
+  "- Staff replies in the ticket topic are forwarded to the user.",
+  "- Users only get automatic messages when a ticket opens and closes.",
+  "- Closed tickets are archived to Support Logs as a .txt transcript.",
+  "- Ticket topics are deleted or closed after archive when Telegram allows it.",
+  "- Support Logs are scoped per STAFF_CHAT_ID.",
+  "- If Support Logs is missing, the bot creates it automatically.",
+  "",
+  "Staff commands:",
+  "/help - show this help",
+  "/chatid - show current chat id",
+  "/whois - show current ticket/user info inside a ticket topic",
+  "/ticket <id> - show ticket details",
+  "/close <id> - close ticket",
+  "/ban <telegram_id> [reason] - ban user from opening tickets",
+  "/unban <telegram_id> - unban user",
+  "/bans - list banned users",
+  "/setlogs - use current topic as Support Logs",
+  "/logs - show/create current Support Logs topic status"
+].join("\n");
+
+const STAFF_ONBOARDING_TEXT = [
+  "Support bot is configured for this staff group.",
+  "",
+  "Key workflow:",
+  "- One ticket = one forum topic.",
+  "- Staff replies inside a ticket topic are forwarded to the user.",
+  "- Follow-up user messages stay compact in the same topic.",
+  "- Users only receive automatic messages when a ticket opens and closes.",
+  "- Closed tickets are archived to Support Logs as .txt transcripts.",
+  "",
+  "Commands:",
+  "/help, /chatid, /whois, /ticket <id>, /close <id>",
+  "/ban <telegram_id> [reason], /unban <telegram_id>, /bans",
+  "/setlogs, /logs",
+  "",
+  "Run /setlogs inside any topic to make it Support Logs.",
+  "Run /logs to show or create the current Support Logs topic.",
+  "",
+  "This onboarding message is sent only once per STAFF_CHAT_ID."
+].join("\n");
 
 type BotApi = Context["api"];
 
@@ -68,6 +136,21 @@ export function createBot(db: SupportDatabase): Bot<Context> {
     await ctx.reply(START_TEXT);
   });
 
+  bot.command("help", async (ctx) => {
+    if (isPrivateChat(ctx)) {
+      await ctx.reply(USER_HELP_TEXT);
+      return;
+    }
+
+    if (!isStaffChat(ctx)) {
+      return;
+    }
+
+    await ctx.reply(STAFF_HELP_TEXT, {
+      message_thread_id: ctx.message?.message_thread_id
+    });
+  });
+
   bot.command("chatid", async (ctx) => {
     if (isPrivateChat(ctx)) {
       if (await replyIfBanned(db, ctx)) {
@@ -83,6 +166,40 @@ export function createBot(db: SupportDatabase): Bot<Context> {
     }
 
     await ctx.reply(`Chat ID: ${ctx.chat.id}`);
+  });
+
+  bot.command("setlogs", async (ctx) => {
+    if (!isStaffChat(ctx)) {
+      if (isPrivateChat(ctx)) {
+        await ctx.reply(STAFF_ONLY_TEXT);
+      }
+      return;
+    }
+
+    const messageThreadId = ctx.message?.message_thread_id;
+    if (typeof messageThreadId !== "number") {
+      await ctx.reply("Please run /setlogs inside the forum topic you want to use as Support Logs.");
+      return;
+    }
+
+    setSupportLogsTopicOverride(db, messageThreadId);
+    await ctx.reply("This topic is now used as Support Logs.", {
+      message_thread_id: messageThreadId
+    });
+  });
+
+  bot.command("logs", async (ctx) => {
+    if (!isStaffChat(ctx)) {
+      if (isPrivateChat(ctx)) {
+        await ctx.reply(STAFF_ONLY_TEXT);
+      }
+      return;
+    }
+
+    const topic = await getSupportLogsTopicInfo(ctx.api, db);
+    await ctx.reply(formatSupportLogsTopicInfo(topic), {
+      message_thread_id: ctx.message?.message_thread_id
+    });
   });
 
   bot.command("status", async (ctx) => {
@@ -323,21 +440,42 @@ export async function setBotCommands(bot: Bot<Context>): Promise<void> {
   await bot.api.setMyCommands([
     { command: "start", description: "Start support" },
     { command: "status", description: "Show your latest ticket status" },
-    { command: "mytickets", description: "Show your recent tickets" }
+    { command: "mytickets", description: "Show your recent tickets" },
+    { command: "help", description: "Show help" }
   ]);
 
   await bot.api.setMyCommands(
     [
+      { command: "help", description: "Show staff help" },
       { command: "chatid", description: "Show this chat id" },
       { command: "ticket", description: "Show ticket details" },
       { command: "close", description: "Close a ticket" },
       { command: "ban", description: "Ban a user from support" },
       { command: "unban", description: "Unban a user" },
       { command: "bans", description: "List banned users" },
-      { command: "whois", description: "Show ticket user details" }
+      { command: "whois", description: "Show ticket user details" },
+      { command: "logs", description: "Show Support Logs topic status" },
+      { command: "setlogs", description: "Use this topic as Support Logs" }
     ],
     { scope: { type: "chat", chat_id: config.staffChatId } }
   );
+}
+
+export async function sendStaffOnboardingIfNeeded(api: BotApi, db: SupportDatabase): Promise<void> {
+  const settingKey = staffHelpSentSettingKey();
+  if (db.getSetting(settingKey) === "true") {
+    return;
+  }
+
+  try {
+    await api.sendMessage(config.staffChatId, STAFF_ONBOARDING_TEXT);
+    db.setSetting(settingKey, "true");
+  } catch (error) {
+    logger.warn(
+      { err: error, staffChatId: config.staffChatId },
+      "Could not send staff onboarding message"
+    );
+  }
 }
 
 async function handlePrivateUserMessage(db: SupportDatabase, ctx: Context): Promise<void> {
@@ -481,15 +619,11 @@ async function appendToExistingTicket(
   }
 
   const content = getMessageContent(ctx.message);
-  const ticket =
-    activeTicket.status === "WAITING_USER"
-      ? { ...activeTicket, status: "OPEN" as const }
-      : activeTicket;
 
   try {
     await ctx.api.sendMessage(
       config.staffChatId,
-      formatTicketUpdate(ticket, ctx.from, content.text),
+      formatTicketUpdate(ctx.from, content.text, content.mediaType, content.filename),
       {
         message_thread_id: activeTicket.message_thread_id
       }
@@ -538,13 +672,6 @@ async function appendToExistingTicket(
     await ctx.reply("Sorry, we could not route your update to support. Please try again later.");
     return;
   }
-
-  await ctx.reply(
-    `We added your message to your existing ticket #${activeTicket.id}. Our support team will get back to you soon.`,
-    {
-      reply_markup: userTicketKeyboard(activeTicket.id)
-    }
-  );
 }
 
 async function handleStaffGroupMessage(db: SupportDatabase, ctx: Context): Promise<void> {
@@ -995,6 +1122,31 @@ function staffTicketKeyboard(ticketId: number): InlineKeyboard {
 
 function userTicketKeyboard(ticketId: number): InlineKeyboard {
   return new InlineKeyboard().text("Close ticket", `user:close:${ticketId}`);
+}
+
+function formatSupportLogsTopicInfo(topic: SupportLogsTopicInfo): string {
+  const lines = [
+    "Support Logs topic",
+    "",
+    "Staff chat ID:",
+    String(config.staffChatId),
+    "",
+    "Thread ID:",
+    String(topic.threadId),
+    "",
+    "Status:",
+    topic.state
+  ];
+
+  if (topic.previousThreadId !== null) {
+    lines.push("", "Previous thread ID:", String(topic.previousThreadId));
+  }
+
+  return lines.join("\n");
+}
+
+function staffHelpSentSettingKey(): string {
+  return `${STAFF_HELP_SENT_SETTING_PREFIX}:${config.staffChatId}`;
 }
 
 function topicName(ticketId: number, user: { id: number; username?: string }): string {

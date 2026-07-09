@@ -4,9 +4,12 @@ Production-ready Telegram support bot built with Node.js 20, TypeScript, grammY,
 
 Users message the bot in private chat. The bot creates a support ticket, creates one Telegram forum topic for that ticket, lets staff answer from the topic, and archives the final transcript into a dedicated Support Logs topic when the ticket is closed.
 
+Version: `1.0.1`
+
 ## Features
 
 - Private user intake with `/start`.
+- Context-aware `/help` for users and staff.
 - One active ticket per user per configured staff chat.
 - One ticket equals one Telegram forum topic.
 - Follow-up user messages append to the same open ticket topic.
@@ -14,9 +17,9 @@ Users message the bot in private chat. The bot creates a support ticket, creates
 - Pinned ticket summary inside every ticket topic.
 - Staff controls: close, waiting user, in progress, ban user.
 - User-side `Close ticket` button.
-- Staff commands: `/chatid`, `/ticket`, `/close`, `/whois`, `/ban`, `/unban`, `/bans`.
+- Staff commands: `/help`, `/chatid`, `/ticket`, `/close`, `/whois`, `/logs`, `/setlogs`, `/ban`, `/unban`, `/bans`.
 - Ban and unban events are logged.
-- Staff replies sent to users include who answered.
+- Staff replies are copied to users without internal staff signatures.
 - Media support: photos, documents, videos, animations, audio, voice, video notes.
 - Dedicated `📜 Support Logs` forum topic for archive events.
 - Transcript file upload on ticket close.
@@ -109,13 +112,74 @@ This topic is for archive events only.
 
 On startup the bot:
 
-- reads the stored Support Logs `message_thread_id` from SQLite;
+- reads the stored Support Logs `message_thread_id` for the current `STAFF_CHAT_ID` from SQLite;
 - verifies the topic with a silent chat action;
 - reopens it if it was closed;
 - creates a new Support Logs topic only if the stored topic is missing or deleted;
-- stores the new `message_thread_id`.
+- stores the new `message_thread_id` scoped to the current `STAFF_CHAT_ID`.
 
 The bot does not create a new logs topic on every restart.
+
+Support Logs settings are scoped per staff chat. If you change `STAFF_CHAT_ID`, the bot does not reuse a topic id from the old group. It creates or reuses a Support Logs topic for the new group only.
+
+### Staff Logs Commands
+
+Use `/logs` in the configured staff group to show the current Support Logs thread id and its status. If no Support Logs topic exists for the current `STAFF_CHAT_ID`, the bot creates one automatically and reports the new thread id.
+
+Use `/setlogs` inside any forum topic in the configured staff group to manually choose that topic as Support Logs. The bot replies:
+
+```text
+This topic is now used as Support Logs.
+```
+
+If `/setlogs` is used outside a forum topic, the bot replies:
+
+```text
+Please run /setlogs inside the forum topic you want to use as Support Logs.
+```
+
+Automatic behavior still works without staff input. Manual override is only for teams that want to choose an existing logs topic.
+
+## Help And Staff Onboarding
+
+`/help` is context-aware.
+
+In private chat, `/help` explains how users open tickets, how the single active ticket works, how to keep sending updates, how to close a ticket, and how a new message after closure opens a new ticket.
+
+In the configured staff group, including ticket topics, `/help` explains the forum topic workflow, Support Logs behavior, archive behavior, and all staff commands.
+
+On startup, the bot sends one onboarding/help message to the main topic of the configured `STAFF_CHAT_ID` the first time it sees that staff chat. The message confirms setup, summarizes the workflow, lists staff commands, and explains `/setlogs` and `/logs`.
+
+The onboarding flag is stored in SQLite as a setting scoped per staff chat:
+
+```text
+staff_help_sent:<STAFF_CHAT_ID> = true
+```
+
+Changing `STAFF_CHAT_ID` allows the new staff group to receive its own one-time onboarding message. If Telegram rejects the onboarding message, the bot logs the error and keeps running; staff can still use `/help` manually.
+
+## Commands
+
+User/private:
+
+- `/start` - start the bot and get initial instructions.
+- `/status` - show latest ticket status.
+- `/mytickets` - show latest tickets.
+- `/help` - show user help.
+- `Close ticket` button - close the current open ticket.
+
+Staff/group:
+
+- `/help` - show staff help.
+- `/chatid` - show current chat id.
+- `/whois` - show current ticket/user info inside a ticket topic.
+- `/ticket <id>` - show ticket details.
+- `/close <id>` - close ticket.
+- `/ban <telegram_id> [reason]` - ban user from opening tickets.
+- `/unban <telegram_id>` - unban user.
+- `/bans` - list banned users.
+- `/setlogs` - use current topic as Support Logs.
+- `/logs` - show or create current Support Logs topic status.
 
 ## Transcript Workflow
 
@@ -315,7 +379,7 @@ Placeholder: staff ticket topic with pinned summary.
 
 ### Staff Reply
 
-Placeholder: staff reply copied to user with handler name.
+Placeholder: staff reply copied to user without internal staff signature.
 
 ### Support Logs
 
@@ -356,6 +420,8 @@ The bot needs permission to pin messages. Ticket routing still works if pinning 
 ### Transcript upload fails
 
 The bot keeps temporary messages in SQLite and retries pending closed-ticket archives on restart. Check that the bot can send documents in the staff group.
+
+If Telegram reports `message thread not found`, `topic not found`, or `chat not found` for Support Logs, the bot creates a fresh `📜 Support Logs` topic for the current `STAFF_CHAT_ID`, saves the new thread id, and retries the archive upload once.
 
 ### Archived topics are not deleted
 
