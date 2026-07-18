@@ -1,14 +1,39 @@
+# Dependencies and builds
 node_modules/
 dist/
+
+# Secrets and environment
 .env
 .env.*
 !.env.example
+
+# Runtime data
+data/
+outputs/
+
+# SQLite databases and sidecars
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
+*.sqlite-wal
+*.sqlite-shm
 *.sqlite3
-data/*.db
-data/*.db-*
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-*
+
+# Logs and temporary files
 *.log
 npm-debug.log*
+*.tmp
+*.temp
+
+# Editor and OS artifacts
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Project-specific local workspace
 work/

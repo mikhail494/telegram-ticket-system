@@ -1,6 +1,6 @@
 {
   "name": "telegram-support-ticket-bot",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Production-ready Telegram support ticket bot built with Node.js, TypeScript, grammY, and SQLite.",
   "type": "module",
   "engines": {
@@ -9,7 +9,9 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "node -e \"const { readdirSync } = require('node:fs'); const { join } = require('node:path'); const { spawnSync } = require('node:child_process'); const findTests = (directory) => readdirSync(directory, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? findTests(join(directory, entry.name)) : entry.isFile() && entry.name.endsWith('.test.ts') ? [join(directory, entry.name)] : []); const files = findTests('test'); if (files.length === 0) throw new Error('No TypeScript test files found under test/.'); const result = spawnSync(process.execPath, [require.resolve('tsx/cli'), '--test', ...files], { stdio: 'inherit' }); process.exit(result.status ?? 1);\"",
+    "test:typecheck": "tsc -p tsconfig.test.json --noEmit"
   },
   "dependencies": {
     "better-sqlite3": "^11.9.1",

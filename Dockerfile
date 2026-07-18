@@ -26,6 +26,9 @@ ENV NODE_ENV=production
 COPY --from=build /app/package*.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/config ./config
+
+RUN node --input-type=module -e "const { loadQuickRepliesRegistry } = await import('./dist/quickReplies.js'); loadQuickRepliesRegistry();"
 
 RUN mkdir -p /data
 

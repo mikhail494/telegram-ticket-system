@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "categories": [
+    {
+      "id": "request_details",
+      "title": "Request details",
+      "templates": [
+        {
+          "id": "ask_uid",
+          "title": "Ask for UID",
+          "text": "Please send your AgentOn UID so we can check your account."
+        },
+        {
+          "id": "ask_wallet",
+          "title": "Ask for wallet",
+          "text": "Please send the wallet address connected to your AgentOn account."
+        },
+        {
+          "id": "ask_evidence",
+          "title": "Ask for evidence",
+          "text": "Please send the relevant screenshots, quest link, and transaction hash if available."
+        }
+      ]
+    },
+    {
+      "id": "status",
+      "title": "Status updates",
+      "templates": [
+        {
+          "id": "checking",
+          "title": "We are checking",
+          "text": "Thank you. Our team is checking this and will update you as soon as possible."
+        },
+        {
+          "id": "need_more_time",
+          "title": "Need more time",
+          "text": "We are still investigating this issue. Thank you for your patience."
+        }
+      ]
+    }
+  ]
+}

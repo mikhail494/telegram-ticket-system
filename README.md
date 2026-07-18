@@ -1,393 +1,269 @@
 # Telegram Support Ticket Bot
 
-Production-ready Telegram support bot built with Node.js 20, TypeScript, grammY, SQLite, better-sqlite3, and dotenv.
+A Telegram-native support desk that turns private user messages into structured staff forum topics, replies, and archived transcripts.
 
-Users message the bot in private chat. The bot creates a support ticket, creates one Telegram forum topic for that ticket, lets staff answer from the topic, and archives the final transcript into a dedicated Support Logs topic when the ticket is closed.
+[![CI](https://github.com/mikhail494/telegram-ticket-system/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mikhail494/telegram-ticket-system/actions/workflows/ci.yml)
+[![Node.js 20](https://img.shields.io/badge/Node.js-20-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Version: `1.0.1`
+Version: `1.1.0`
 
-## Features
+Users contact the bot in private chat, while staff work entirely in a dedicated Telegram forum supergroup. Each ticket receives its own topic, Quick Replies speed up routine responses, and closed conversations are archived as text transcripts in Support Logs.
 
-- Private user intake with `/start`.
-- Context-aware `/help` for users and staff.
-- One active ticket per user per configured staff chat.
+## Highlights
+
 - One ticket equals one Telegram forum topic.
-- Follow-up user messages append to the same open ticket topic.
-- Closed tickets and closed topics are never reused.
-- Pinned ticket summary inside every ticket topic.
-- Staff controls: close, waiting user, in progress, ban user.
-- User-side `Close ticket` button.
-- Staff commands: `/help`, `/chatid`, `/ticket`, `/close`, `/whois`, `/logs`, `/setlogs`, `/ban`, `/unban`, `/bans`.
-- Ban and unban events are logged.
-- Staff replies are copied to users without internal staff signatures.
-- Media support: photos, documents, videos, animations, audio, voice, video notes.
-- Dedicated `📜 Support Logs` forum topic for archive events.
-- Transcript file upload on ticket close.
-- Temporary SQLite conversation storage while a ticket is active.
-- Conversation message bodies are removed from SQLite after successful transcript upload.
-- Idempotent SQLite migrations for upgrades.
-- Docker and Railway deployment support.
+- Bidirectional user and staff routing, including common Telegram media types.
+- JSON-configured Quick Replies with categories, pagination, and transcript recording.
+- Persistent ticket lifecycle, bans, settings, and idempotent SQLite migrations.
+- Dedicated Support Logs archive with recovery when a topic is unavailable or misconfigured.
+- Staff controls for status, closure, user lookup, and ban management.
+- Automated regression coverage, Docker packaging, and GitHub Actions CI.
 
-## Architecture
+## How It Works
 
-```text
-User
-  |
-  v
-Bot
-  |
-  v
-SQLite (temporary)
-  |
-  v
-Forum Topic
-  |
-  v
-Support Logs
+```mermaid
+flowchart LR
+    U[User private chat] --> B[Telegram bot]
+    B --> D[(SQLite ticket state)]
+    B --> T[Staff forum topic]
+    T --> R[Staff reply or Quick Reply]
+    R --> U
+    T --> C[Ticket closed]
+    C --> L[Transcript in Support Logs]
 ```
 
-Runtime components:
+## Quick Start
 
-- `grammY` handles Telegram updates and Bot API calls.
-- SQLite stores users, tickets, temporary messages, bans, settings, and migration state.
-- Each ticket topic is the live staff workspace.
-- `📜 Support Logs` is the durable Telegram archive for closure transcripts and ban events.
+```bash
+git clone https://github.com/mikhail494/telegram-ticket-system.git
+cd telegram-ticket-system
+npm install
+```
 
-## Forum Topics Workflow
+Create a local environment file, then configure the values described in [Environment Variables](#environment-variables):
+
+```bash
+# macOS/Linux
+cp .env.example .env
+
+# Windows PowerShell
+Copy-Item .env.example .env
+```
+
+Start the bot in development mode:
+
+```bash
+npm run dev
+```
+
+Before starting it, create a Telegram supergroup with Topics enabled, add the bot as an administrator, and set `STAFF_CHAT_ID` to that group. The full setup is below.
+
+## Ticket Workflow
 
 `STAFF_CHAT_ID` must be a Telegram supergroup with Topics enabled.
 
-Ticket lifecycle:
+1. A user sends the bot a private message.
+2. The bot creates one ticket row and one forum topic.
+3. The topic title is `#123 | @username`, or `#123 | user_123456789` when the user has no username.
+4. The first topic message is pinned and contains the ticket number, user, Telegram ID, creation time, status, and staff instructions.
+5. Follow-up user messages are added to the same topic while the ticket remains active.
+6. Staff replies in the topic are routed back to the original user.
+7. Closing a ticket marks it `CLOSED`, archives its transcript, and closes or deletes the topic when Telegram permits it.
+8. The user's next message creates a completely new ticket and topic. Closed topics are never reused.
 
-1. User sends a private message to the bot.
-2. Bot creates one ticket row.
-3. Bot creates exactly one forum topic for that ticket.
-4. Topic name format:
+Ticket routing uses Telegram `message_thread_id`, not reply chains. Only one active ticket is kept per user for each configured staff chat.
 
-```text
-#123 | @username
+## Quick Replies
+
+Every active ticket topic has a `Quick replies` button under its pinned ticket summary.
+
+1. Select a category.
+2. Select a reply template.
+3. The bot delivers the template to the ticket user as a normal clean text message.
+
+Quick Reply delivery uses the same transcript path as a normal staff text reply, including the selecting staff member's identity. Sending one changes an `OPEN` ticket to `IN_PROGRESS`; `IN_PROGRESS` and `WAITING_USER` tickets retain their status.
+
+`Back` returns to the category list. `Cancel` removes the menu without messaging the user. Categories show up to six templates per page, with `Previous` and `Next` controls when needed.
+
+### Quick Replies Configuration
+
+Templates live outside application code in [config/quick-replies.json](config/quick-replies.json). Each category has an `id`, button `title`, and templates; each template has an `id`, button `title`, and the `text` delivered to the user.
+
+```json
+{
+  "version": 1,
+  "categories": [
+    {
+      "id": "request_details",
+      "title": "Request details",
+      "templates": [
+        {
+          "id": "ask_uid",
+          "title": "Ask for UID",
+          "text": "Please send your AgentOn UID so we can check your account."
+        }
+      ]
+    }
+  ]
+}
 ```
 
-If username is missing:
+Validation rules:
 
-```text
-#123 | user_123456789
-```
+- Category and template IDs use lowercase letters, numbers, and underscores only, up to 24 characters.
+- Button titles are required and no longer than 32 characters.
+- Template text is required and no longer than 3500 characters.
+- Category IDs must be unique; template IDs must be globally unique across all categories.
 
-5. Bot sends and pins the first topic message:
+The configuration is validated during startup. A missing, malformed, or invalid file prevents startup with an actionable error, so invalid templates cannot reach staff or users.
 
-```text
-Ticket #123
+## Support Logs And Transcripts
 
-User:
-@username
+The bot maintains one `📜 Support Logs` forum topic per `STAFF_CHAT_ID`. It records ticket closure summaries, transcript files, and ban-related events.
 
-Telegram ID:
-123456789
+On startup, the bot reuses the configured topic when it is valid, reopens it when possible, and creates a replacement when it is missing, deleted, unavailable, or incorrectly points to a ticket topic. Settings are scoped per staff chat, so changing `STAFF_CHAT_ID` never reuses a topic ID from another group.
 
-Created:
-2026-07-07 14:00:00 UTC
+Use `/logs` in the staff group to show or create the current topic. Use `/setlogs` inside a non-ticket forum topic to assign it manually. Ticket topics cannot be assigned because they may be closed or deleted during archive processing; a legacy setting that points to one is automatically replaced with a safe Support Logs topic.
 
-Status:
-OPEN
-```
+While a ticket is active, SQLite holds its messages temporarily. On closure, the bot writes `ticket-<id>-transcript.txt`, uploads the closure summary and transcript to Support Logs, records the archive message IDs, removes the temporary message rows, and deletes the local file. If upload fails, messages are retained and pending archives are retried after restart.
 
-6. Staff writes inside the ticket topic to answer the user.
-7. While the ticket is open, every new user message is appended to the same topic.
-8. Closing the ticket marks it `CLOSED`.
-9. The next user message creates a brand new ticket and a brand new topic.
-10. Closed topics are never reused.
-
-Routing is based on `message_thread_id`, not reply chains.
-
-## Support Logs Workflow
-
-The bot manages one dedicated forum topic:
-
-```text
-📜 Support Logs
-```
-
-This topic is for archive events only.
-
-On startup the bot:
-
-- reads the stored Support Logs `message_thread_id` for the current `STAFF_CHAT_ID` from SQLite;
-- verifies the topic with a silent chat action;
-- reopens it if it was closed;
-- creates a new Support Logs topic only if the stored topic is missing or deleted;
-- stores the new `message_thread_id` scoped to the current `STAFF_CHAT_ID`.
-
-The bot does not create a new logs topic on every restart.
-
-Support Logs settings are scoped per staff chat. If you change `STAFF_CHAT_ID`, the bot does not reuse a topic id from the old group. It creates or reuses a Support Logs topic for the new group only.
-
-### Staff Logs Commands
-
-Use `/logs` in the configured staff group to show the current Support Logs thread id and its status. If no Support Logs topic exists for the current `STAFF_CHAT_ID`, the bot creates one automatically and reports the new thread id.
-
-Use `/setlogs` inside any forum topic in the configured staff group to manually choose that topic as Support Logs. The bot replies:
-
-```text
-This topic is now used as Support Logs.
-```
-
-If `/setlogs` is used outside a forum topic, the bot replies:
-
-```text
-Please run /setlogs inside the forum topic you want to use as Support Logs.
-```
-
-Automatic behavior still works without staff input. Manual override is only for teams that want to choose an existing logs topic.
-
-## Help And Staff Onboarding
-
-`/help` is context-aware.
-
-In private chat, `/help` explains how users open tickets, how the single active ticket works, how to keep sending updates, how to close a ticket, and how a new message after closure opens a new ticket.
-
-In the configured staff group, including ticket topics, `/help` explains the forum topic workflow, Support Logs behavior, archive behavior, and all staff commands.
-
-On startup, the bot sends one onboarding/help message to the main topic of the configured `STAFF_CHAT_ID` the first time it sees that staff chat. The message confirms setup, summarizes the workflow, lists staff commands, and explains `/setlogs` and `/logs`.
-
-The onboarding flag is stored in SQLite as a setting scoped per staff chat:
-
-```text
-staff_help_sent:<STAFF_CHAT_ID> = true
-```
-
-Changing `STAFF_CHAT_ID` allows the new staff group to receive its own one-time onboarding message. If Telegram rejects the onboarding message, the bot logs the error and keeps running; staff can still use `/help` manually.
+Media is represented as attachment text in the transcript. User media is not duplicated into application storage or Support Logs.
 
 ## Commands
 
-User/private:
+### User Commands
 
-- `/start` - start the bot and get initial instructions.
-- `/status` - show latest ticket status.
-- `/mytickets` - show latest tickets.
-- `/help` - show user help.
-- `Close ticket` button - close the current open ticket.
+| Command | Purpose |
+| --- | --- |
+| `/start` | Start the bot and view intake instructions. |
+| `/status` | Show the latest ticket status. |
+| `/mytickets` | Show recent tickets. |
+| `/help` | Show user help. |
+| `Close ticket` button | Close the current active ticket. |
 
-Staff/group:
+### Staff Commands
 
-- `/help` - show staff help.
-- `/chatid` - show current chat id.
-- `/whois` - show current ticket/user info inside a ticket topic.
-- `/ticket <id>` - show ticket details.
-- `/close <id>` - close ticket.
-- `/ban <telegram_id> [reason]` - ban user from opening tickets.
-- `/unban <telegram_id>` - unban user.
-- `/bans` - list banned users.
-- `/setlogs` - use current topic as Support Logs.
-- `/logs` - show or create current Support Logs topic status.
+| Command | Purpose |
+| --- | --- |
+| `/help` | Show staff help in the staff group or a ticket topic. |
+| `/chatid` | Show the current staff chat ID. |
+| `/whois` | Show the current ticket and user information inside a ticket topic. |
+| `/ticket <id>` | Show ticket details. |
+| `/close <id>` | Close a ticket. |
+| `/ban <telegram_id> [reason]` | Prevent a user from opening tickets. |
+| `/unban <telegram_id>` | Restore a user's ticket access. |
+| `/bans` | List banned users. |
+| `/setlogs` | Assign the current non-ticket topic as Support Logs. |
+| `/logs` | Show or create the current Support Logs topic. |
+| `Quick replies` button | Choose and send a configured response in an active ticket topic. |
 
-## Transcript Workflow
-
-While a ticket is active, SQLite temporarily stores conversation messages:
-
-- ticket id
-- sender type
-- sender display name
-- sender username
-- text
-- media type
-- document filename
-- timestamp
-
-When a ticket is closed by staff, user, or ban flow:
-
-1. The ticket is marked `CLOSED`.
-2. A temporary file is generated:
-
-```text
-ticket-123-transcript.txt
-```
-
-3. The bot sends one closure summary to `📜 Support Logs`.
-4. The bot uploads the transcript file immediately below the summary.
-5. SQLite stores the logs message id and transcript message id.
-6. SQLite deletes the temporary conversation messages for that ticket.
-7. The transcript file is deleted from disk.
-8. The bot attempts to delete the ticket topic. If deletion is unavailable, it attempts to close the topic.
-
-Media is represented in transcripts as text only:
-
-```text
-Attachment: photo
-Attachment: video
-Attachment: voice
-Attachment: animation
-Attachment: document: filename.pdf
-```
-
-Media files are not duplicated into Support Logs.
-
-If transcript upload fails:
-
-- temporary SQLite messages are kept;
-- the temporary file is removed from disk;
-- the failure is logged;
-- the bot retries pending closed-ticket archives on the next restart.
-
-## Database Cleanup
-
-SQLite is not the permanent conversation archive.
-
-After successful transcript upload, the bot deletes message bodies and media ids from the `messages` table by deleting the temporary message rows for that ticket.
-
-The ticket metadata remains:
-
-- ticket id
-- Telegram user id
-- username
-- timestamps
-- final status
-- ticket topic id
-- Support Logs summary message id
-- transcript document message id
+`/help` is context-aware. On first use of a new `STAFF_CHAT_ID`, the bot also posts one onboarding message to the staff group's main topic. The marker is stored per staff chat, so a different configured group receives its own onboarding message.
 
 ## Telegram Setup
 
-Create a staff supergroup:
+### Staff Supergroup
 
-1. Create a Telegram group.
-2. Open group settings.
-3. Convert it to a supergroup if Telegram prompts you.
-4. Enable Topics.
-5. Add the bot.
-6. Promote the bot to administrator.
+1. Create a Telegram group and convert it to a supergroup if prompted.
+2. Enable Topics in group settings.
+3. Add the bot and promote it to administrator.
+4. Grant these permissions:
+   - Manage topics
+   - Send messages
+   - Read messages
+   - Pin messages
+   - Delete messages, recommended for deleting archived ticket topics
+   - Ban users, optional when staff handle bans through the bot
 
-Required bot permissions:
+The bot needs Manage topics to create, reopen, close, and delete ticket or Support Logs topics.
 
-- Manage topics
-- Send messages
-- Read messages
-- Pin messages
-- Delete messages, recommended for deleting archived ticket topics
-- Ban users, optional if staff use Telegram bans separately
+### BotFather
 
-The bot needs `Manage topics` for creating, reopening, closing, and deleting forum topics.
+1. Message `@BotFather` and run `/newbot`.
+2. Copy the issued token into `BOT_TOKEN`.
+3. Keep the token out of source code and Git history.
 
-## BotFather Setup
+### Get `STAFF_CHAT_ID`
 
-1. Message `@BotFather`.
-2. Run `/newbot`.
-3. Copy the token.
-4. Put the token in `BOT_TOKEN`.
-5. Do not paste the token into source code.
+After the bot is running in the staff group, run `/chatid` there. The bot replies with the chat ID to place in `STAFF_CHAT_ID`. This command is staff-only and is unavailable in private chat.
 
-## Getting STAFF_CHAT_ID
+## Configuration
 
-After the bot is running and added to the staff group, run:
-
-```text
-/chatid
-```
-
-inside the configured staff group.
-
-The bot replies:
-
-```text
-Chat ID: -1001234567890
-```
-
-Use that value as `STAFF_CHAT_ID`.
-
-`/chatid` is staff-only and does not work in private chat.
-
-## Environment Variables
+### Environment Variables
 
 Create `.env` from `.env.example`:
 
 ```bash
-BOT_TOKEN=123456:your-bot-token
-STAFF_CHAT_ID=-1001234567890
+BOT_TOKEN=<telegram-bot-token>
+STAFF_CHAT_ID=<telegram-supergroup-id>
 DATABASE_URL=file:./data/support.db
 LOG_LEVEL=info
 ```
 
-Required Railway variables:
+Required in Railway and other deployments:
 
 - `BOT_TOKEN`
 - `STAFF_CHAT_ID`
 - `DATABASE_URL`
 
-Optional:
+`LOG_LEVEL` is optional. Never commit `.env`; `.env.example` is safe to commit because it contains placeholders only.
 
-- `LOG_LEVEL`
+## Testing
 
-`.env` must never be committed.
-
-`.env.example` is safe to commit because it contains placeholders only.
-
-## Local Development
+Run the release checks from the project root:
 
 ```bash
-npm install
+npm exec tsc -- -p tsconfig.json --noEmit
+npm run test:typecheck
+npm test
 npm run build
-npm run dev
 ```
 
-Production run:
+The current suite contains 66 automated tests covering Quick Replies configuration and delivery, Support Logs safety, and staff reply regression behavior.
 
-```bash
-npm start
+## Project Structure
+
+```text
+src/                 Bot handlers, routing, SQLite access, archives, and Quick Replies loader
+config/              Editable Quick Replies template configuration
+test/                Node test suites and Telegram API harness
+.github/workflows/   Continuous integration workflow
+Dockerfile           Production container build
 ```
 
-## Railway Deployment
+Runtime data belongs in the ignored `data/` directory locally, or on persistent storage in production.
 
-1. Push the repository to GitHub.
-2. Create a Railway project from the repository.
-3. Use the included Dockerfile.
-4. Add a Railway volume mounted at `/data`.
-5. Set variables:
-   - `BOT_TOKEN`
-   - `STAFF_CHAT_ID`
-   - `DATABASE_URL=file:/data/support.db`
-   - `LOG_LEVEL=info`
-6. Deploy one replica only.
+## Deployment
 
-Long polling must not run from multiple replicas at the same time.
+### Docker
 
-SQLite needs persistent storage. Without a Railway volume, tickets, bans, settings, and migration state can be lost after restarts.
-
-## Docker
+The image packages `config/quick-replies.json` and validates it while building. For production, mount persistent storage at `/data` and use:
 
 ```bash
 docker build -t telegram-support-ticket-bot .
-docker run --env-file .env -v support-data:/data telegram-support-ticket-bot
+docker run --env-file .env -e DATABASE_URL=file:/data/support.db -v support-data:/data telegram-support-ticket-bot
 ```
 
-For Docker with a volume:
+`/data` must be persistent. Without a Docker volume or equivalent persistent disk, tickets, bans, settings, and migration state are lost when the container is replaced.
 
-```bash
-DATABASE_URL=file:/data/support.db
-```
+### Railway
 
-## Screenshots
+1. Push the repository to GitHub and create a Railway project from it.
+2. Use the included Dockerfile.
+3. Add a volume mounted at `/data`.
+4. Set `BOT_TOKEN`, `STAFF_CHAT_ID`, `DATABASE_URL=file:/data/support.db`, and optionally `LOG_LEVEL=info`.
+5. Deploy one replica only.
 
-Add screenshots here before public release.
+Long polling must not run from multiple replicas simultaneously. SQLite needs the Railway volume to survive restarts.
 
-### User Start
+## Security Model
 
-Placeholder: private chat `/start` response.
-
-### Ticket Topic
-
-Placeholder: staff ticket topic with pinned summary.
-
-### Staff Reply
-
-Placeholder: staff reply copied to user without internal staff signature.
-
-### Support Logs
-
-Placeholder: closure summary and transcript attachment.
-
-### Ban Flow
-
-Placeholder: ban event in Support Logs.
+- Never commit `.env` or log `BOT_TOKEN`.
+- Treat every participant who can interact in `STAFF_CHAT_ID` as trusted staff. They can reply to users, change ticket status, close tickets, ban or unban users, and configure Support Logs.
+- Point `STAFF_CHAT_ID` only at a controlled staff group.
+- Keep SQLite on persistent storage and review staff access before making the repository public.
+- Support Logs is the durable archive; the bot does not download or duplicate user media into application storage.
 
 ## Troubleshooting
 
@@ -395,65 +271,63 @@ Placeholder: ban event in Support Logs.
 
 Check network stability, restart the process, and make sure only one bot replica is running.
 
-### Wrong STAFF_CHAT_ID
+### Wrong `STAFF_CHAT_ID`
 
-Staff commands and callbacks are accepted only in `STAFF_CHAT_ID`. Confirm the id with `/chatid`.
+Staff commands and callbacks work only in `STAFF_CHAT_ID`. Confirm it with `/chatid` in the configured staff group.
 
-### Bot does not create ticket topics
+### The bot does not create ticket topics
 
-Check that:
+Verify that the staff chat is a supergroup, Topics are enabled, the bot is an administrator with Manage topics permission, and the configured ID starts with `-100`.
 
-- the staff chat is a supergroup;
-- Topics are enabled;
-- the bot is an admin;
-- the bot has Manage topics permission;
-- `STAFF_CHAT_ID` starts with `-100`.
+### Support Logs or transcript upload fails
 
-### Bot does not create Support Logs
+Confirm the bot can manage topics and send documents in the staff group. For `message thread not found`, `topic not found`, or `chat not found`, the bot creates a fresh Support Logs topic for the current staff chat and retries the archive once. Pending closed-ticket archives are retried after restart.
 
-Check Manage topics permission and confirm the bot can send messages in the staff group.
+### Ticket summaries are not pinned
 
-### Pinned summary is not pinned
-
-The bot needs permission to pin messages. Ticket routing still works if pinning fails.
-
-### Transcript upload fails
-
-The bot keeps temporary messages in SQLite and retries pending closed-ticket archives on restart. Check that the bot can send documents in the staff group.
-
-If Telegram reports `message thread not found`, `topic not found`, or `chat not found` for Support Logs, the bot creates a fresh `📜 Support Logs` topic for the current `STAFF_CHAT_ID`, saves the new thread id, and retries the archive upload once.
+Grant the bot permission to pin messages. Ticket routing continues even when pinning fails.
 
 ### Archived topics are not deleted
 
-The bot first calls `deleteForumTopic`. If Telegram rejects that action, it falls back to `closeForumTopic`. Grant Delete messages permission if you want full topic deletion.
+The bot tries `deleteForumTopic` first and falls back to `closeForumTopic`. Grant Delete messages permission for full topic deletion.
 
-### SQLite persistence on Railway
+### SQLite persistence on Railway or Docker
 
-Use:
+Use `DATABASE_URL=file:/data/support.db` with a persistent volume mounted at `/data`.
 
-```bash
-DATABASE_URL=file:/data/support.db
-```
+## Screenshots
 
-with a Railway volume mounted at `/data`.
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <strong>User Intake</strong><br />
+      <img src="docs/screenshots/user-intake.png" alt="Private user conversation with ticket creation and self-service closure" width="100%" />
+      <br />
+      <sub>Private user conversation with ticket creation and self-service closure.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <strong>Ticket Workspace</strong><br />
+      <img src="docs/screenshots/ticket-workspace.png" alt="Dedicated forum topic with pinned ticket context and staff controls" width="100%" />
+      <br />
+      <sub>Dedicated forum topic with pinned ticket context and staff controls.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <strong>Quick Replies</strong><br />
+      <img src="docs/screenshots/quick-replies.png" alt="Config-driven response categories inside a ticket topic" width="100%" />
+      <br />
+      <sub>Config-driven response categories available directly inside the ticket topic.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <strong>Support Logs</strong><br />
+      <img src="docs/screenshots/support-logs.png" alt="Closed ticket summaries and transcript files in Support Logs" width="100%" />
+      <br />
+      <sub>Closed-ticket summaries and transcript files archived in a dedicated topic.</sub>
+    </td>
+  </tr>
+</table>
 
-## Security Recommendations
+## Release
 
-- Never commit `.env`.
-- Keep `BOT_TOKEN` only in local env files or Railway variables.
-- Do not log bot tokens.
-- Restrict the staff group to trusted staff.
-- Deploy one bot replica.
-- Keep SQLite on persistent storage.
-- Treat Support Logs as the permanent support archive.
-- Do not download or duplicate user media into app storage.
-- Review staff access before making the repository public.
-
-## Release Checklist
-
-- `npm run build` passes.
-- Staff group is a supergroup with Topics enabled.
-- Bot has Manage topics, Send messages, Read messages, Pin messages, and preferably Delete messages.
-- `BOT_TOKEN`, `STAFF_CHAT_ID`, and `DATABASE_URL` are configured.
-- Railway volume is mounted if deploying to Railway.
-- `.env`, database files, `dist`, and `node_modules` are ignored by git.
+See [CHANGELOG.md](CHANGELOG.md) for release history and [LICENSE](LICENSE) for licensing terms.
