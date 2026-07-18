@@ -1,6 +1,6 @@
 import { Bot, GrammyError, HttpError, InlineKeyboard } from "grammy";
 import type { CommandContext, Context } from "grammy";
-import type { Message } from "grammy/types";
+import type { Message, User } from "grammy/types";
 import {
   archiveTicketIfPossible,
   getSupportLogsTopicInfo,
@@ -25,18 +25,19 @@ import {
   truncate
 } from "./format.js";
 import { logger } from "./logger.js";
+import type { QuickRepliesRegistry } from "./quickReplies.js";
 import {
   displayTelegramUser,
   getMessageContent,
   isCommandText,
-  usernameOf,
-  type MessageContent
+  usernameOf
 } from "./telegram.js";
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
 const DEFAULT_BAN_REASON = "No reason provided.";
 const STAFF_HELP_SENT_SETTING_PREFIX = "staff_help_sent";
+const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
 
 const USER_HELP_TEXT = [
   "Support help",
@@ -120,8 +121,312 @@ interface ErrorWithCode extends Error {
   code?: string;
 }
 
-export function createBot(db: SupportDatabase): Bot<Context> {
+interface StaffTextReplySource {
+  chatId: number;
+  messageId: number;
+}
+
+interface QuickRepliesCallbackTarget {
+  ticket: TicketWithUser;
+  messageChatId: number;
+  messageId: number;
+  messageThreadId: number;
+}
+
+type DeliverAndRecordStaffTextReply = (
+  ticket: TicketWithUser,
+  text: string,
+  staffUser: User | undefined,
+  source?: StaffTextReplySource
+) => Promise<void>;
+
+export function createBot(db: SupportDatabase, quickRepliesRegistry: QuickRepliesRegistry): Bot<Context> {
   const bot = new Bot<Context>(config.botToken);
+
+  async function deliverAndRecordStaffTextReply(
+    ticket: TicketWithUser,
+    text: string,
+    staffUser: User | undefined,
+    source?: StaffTextReplySource
+  ): Promise<void> {
+    const sent = await bot.api.sendMessage(ticket.user_telegram_id, truncate(text.trim(), 3500));
+
+    db.addMessage({
+      ticketId: ticket.id,
+      direction: "STAFF_TO_USER",
+      sourceChatId: source?.chatId ?? ticket.staff_chat_id ?? config.staffChatId,
+      sourceMessageId: source?.messageId ?? null,
+      deliveryChatId: ticket.user_telegram_id,
+      deliveryMessageId: sent.message_id,
+      fromTelegramId: staffUser?.id ?? null,
+      fromUsername: usernameOf(staffUser),
+      senderType: "STAFF",
+      senderDisplayName: staffUser ? displayTelegramUser(staffUser) : "Support",
+      senderUsername: usernameOf(staffUser),
+      text,
+      mediaType: null,
+      filename: null,
+      fileId: null
+    });
+  }
+
+  function quickRepliesCategoryKeyboard(ticketId: number): InlineKeyboard {
+    const keyboard = new InlineKeyboard();
+
+    for (const category of quickRepliesRegistry.listCategories()) {
+      keyboard.text(category.title, quickRepliesCategoryCallbackData(ticketId, category.id)).row();
+    }
+
+    return keyboard.text("Cancel", quickRepliesCancelCallbackData(ticketId));
+  }
+
+  function quickRepliesTemplateKeyboard(ticketId: number, categoryId: string, page: number): InlineKeyboard {
+    const templates = quickRepliesRegistry.listTemplates(categoryId);
+    const start = page * 6;
+    const pageTemplates = templates.slice(start, start + 6);
+    const keyboard = new InlineKeyboard();
+
+    for (const template of pageTemplates) {
+      keyboard.text(template.title, quickRepliesTemplateCallbackData(ticketId, template.id)).row();
+    }
+
+    if (page > 0) {
+      keyboard.text("Previous", quickRepliesPageCallbackData(ticketId, categoryId, page - 1));
+    }
+
+    if (start + pageTemplates.length < templates.length) {
+      keyboard.text("Next", quickRepliesPageCallbackData(ticketId, categoryId, page + 1));
+    }
+
+    if (page > 0 || start + pageTemplates.length < templates.length) {
+      keyboard.row();
+    }
+
+    return keyboard
+      .text("Back", quickRepliesBackCallbackData(ticketId))
+      .text("Cancel", quickRepliesCancelCallbackData(ticketId));
+  }
+
+  async function resolveQuickRepliesCallbackTarget(
+    ctx: Context,
+    rawTicketId: string | undefined
+  ): Promise<QuickRepliesCallbackTarget | null> {
+    if (!isStaffChat(ctx)) {
+      await ctx.answerCallbackQuery({
+        text: "Quick Replies are available to staff only.",
+        show_alert: true
+      });
+      return null;
+    }
+
+    const ticketId = parseUserId(rawTicketId ?? "");
+    if (!ticketId) {
+      await ctx.answerCallbackQuery({ text: "Invalid ticket." });
+      return null;
+    }
+
+    const ticket = db.getTicketWithUser(ticketId);
+    if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+      await ctx.answerCallbackQuery({ text: "Ticket not found in this staff chat." });
+      return null;
+    }
+
+    if (ticket.status === "CLOSED") {
+      await ctx.answerCallbackQuery({ text: "Ticket is already closed." });
+      return null;
+    }
+
+    const callbackMessage = ctx.callbackQuery?.message;
+    const ticketMessageThreadId = ticket.message_thread_id;
+    const callbackMessageThreadId =
+      callbackMessage && "message_thread_id" in callbackMessage
+        ? callbackMessage.message_thread_id
+        : undefined;
+
+    if (
+      !callbackMessage ||
+      typeof ticketMessageThreadId !== "number" ||
+      typeof callbackMessageThreadId !== "number" ||
+      callbackMessageThreadId !== ticketMessageThreadId
+    ) {
+      await ctx.answerCallbackQuery({ text: "Use Quick Replies inside this ticket topic." });
+      return null;
+    }
+
+    return {
+      ticket,
+      messageChatId: callbackMessage.chat.id,
+      messageId: callbackMessage.message_id,
+      messageThreadId: ticketMessageThreadId
+    };
+  }
+
+  async function answerQuickRepliesCallbackOnce(
+    ctx: Context,
+    response: Parameters<Context["answerCallbackQuery"]>[0],
+    logMessage: string
+  ): Promise<void> {
+    try {
+      await ctx.answerCallbackQuery(response);
+    } catch (error) {
+      logger.warn({ err: error }, logMessage);
+    }
+  }
+
+  async function runQuickRepliesCallbackOperation(
+    ctx: Context,
+    successText: string,
+    operation: () => Promise<unknown>
+  ): Promise<void> {
+    try {
+      await operation();
+    } catch (error) {
+      await answerQuickRepliesCallbackOnce(
+        ctx,
+        {
+          text: "Could not update Quick Replies.",
+          show_alert: true
+        },
+        "Could not answer failed Quick Replies callback"
+      );
+      throw error;
+    }
+
+    await answerQuickRepliesCallbackOnce(
+      ctx,
+      { text: successText },
+      "Could not answer successful Quick Replies callback"
+    );
+  }
+
+  async function handleQuickRepliesCallback(ctx: Context, data: string): Promise<void> {
+    const [, action, rawTicketId, rawResourceId, rawPage] = data.split(":");
+    if (
+      action !== "open" &&
+      action !== "category" &&
+      action !== "page" &&
+      action !== "back" &&
+      action !== "cancel" &&
+      action !== "template"
+    ) {
+      await ctx.answerCallbackQuery({ text: "Quick Replies action is not available." });
+      return;
+    }
+
+    const target = await resolveQuickRepliesCallbackTarget(ctx, rawTicketId);
+    if (!target) {
+      return;
+    }
+
+    if (action === "open") {
+      await runQuickRepliesCallbackOperation(ctx, "Quick replies opened.", async () => {
+        await ctx.api.sendMessage(config.staffChatId, "Quick replies\nChoose a category:", {
+          message_thread_id: target.messageThreadId,
+          reply_markup: quickRepliesCategoryKeyboard(target.ticket.id)
+        });
+      });
+      return;
+    }
+
+    if (action === "cancel") {
+      await runQuickRepliesCallbackOperation(ctx, "Quick replies closed.", async () => {
+        await ctx.api.editMessageReplyMarkup(target.messageChatId, target.messageId, {
+          reply_markup: undefined
+        });
+      });
+      return;
+    }
+
+    if (action === "back") {
+      await runQuickRepliesCallbackOperation(ctx, "Quick replies opened.", async () => {
+        await ctx.api.editMessageText(target.messageChatId, target.messageId, "Quick replies\nChoose a category:", {
+          reply_markup: quickRepliesCategoryKeyboard(target.ticket.id)
+        });
+      });
+      return;
+    }
+
+    if (action === "template") {
+      const template = quickRepliesRegistry.findTemplate(rawResourceId ?? "");
+      if (!template) {
+        await ctx.answerCallbackQuery({ text: "Quick Replies template not found." });
+        return;
+      }
+
+      try {
+        await deliverAndRecordStaffTextReply(target.ticket, template.text, ctx.from);
+      } catch (error) {
+        logger.error({ err: error, ticketId: target.ticket.id }, "Could not deliver Quick Reply to user");
+        await sendStaffTopicNotice(
+          ctx.api,
+          target.ticket,
+          `Could not send quick reply for ticket #${target.ticket.id} to user ${target.ticket.user_telegram_id}: ${describeError(error)}`
+        );
+        await ctx.answerCallbackQuery({
+          text: "Could not send quick reply.",
+          show_alert: true
+        });
+        return;
+      }
+
+      if (target.ticket.status === "OPEN") {
+        try {
+          db.updateTicketStatus(target.ticket.id, "IN_PROGRESS");
+          await refreshStaffTicketMessage(db, ctx.api, target.ticket.id);
+        } catch (error) {
+          logger.warn({ err: error, ticketId: target.ticket.id }, "Could not refresh ticket after Quick Reply");
+        }
+      }
+
+      try {
+        await ctx.api.editMessageText(
+          target.messageChatId,
+          target.messageId,
+          `Quick reply sent\n${template.title}`,
+          { reply_markup: undefined }
+        );
+      } catch (error) {
+        logger.warn({ err: error, ticketId: target.ticket.id }, "Could not clean up Quick Replies menu");
+      }
+
+      await ctx.answerCallbackQuery({ text: "Quick reply sent." });
+      return;
+    }
+
+    const category = quickRepliesRegistry.findCategory(rawResourceId ?? "");
+    if (!category) {
+      await ctx.answerCallbackQuery({ text: "Quick Replies category not found." });
+      return;
+    }
+
+    let page = 0;
+    if (action === "page") {
+      const parsedPage = parseQuickRepliesPage(rawPage);
+      if (parsedPage === null) {
+        await ctx.answerCallbackQuery({ text: "Invalid Quick Replies page." });
+        return;
+      }
+
+      page = parsedPage;
+    }
+
+    const totalPages = Math.ceil(category.templates.length / 6);
+    if (page >= totalPages) {
+      await ctx.answerCallbackQuery({ text: "Quick Replies page is out of range." });
+      return;
+    }
+
+    await runQuickRepliesCallbackOperation(ctx, "Quick Replies category opened.", async () => {
+      await ctx.api.editMessageText(
+        target.messageChatId,
+        target.messageId,
+        `Quick replies\n${category.title}\nChoose a reply:`,
+        {
+          reply_markup: quickRepliesTemplateKeyboard(target.ticket.id, category.id, page)
+        }
+      );
+    });
+  }
 
   bot.command("start", async (ctx) => {
     if (!isPrivateChat(ctx)) {
@@ -179,6 +484,13 @@ export function createBot(db: SupportDatabase): Bot<Context> {
     const messageThreadId = ctx.message?.message_thread_id;
     if (typeof messageThreadId !== "number") {
       await ctx.reply("Please run /setlogs inside the forum topic you want to use as Support Logs.");
+      return;
+    }
+
+    if (db.findTicketByStaffThread(config.staffChatId, messageThreadId)) {
+      await ctx.reply("This topic belongs to a support ticket and cannot be used as Support Logs.", {
+        message_thread_id: messageThreadId
+      });
       return;
     }
 
@@ -392,12 +704,17 @@ export function createBot(db: SupportDatabase): Bot<Context> {
       return;
     }
 
+    if (namespace === "qr") {
+      await handleQuickRepliesCallback(ctx, data);
+      return;
+    }
+
     await ctx.answerCallbackQuery({ text: "Unknown action." });
   });
 
   bot.on("message", async (ctx) => {
     if (isStaffChat(ctx)) {
-      await handleStaffGroupMessage(db, ctx);
+      await handleStaffGroupMessage(db, ctx, deliverAndRecordStaffTextReply);
       return;
     }
 
@@ -674,7 +991,11 @@ async function appendToExistingTicket(
   }
 }
 
-async function handleStaffGroupMessage(db: SupportDatabase, ctx: Context): Promise<void> {
+async function handleStaffGroupMessage(
+  db: SupportDatabase,
+  ctx: Context,
+  deliverAndRecordStaffTextReply: DeliverAndRecordStaffTextReply
+): Promise<void> {
   if (!ctx.message || !ctx.chat) {
     return;
   }
@@ -705,25 +1026,32 @@ async function handleStaffGroupMessage(db: SupportDatabase, ctx: Context): Promi
   const content = getMessageContent(ctx.message);
 
   try {
-    const delivered = await deliverStaffReplyToUser(ctx.api, ticket, ctx.message, content);
+    if (content.mediaType) {
+      const delivered = await deliverStaffMediaReplyToUser(ctx.api, ticket, ctx.message.message_id);
 
-    db.addMessage({
-      ticketId: ticket.id,
-      direction: "STAFF_TO_USER",
-      sourceChatId: ctx.chat.id,
-      sourceMessageId: ctx.message.message_id,
-      deliveryChatId: ticket.user_telegram_id,
-      deliveryMessageId: delivered,
-      fromTelegramId: ctx.from?.id ?? null,
-      fromUsername: usernameOf(ctx.from),
-      senderType: "STAFF",
-      senderDisplayName: ctx.from ? displayTelegramUser(ctx.from) : "Support",
-      senderUsername: usernameOf(ctx.from),
-      text: content.text,
-      mediaType: content.mediaType,
-      filename: content.filename,
-      fileId: content.fileId
-    });
+      db.addMessage({
+        ticketId: ticket.id,
+        direction: "STAFF_TO_USER",
+        sourceChatId: ctx.chat.id,
+        sourceMessageId: ctx.message.message_id,
+        deliveryChatId: ticket.user_telegram_id,
+        deliveryMessageId: delivered,
+        fromTelegramId: ctx.from?.id ?? null,
+        fromUsername: usernameOf(ctx.from),
+        senderType: "STAFF",
+        senderDisplayName: ctx.from ? displayTelegramUser(ctx.from) : "Support",
+        senderUsername: usernameOf(ctx.from),
+        text: content.text,
+        mediaType: content.mediaType,
+        filename: content.filename,
+        fileId: content.fileId
+      });
+    } else {
+      await deliverAndRecordStaffTextReply(ticket, content.text ?? "", ctx.from, {
+        chatId: ctx.chat.id,
+        messageId: ctx.message.message_id
+      });
+    }
 
     if (ticket.status === "OPEN") {
       db.updateTicketStatus(ticket.id, "IN_PROGRESS");
@@ -999,20 +1327,13 @@ async function maybeCopyOriginalMessageToStaff(
   }
 }
 
-async function deliverStaffReplyToUser(
+async function deliverStaffMediaReplyToUser(
   api: BotApi,
   ticket: TicketWithUser,
-  message: Message,
-  content: MessageContent
+  sourceMessageId: number
 ): Promise<number> {
-  if (!content.mediaType) {
-    const replyText = content.text?.trim() ?? "";
-    const sent = await api.sendMessage(ticket.user_telegram_id, truncate(replyText, 3500));
-    return sent.message_id;
-  }
-
   const sourceChatId = ticket.staff_chat_id ?? config.staffChatId;
-  const copied = await api.copyMessage(ticket.user_telegram_id, sourceChatId, message.message_id);
+  const copied = await api.copyMessage(ticket.user_telegram_id, sourceChatId, sourceMessageId);
   return copied.message_id;
 }
 
@@ -1117,7 +1438,44 @@ function staffTicketKeyboard(ticketId: number): InlineKeyboard {
     .row()
     .text("Mark in progress", `ticket:status:${ticketId}:IN_PROGRESS`)
     .row()
-    .text("Ban user", `ticket:ban:${ticketId}`);
+    .text("Ban user", `ticket:ban:${ticketId}`)
+    .row()
+    .text("Quick replies", quickRepliesOpenCallbackData(ticketId));
+}
+
+function quickRepliesOpenCallbackData(ticketId: number): string {
+  return validateQuickRepliesCallbackData(`qr:open:${ticketId}`);
+}
+
+function quickRepliesCategoryCallbackData(ticketId: number, categoryId: string): string {
+  return validateQuickRepliesCallbackData(`qr:category:${ticketId}:${categoryId}`);
+}
+
+function quickRepliesTemplateCallbackData(ticketId: number, templateId: string): string {
+  return validateQuickRepliesCallbackData(`qr:template:${ticketId}:${templateId}`);
+}
+
+function quickRepliesPageCallbackData(ticketId: number, categoryId: string, page: number): string {
+  return validateQuickRepliesCallbackData(`qr:page:${ticketId}:${categoryId}:${page}`);
+}
+
+function quickRepliesBackCallbackData(ticketId: number): string {
+  return validateQuickRepliesCallbackData(`qr:back:${ticketId}`);
+}
+
+function quickRepliesCancelCallbackData(ticketId: number): string {
+  return validateQuickRepliesCallbackData(`qr:cancel:${ticketId}`);
+}
+
+function validateQuickRepliesCallbackData(callbackData: string): string {
+  const byteLength = Buffer.byteLength(callbackData, "utf8");
+  if (byteLength > TELEGRAM_CALLBACK_DATA_MAX_BYTES) {
+    throw new Error(
+      `Quick Replies callback_data exceeds ${TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes (${byteLength} bytes): ${callbackData}`
+    );
+  }
+
+  return callbackData;
 }
 
 function userTicketKeyboard(ticketId: number): InlineKeyboard {
@@ -1231,6 +1589,15 @@ function parseTicketId(ctx: CommandContext<Context>): number | null {
 function parseUserId(value: string): number | null {
   const id = Number(value);
   return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+function parseQuickRepliesPage(value: string | undefined): number | null {
+  if (!value || !/^(0|[1-9]\d*)$/.test(value)) {
+    return null;
+  }
+
+  const page = Number(value);
+  return Number.isSafeInteger(page) ? page : null;
 }
 
 function parseBanCommand(ctx: CommandContext<Context>): BanCommand | null {

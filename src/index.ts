@@ -3,9 +3,21 @@ import { SupportDatabase } from "./db.js";
 import { createBot, sendStaffOnboardingIfNeeded, setBotCommands } from "./bot.js";
 import { logger } from "./logger.js";
 import { archiveClosedTicketsPendingUpload, initializeSupportLogsTopic } from "./archive.js";
+import { loadQuickRepliesRegistry } from "./quickReplies.js";
+
+const quickRepliesRegistry = loadQuickRepliesRegistry();
+const quickReplyCategories = quickRepliesRegistry.listCategories();
+
+logger.info(
+  {
+    categoryCount: quickReplyCategories.length,
+    templateCount: quickReplyCategories.reduce((count, category) => count + category.templates.length, 0)
+  },
+  "Quick Replies loaded successfully"
+);
 
 const db = new SupportDatabase(config.databaseUrl);
-const bot = createBot(db);
+const bot = createBot(db, quickRepliesRegistry);
 
 async function main(): Promise<void> {
   await bot.api.deleteWebhook({ drop_pending_updates: false });

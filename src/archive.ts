@@ -66,7 +66,11 @@ export async function getSupportLogsTopicInfo(
 ): Promise<SupportLogsTopicInfo> {
   const settingKey = supportLogsThreadSettingKey();
   const storedThreadId = parseStoredThreadId(db.getSetting(settingKey));
-  if (storedThreadId) {
+  const storedTicketTopic = storedThreadId
+    ? db.findTicketByStaffThread(config.staffChatId, storedThreadId)
+    : undefined;
+
+  if (storedThreadId && !storedTicketTopic) {
     const verification = await verifyForumTopic(api, storedThreadId);
     if (verification === "ok") {
       return {
@@ -261,11 +265,14 @@ async function sendTranscriptToSupportLogs(
   const logsThreadId = options.recreateTopic
     ? await recreateSupportLogsTopic(api, db)
     : await initializeSupportLogsTopic(api, db);
+  const safeLogsThreadId = logsThreadId === ticket.message_thread_id
+    ? await recreateSupportLogsTopic(api, db)
+    : logsThreadId;
   let summaryMessageId: number | null = null;
 
   try {
     const summary = await api.sendMessage(config.staffChatId, formatTicketClosedLog(ticket), {
-      message_thread_id: logsThreadId
+      message_thread_id: safeLogsThreadId
     });
     summaryMessageId = summary.message_id;
 
@@ -273,7 +280,7 @@ async function sendTranscriptToSupportLogs(
       config.staffChatId,
       new InputFile(filePath, filename),
       {
-        message_thread_id: logsThreadId
+        message_thread_id: safeLogsThreadId
       }
     );
 
