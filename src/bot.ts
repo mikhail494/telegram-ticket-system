@@ -1,4 +1,5 @@
-import { Bot, GrammyError, HttpError, InlineKeyboard } from "grammy";
+import { Bot, GrammyError, HttpError, InlineKeyboard, InputFile } from "grammy";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { CommandContext, Context } from "grammy";
 import type { Message, User } from "grammy/types";
 import {
@@ -26,6 +27,17 @@ import {
 } from "./format.js";
 import { logger } from "./logger.js";
 import type { QuickRepliesRegistry } from "./quickReplies.js";
+import {
+  TicketBatchValidationError,
+  buildAnswerPackagePreview,
+  buildTicketBatchExportSnapshot,
+  cleanupTicketBatchZip,
+  createTicketBatchZip,
+  getAnswerPackageHash,
+  getTicketSnapshotToken,
+  parseAndValidateAnswerPackage,
+  type TicketAnswerPackage
+} from "./ticketBatch.js";
 import {
   displayTelegramUser,
   getMessageContent,
@@ -138,17 +150,31 @@ type DeliverAndRecordStaffTextReply = (
   text: string,
   staffUser: User | undefined,
   source?: StaffTextReplySource
-) => Promise<void>;
+) => Promise<number>;
 
-export function createBot(db: SupportDatabase, quickRepliesRegistry: QuickRepliesRegistry): Bot<Context> {
+interface BotRuntimeDependencies {
+  fetch?: typeof fetch;
+}
+
+interface PendingTicketBatchPreview {
+  answerPackageId: string;
+}
+
+export function createBot(
+  db: SupportDatabase,
+  quickRepliesRegistry: QuickRepliesRegistry,
+  runtime: BotRuntimeDependencies = {}
+): Bot<Context> {
   const bot = new Bot<Context>(config.botToken);
+  const fetchImpl = runtime.fetch ?? globalThis.fetch;
+  const pendingTicketBatchPreviews = new Map<string, PendingTicketBatchPreview>();
 
   async function deliverAndRecordStaffTextReply(
     ticket: TicketWithUser,
     text: string,
     staffUser: User | undefined,
     source?: StaffTextReplySource
-  ): Promise<void> {
+  ): Promise<number> {
     const sent = await bot.api.sendMessage(ticket.user_telegram_id, truncate(text.trim(), 3500));
 
     db.addMessage({
@@ -168,6 +194,7 @@ export function createBot(db: SupportDatabase, quickRepliesRegistry: QuickReplie
       filename: null,
       fileId: null
     });
+    return sent.message_id;
   }
 
   function quickRepliesCategoryKeyboard(ticketId: number): InlineKeyboard {
@@ -514,6 +541,87 @@ export function createBot(db: SupportDatabase, quickRepliesRegistry: QuickReplie
     });
   });
 
+  bot.command("exporttickets", async (ctx) => {
+    if (!isStaffChat(ctx)) {
+      if (isPrivateChat(ctx)) {
+        await ctx.reply(STAFF_ONLY_TEXT);
+      }
+      return;
+    }
+
+    if (typeof ctx.message?.message_thread_id === "number") {
+      await ctx.reply("Please run /exporttickets outside ticket topics.");
+      return;
+    }
+
+    const tickets = db.listActiveTicketsForStaffChat(config.staffChatId).map((ticket) => ({
+      ticket,
+      messages: db.listMessagesChronological(ticket.id)
+    }));
+    if (!tickets.length) {
+      await ctx.reply("There are no active tickets to export.");
+      return;
+    }
+
+    const exportId = `export_${randomUUID().replace(/-/g, "")}`;
+    const createdAt = new Date().toISOString();
+    const initialSnapshot = buildTicketBatchExportSnapshot({ exportId, createdAt, staffChatId: config.staffChatId, tickets });
+    const attachmentCopies: Array<{ messageId: number; copiedStaffMessageId: number | null }> = [];
+    let failedAttachmentCount = 0;
+
+    for (const attachment of initialSnapshot.attachmentSources) {
+      if (typeof attachment.sourceChatId !== "number" || typeof attachment.sourceMessageId !== "number") {
+        failedAttachmentCount += 1;
+        attachmentCopies.push({ messageId: attachment.messageId, copiedStaffMessageId: null });
+        continue;
+      }
+
+      try {
+        const copied = await ctx.api.copyMessage(config.staffChatId, attachment.sourceChatId, attachment.sourceMessageId);
+        attachmentCopies.push({ messageId: attachment.messageId, copiedStaffMessageId: copied.message_id });
+        await ctx.api.sendMessage(
+          config.staffChatId,
+          `Export ${exportId} | Ticket #${attachment.ticketId} | source message ${attachment.sourceMessageId}`
+        );
+      } catch (error) {
+        failedAttachmentCount += 1;
+        attachmentCopies.push({ messageId: attachment.messageId, copiedStaffMessageId: null });
+        logger.warn({ err: error, exportId, ticketId: attachment.ticketId }, "Could not copy ticket batch attachment");
+      }
+    }
+
+    const snapshot = buildTicketBatchExportSnapshot({
+      exportId,
+      createdAt,
+      staffChatId: config.staffChatId,
+      tickets,
+      attachmentCopies,
+      failedAttachmentCount
+    });
+    const zip = await createTicketBatchZip(snapshot);
+    try {
+      db.createTicketBatchExport({
+        exportId,
+        staffChatId: config.staffChatId,
+        createdAt,
+        selectionMode: "all_active",
+        ticketCount: snapshot.records.length,
+        items: snapshot.records.map((record) => ({ ticketId: record.ticket.id, snapshotToken: record.snapshot_token }))
+      });
+      await ctx.api.sendDocument(config.staffChatId, new InputFile(zip.filePath, zip.filename));
+      await ctx.reply(
+        failedAttachmentCount
+          ? `Export ${exportId} sent. ${failedAttachmentCount} attachment copy or mapping operation failed.`
+          : `Export ${exportId} sent.`
+      );
+    } catch (error) {
+      logger.error({ err: error, exportId }, "Could not send ticket batch export");
+      await ctx.reply("Could not send the ticket export.");
+    } finally {
+      await cleanupTicketBatchZip(zip);
+    }
+  });
+
   bot.command("status", async (ctx) => {
     if (!isPrivateChat(ctx) || !ctx.from) {
       return;
@@ -709,11 +817,24 @@ export function createBot(db: SupportDatabase, quickRepliesRegistry: QuickReplie
       return;
     }
 
+    if (namespace === "batch") {
+      await handleTicketBatchCallback(ctx, data);
+      return;
+    }
+
     await ctx.answerCallbackQuery({ text: "Unknown action." });
   });
 
   bot.on("message", async (ctx) => {
     if (isStaffChat(ctx)) {
+      if (isTicketAnswerPackageDocument(ctx.message)) {
+        if (typeof ctx.message.message_thread_id === "number") {
+          await ctx.reply("Upload ticket answer packages outside ticket topics.");
+          return;
+        }
+        await handleTicketAnswerPackageUpload(ctx);
+        return;
+      }
       await handleStaffGroupMessage(db, ctx, deliverAndRecordStaffTextReply);
       return;
     }
@@ -733,6 +854,243 @@ export function createBot(db: SupportDatabase, quickRepliesRegistry: QuickReplie
 
     await handlePrivateUserMessage(db, ctx);
   });
+
+  async function handleTicketAnswerPackageUpload(ctx: Context): Promise<void> {
+    const document = ctx.message && "document" in ctx.message ? ctx.message.document : undefined;
+    if (!document || !ctx.chat) {
+      return;
+    }
+    if (typeof document.file_size === "number" && document.file_size > 5 * 1024 * 1024) {
+      await ctx.reply("Ticket answer packages must be 5 MiB or smaller.");
+      return;
+    }
+    const filename = document.file_name ?? "";
+    const filenameMatch = /^ticket-answers_(.+)\.json$/i.exec(filename);
+    const exportId = filenameMatch?.[1];
+    if (!exportId) {
+      return;
+    }
+
+    try {
+      const file = await ctx.api.getFile(document.file_id);
+      if (!file.file_path) {
+        throw new TicketBatchValidationError("Telegram did not return a file path for the answer package.");
+      }
+      const response = await fetchImpl(`https://api.telegram.org/file/bot${config.botToken}/${file.file_path}`);
+      if (!response.ok) {
+        throw new TicketBatchValidationError("Telegram could not download the answer package.");
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength > 5 * 1024 * 1024) {
+        throw new TicketBatchValidationError("Ticket answer packages must be 5 MiB or smaller.");
+      }
+      const raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      const exportRecord = db.getTicketBatchExport(exportId, config.staffChatId);
+      if (!exportRecord) {
+        throw new TicketBatchValidationError("This answer package references an unknown export for this staff chat.");
+      }
+      const exportItems = db.listTicketBatchExportItems(exportId);
+      const answerPackage = parseAndValidateAnswerPackage(raw, exportId, exportItems);
+      const packageHash = getAnswerPackageHash(answerPackage);
+      const existingById = db.getTicketBatchAnswerPackage(answerPackage.answer_package_id, config.staffChatId);
+      const existingByHash = db.getTicketBatchAnswerPackageByHash(packageHash, config.staffChatId);
+      let persistedPackage = existingById;
+      if (existingById && existingById.package_hash !== packageHash) {
+        throw new TicketBatchValidationError("This answer_package_id was already imported with different content.");
+      }
+      if (!existingById && existingByHash) {
+        throw new TicketBatchValidationError("This answer package content was already imported under a different identity.");
+      }
+      if (!persistedPackage) {
+        persistedPackage = db.createTicketBatchAnswerPackage({
+          answerPackageId: answerPackage.answer_package_id,
+          exportId,
+          staffChatId: config.staffChatId,
+          packageHash,
+          sourceChatId: ctx.chat.id,
+          sourceMessageId: ctx.message?.message_id ?? null,
+          packageCreatedAt: answerPackage.created_at,
+          items: answerPackage.answers
+        });
+      }
+      const preview = buildAnswerPackagePreview(answerPackage, exportItems, (ticketId) => {
+        const ticket = db.getTicketWithUser(ticketId);
+        if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+          return null;
+        }
+        return {
+          status: ticket.status,
+          snapshotToken: getTicketSnapshotToken(ticket, db.listMessagesChronological(ticket.id))
+        };
+      });
+      const previewToken = randomBytes(12).toString("base64url");
+      const previewMessage = await ctx.reply(formatTicketBatchPreview(preview), {
+        reply_markup: new InlineKeyboard()
+          .text("Apply", ticketBatchApplyCallbackData(previewToken))
+          .text("Cancel", ticketBatchCancelCallbackData(previewToken))
+      });
+      pendingTicketBatchPreviews.set(previewToken, { answerPackageId: persistedPackage.answer_package_id });
+      logger.info({ exportId, previewMessageId: previewMessage.message_id }, "Ticket answer package preview created");
+    } catch (error) {
+      const message = error instanceof TicketBatchValidationError ? error.message : "Could not validate the ticket answer package.";
+      logger.warn("Ticket answer package validation failed");
+      await ctx.reply(message);
+    }
+  }
+
+  async function handleTicketBatchCallback(ctx: Context, data: string): Promise<void> {
+    if (!isStaffChat(ctx)) {
+      await ctx.answerCallbackQuery({ text: "Staff only.", show_alert: true });
+      return;
+    }
+    const [, action, token] = data.split(":");
+    if ((action !== "cancel" && action !== "apply") || !token) {
+      await ctx.answerCallbackQuery({ text: "Unknown ticket batch action." });
+      return;
+    }
+    const message = ctx.callbackQuery?.message;
+    if (message && "message_thread_id" in message && typeof message.message_thread_id === "number") {
+      await ctx.answerCallbackQuery({ text: "Use ticket batch controls outside ticket topics." });
+      return;
+    }
+    const pending = pendingTicketBatchPreviews.get(token);
+    if (!pending) {
+      await ctx.answerCallbackQuery({ text: "This preview has expired." });
+      return;
+    }
+    if (action === "cancel") {
+      const cancelled = db.cancelTicketBatchAnswerPackage(pending.answerPackageId, config.staffChatId);
+      if (!cancelled) {
+        await ctx.answerCallbackQuery({ text: "This package can no longer be cancelled." });
+        return;
+      }
+      pendingTicketBatchPreviews.delete(token);
+      await clearTicketBatchPreviewMarkup(ctx, message);
+      await ctx.answerCallbackQuery({ text: "Ticket batch preview cancelled." });
+      return;
+    }
+
+    const beforeClaim = db.getTicketBatchAnswerPackage(pending.answerPackageId, config.staffChatId);
+    if (beforeClaim?.status === "APPLYING") {
+      await ctx.answerCallbackQuery({ text: "Answer package is already being applied." });
+      return;
+    }
+    if (beforeClaim?.status === "COMPLETED") {
+      await ctx.answerCallbackQuery({ text: "Answer package is already completed." });
+      return;
+    }
+    const claimed = db.claimTicketBatchAnswerPackage(pending.answerPackageId, config.staffChatId);
+    if (!claimed) {
+      await ctx.answerCallbackQuery({ text: "Answer package not found." });
+      return;
+    }
+    if (claimed.status === "CANCELLED") {
+      await ctx.answerCallbackQuery({ text: "This package was cancelled." });
+      return;
+    }
+
+    pendingTicketBatchPreviews.delete(token);
+    await ctx.answerCallbackQuery({ text: "Applying answer package..." });
+    const summary = await applyTicketBatchAnswerPackage(claimed.answer_package_id, ctx.from);
+    await clearTicketBatchPreviewMarkup(ctx, message);
+    await ctx.api.sendMessage(config.staffChatId, summary);
+  }
+
+  async function clearTicketBatchPreviewMarkup(ctx: Context, message: NonNullable<Context["callbackQuery"]>["message"] | undefined): Promise<void> {
+    if (message && "chat" in message) {
+      try {
+        await ctx.api.editMessageReplyMarkup(message.chat.id, message.message_id, { reply_markup: undefined });
+      } catch (error) {
+        logger.warn({ err: error }, "Could not remove ticket batch preview keyboard");
+      }
+    }
+  }
+
+  async function applyTicketBatchAnswerPackage(answerPackageId: string, staffUser: User | undefined): Promise<string> {
+    const packageRecord = db.getTicketBatchAnswerPackage(answerPackageId, config.staffChatId);
+    if (!packageRecord) return "Answer package not found.";
+    const exportItems = db.listTicketBatchExportItems(packageRecord.export_id);
+    const exportTokens = new Map(exportItems.map((item) => [item.ticket_id, item.snapshot_token]));
+    const items = db.listTicketBatchAnswerItems(answerPackageId);
+    const totals = { keep: 0, close: 0, noAction: 0, stale: 0, inactive: 0, failed: 0, unknown: 0, replySent: 0, skipped: 0 };
+    const problemTicketIds = {
+      stale: [] as number[],
+      inactive: [] as number[],
+      failed: [] as number[],
+      unknown: [] as number[],
+      replySent: [] as number[]
+    };
+
+    for (const item of items) {
+      if (["COMPLETED", "NO_ACTION", "STALE", "INACTIVE"].includes(item.state)) { totals.skipped += 1; continue; }
+      if (item.state === "UNKNOWN_DELIVERY" || item.state === "APPLYING") { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "UNKNOWN_DELIVERY", { lastError: "Delivery outcome requires manual review." }); totals.unknown += 1; problemTicketIds.unknown.push(item.ticket_id); continue; }
+      const ticket = db.getTicketWithUser(item.ticket_id);
+      if (item.state === "REPLY_SENT" && item.action === "reply_and_close") {
+        if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true });
+          totals.inactive += 1;
+          problemTicketIds.inactive.push(item.ticket_id);
+          continue;
+        }
+
+        try {
+          const result = await closeTicket(db, bot.api, ticket.id, {
+            notifyUser: true,
+            staffNotice: "Ticket closed by batch answer.",
+            closedBy: staffActor(staffUser)
+          });
+          if (result.includes("pending retry")) {
+            db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { lastError: "Reply sent; close/archive pending." });
+            totals.replySent += 1;
+            problemTicketIds.replySent.push(item.ticket_id);
+          } else {
+            db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "COMPLETED", { applied: true });
+            totals.close += 1;
+          }
+        } catch {
+          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { lastError: "Reply sent; close/archive pending." });
+          totals.replySent += 1;
+          problemTicketIds.replySent.push(item.ticket_id);
+        }
+        continue;
+      }
+      const expectedToken = exportTokens.get(item.ticket_id);
+      if (!ticket || ticket.staff_chat_id !== config.staffChatId || ticket.status === "CLOSED") { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true }); totals.inactive += 1; problemTicketIds.inactive.push(item.ticket_id); continue; }
+      if (!expectedToken || item.snapshot_token !== expectedToken || getTicketSnapshotToken(ticket, db.listMessagesChronological(ticket.id)) !== expectedToken) { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "STALE", { applied: true }); totals.stale += 1; problemTicketIds.stale.push(item.ticket_id); continue; }
+      if (!db.claimTicketBatchAnswerItem(answerPackageId, item.ticket_id)) { totals.skipped += 1; continue; }
+      if (item.action === "no_action") { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "NO_ACTION", { applied: true }); totals.noAction += 1; continue; }
+      try {
+        const deliveryMessageId = await deliverAndRecordStaffTextReply(ticket, item.reply_text ?? "", staffUser);
+        if (item.action === "reply_keep_open") {
+          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "COMPLETED", { deliveryMessageId, applied: true });
+          if (ticket.status === "OPEN") {
+            db.updateTicketStatus(ticket.id, "IN_PROGRESS");
+            try {
+              await refreshStaffTicketMessage(db, bot.api, ticket.id);
+            } catch (error) {
+              logger.warn({ err: error, ticketId: ticket.id }, "Could not refresh ticket summary after batch reply");
+            }
+          }
+          totals.keep += 1;
+          continue;
+        }
+        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { deliveryMessageId, applied: true });
+        try {
+          const closeResult = await closeTicket(db, bot.api, ticket.id, { notifyUser: true, staffNotice: "Ticket closed by batch answer.", closedBy: staffActor(staffUser) });
+          if (closeResult.includes("pending retry")) { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { lastError: "Reply sent; close/archive pending." }); totals.replySent += 1; problemTicketIds.replySent.push(item.ticket_id); } else { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "COMPLETED", { applied: true }); totals.close += 1; }
+        } catch {
+          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { lastError: "Reply sent; close/archive pending." });
+          totals.replySent += 1;
+          problemTicketIds.replySent.push(item.ticket_id);
+        }
+      } catch (error) { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "FAILED", { lastError: "Ticket batch action failed." }); totals.failed += 1; problemTicketIds.failed.push(item.ticket_id); }
+    }
+    db.finalizeTicketBatchAnswerPackage(answerPackageId, config.staffChatId);
+    const problems = Object.entries(problemTicketIds)
+      .filter(([, ticketIds]) => ticketIds.length > 0)
+      .map(([kind, ticketIds]) => `${kind} #${ticketIds.sort((left, right) => left - right).join(", #")}`);
+    return `Answer package ${answerPackageId}\nCompleted: keep open ${totals.keep}, close ${totals.close}, no action ${totals.noAction}.\nBlocked: stale ${totals.stale}, inactive/closed ${totals.inactive}, failed ${totals.failed}, unknown delivery ${totals.unknown}, reply sent/close pending ${totals.replySent}, skipped ${totals.skipped}.${problems.length > 0 ? `\nTickets: ${problems.join("; ")}.` : ""}`;
+  }
 
   bot.catch(async (error) => {
     const ctx = error.ctx;
@@ -1250,7 +1608,10 @@ async function closeTicket(
   }
 
   if (ticket.status === "CLOSED") {
-    return `Ticket #${ticketId} is already closed.`;
+    const archived = await archiveTicketIfPossible(api, db, ticketId);
+    return archived
+      ? `Ticket #${ticketId} is already closed and archived.`
+      : `Ticket #${ticketId} is already closed. Transcript archive is pending retry.`;
   }
 
   const closedTicket = db.closeTicketRecord(ticketId, options.closedBy ?? systemActor());
@@ -1476,6 +1837,47 @@ function validateQuickRepliesCallbackData(callbackData: string): string {
   }
 
   return callbackData;
+}
+
+function ticketBatchCancelCallbackData(previewToken: string): string {
+  const callbackData = `batch:cancel:${previewToken}`;
+  const byteLength = Buffer.byteLength(callbackData, "utf8");
+  if (byteLength > TELEGRAM_CALLBACK_DATA_MAX_BYTES) {
+    throw new Error(`Ticket batch callback_data exceeds ${TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes (${byteLength} bytes).`);
+  }
+  return callbackData;
+}
+
+function ticketBatchApplyCallbackData(previewToken: string): string {
+  return validateTicketBatchCallbackData(`batch:apply:${previewToken}`);
+}
+
+function validateTicketBatchCallbackData(callbackData: string): string {
+  const byteLength = Buffer.byteLength(callbackData, "utf8");
+  if (byteLength > TELEGRAM_CALLBACK_DATA_MAX_BYTES) {
+    throw new Error(`Ticket batch callback_data exceeds ${TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes (${byteLength} bytes).`);
+  }
+  return callbackData;
+}
+
+function isTicketAnswerPackageDocument(message: Message | undefined): boolean {
+  if (!message || !("document" in message) || !message.document) {
+    return false;
+  }
+  return /^ticket-answers_.+\.json$/i.test(message.document.file_name ?? "");
+}
+
+function formatTicketBatchPreview(preview: ReturnType<typeof buildAnswerPackagePreview>): string {
+  const totals = preview.totals;
+  return [
+    "Ticket answer package preview",
+    "",
+    ...preview.lines,
+    "",
+    `Totals: ${totals.readyReplyKeepOpen} keep open, ${totals.readyReplyClose} close, ${totals.noAction} no action, ${totals.staleChanged} stale/changed, ${totals.inactiveClosed} inactive/closed.`,
+    "",
+    "Apply this package to send the ready answers."
+  ].join("\n");
 }
 
 function userTicketKeyboard(ticketId: number): InlineKeyboard {
