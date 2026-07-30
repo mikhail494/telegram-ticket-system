@@ -105,6 +105,51 @@ export interface CloseTicketInput {
   username?: string | null;
 }
 
+export interface TicketBatchExportRecord {
+  export_id: string;
+  staff_chat_id: number;
+  created_at: string;
+  selection_mode: string;
+  ticket_count: number;
+}
+
+export interface TicketBatchExportItemRecord {
+  export_id: string;
+  ticket_id: number;
+  snapshot_token: string;
+}
+
+export interface CreateTicketBatchExportInput {
+  exportId: string;
+  staffChatId: number;
+  createdAt: string;
+  selectionMode: "all_active";
+  ticketCount: number;
+  items: Array<{ ticketId: number; snapshotToken: string }>;
+}
+
+export type TicketBatchAnswerPackageStatus = "PENDING" | "APPLYING" | "COMPLETED" | "PARTIAL" | "CANCELLED";
+export type TicketBatchAnswerItemState = "PENDING" | "APPLYING" | "REPLY_SENT" | "COMPLETED" | "NO_ACTION" | "STALE" | "INACTIVE" | "FAILED" | "UNKNOWN_DELIVERY";
+
+export interface TicketBatchAnswerPackageRecord {
+  answer_package_id: string; export_id: string; staff_chat_id: number; package_hash: string;
+  source_chat_id: number | null; source_message_id: number | null; package_created_at: string;
+  imported_at: string; status: TicketBatchAnswerPackageStatus; started_at: string | null;
+  completed_at: string | null; updated_at: string;
+}
+
+export interface TicketBatchAnswerItemRecord {
+  answer_package_id: string; ticket_id: number; snapshot_token: string; action: "reply_keep_open" | "reply_and_close" | "no_action";
+  reply_text: string | null; state: TicketBatchAnswerItemState; delivery_message_id: number | null;
+  applied_at: string | null; last_error: string | null; updated_at: string;
+}
+
+export interface CreateTicketBatchAnswerPackageInput {
+  answerPackageId: string; exportId: string; staffChatId: number; packageHash: string;
+  sourceChatId?: number | null; sourceMessageId?: number | null; packageCreatedAt: string;
+  items: Array<Pick<TicketBatchAnswerItemRecord, "ticket_id" | "snapshot_token" | "action" | "reply_text">>;
+}
+
 interface TableColumnInfo {
   name: string;
 }
@@ -399,6 +444,21 @@ export class SupportDatabase {
     return this.getTicket(ticketId);
   }
 
+  listActiveTicketsForStaffChat(staffChatId: number): TicketWithUser[] {
+    return this.db
+      .prepare(
+        `
+        SELECT tickets.*, users.username, users.first_name, users.last_name
+        FROM tickets
+        JOIN users ON users.telegram_id = tickets.user_telegram_id
+        WHERE tickets.staff_chat_id = ?
+          AND tickets.status IN ('OPEN', 'IN_PROGRESS', 'WAITING_USER')
+        ORDER BY tickets.id ASC
+      `
+      )
+      .all(staffChatId) as TicketWithUser[];
+  }
+
   closeTicketRecord(ticketId: number, input: CloseTicketInput): TicketRecord | undefined {
     const timestamp = now();
     this.db
@@ -576,6 +636,120 @@ export class SupportDatabase {
       `
       )
       .all(staffChatId, limit) as TicketWithUser[];
+  }
+
+  createTicketBatchExport(input: CreateTicketBatchExportInput): void {
+    const tx = this.db.transaction((value: CreateTicketBatchExportInput) => {
+      this.db
+        .prepare(
+          `
+          INSERT INTO ticket_batch_exports (
+            export_id, staff_chat_id, created_at, selection_mode, ticket_count
+          ) VALUES (?, ?, ?, ?, ?)
+        `
+        )
+        .run(value.exportId, value.staffChatId, value.createdAt, value.selectionMode, value.ticketCount);
+
+      const insertItem = this.db.prepare(
+        `
+        INSERT INTO ticket_batch_export_items (export_id, ticket_id, snapshot_token)
+        VALUES (?, ?, ?)
+      `
+      );
+      for (const item of value.items) {
+        insertItem.run(value.exportId, item.ticketId, item.snapshotToken);
+      }
+    });
+
+    tx(input);
+  }
+
+  getTicketBatchExport(exportId: string, staffChatId: number): TicketBatchExportRecord | undefined {
+    return this.db
+      .prepare(
+        `
+        SELECT * FROM ticket_batch_exports
+        WHERE export_id = ? AND staff_chat_id = ?
+      `
+      )
+      .get(exportId, staffChatId) as TicketBatchExportRecord | undefined;
+  }
+
+  listTicketBatchExportItems(exportId: string): TicketBatchExportItemRecord[] {
+    return this.db
+      .prepare(
+        `
+        SELECT * FROM ticket_batch_export_items
+        WHERE export_id = ?
+        ORDER BY ticket_id ASC
+      `
+      )
+      .all(exportId) as TicketBatchExportItemRecord[];
+  }
+
+  getTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
+    return this.db.prepare("SELECT * FROM ticket_batch_answer_packages WHERE answer_package_id = ? AND staff_chat_id = ?")
+      .get(answerPackageId, staffChatId) as TicketBatchAnswerPackageRecord | undefined;
+  }
+
+  getTicketBatchAnswerPackageByHash(packageHash: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
+    return this.db.prepare("SELECT * FROM ticket_batch_answer_packages WHERE package_hash = ? AND staff_chat_id = ?")
+      .get(packageHash, staffChatId) as TicketBatchAnswerPackageRecord | undefined;
+  }
+
+  createTicketBatchAnswerPackage(input: CreateTicketBatchAnswerPackageInput): TicketBatchAnswerPackageRecord {
+    const tx = this.db.transaction((value: CreateTicketBatchAnswerPackageInput) => {
+      const timestamp = now();
+      this.db.prepare(`INSERT INTO ticket_batch_answer_packages (answer_package_id, export_id, staff_chat_id, package_hash, source_chat_id, source_message_id, package_created_at, imported_at, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`)
+        .run(value.answerPackageId, value.exportId, value.staffChatId, value.packageHash, value.sourceChatId ?? null, value.sourceMessageId ?? null, value.packageCreatedAt, timestamp, timestamp);
+      const insert = this.db.prepare(`INSERT INTO ticket_batch_answer_items (answer_package_id, ticket_id, snapshot_token, action, reply_text, state, updated_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?)`);
+      for (const item of value.items) insert.run(value.answerPackageId, item.ticket_id, item.snapshot_token, item.action, item.reply_text, timestamp);
+    });
+    tx(input);
+    return this.getTicketBatchAnswerPackage(input.answerPackageId, input.staffChatId)!;
+  }
+
+  listTicketBatchAnswerItems(answerPackageId: string): TicketBatchAnswerItemRecord[] {
+    return this.db.prepare("SELECT * FROM ticket_batch_answer_items WHERE answer_package_id = ? ORDER BY ticket_id ASC")
+      .all(answerPackageId) as TicketBatchAnswerItemRecord[];
+  }
+
+  claimTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
+    const tx = this.db.transaction(() => {
+      const item = this.getTicketBatchAnswerPackage(answerPackageId, staffChatId);
+      if (!item || (item.status !== "PENDING" && item.status !== "PARTIAL")) return item;
+      const timestamp = now();
+      this.db.prepare("UPDATE ticket_batch_answer_packages SET status = 'APPLYING', started_at = COALESCE(started_at, ?), updated_at = ? WHERE answer_package_id = ? AND status IN ('PENDING', 'PARTIAL')")
+        .run(timestamp, timestamp, answerPackageId);
+      return this.getTicketBatchAnswerPackage(answerPackageId, staffChatId);
+    });
+    return tx();
+  }
+
+  cancelTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): boolean {
+    const result = this.db.prepare("UPDATE ticket_batch_answer_packages SET status = 'CANCELLED', updated_at = ? WHERE answer_package_id = ? AND staff_chat_id = ? AND status = 'PENDING'")
+      .run(now(), answerPackageId, staffChatId);
+    return result.changes === 1;
+  }
+
+  claimTicketBatchAnswerItem(answerPackageId: string, ticketId: number): boolean {
+    const result = this.db.prepare("UPDATE ticket_batch_answer_items SET state = 'APPLYING', updated_at = ? WHERE answer_package_id = ? AND ticket_id = ? AND state = 'PENDING'")
+      .run(now(), answerPackageId, ticketId);
+    return result.changes === 1;
+  }
+
+  updateTicketBatchAnswerItem(answerPackageId: string, ticketId: number, state: TicketBatchAnswerItemState, options: { deliveryMessageId?: number | null; lastError?: string | null; applied?: boolean } = {}): void {
+    this.db.prepare("UPDATE ticket_batch_answer_items SET state = ?, delivery_message_id = COALESCE(?, delivery_message_id), last_error = ?, applied_at = CASE WHEN ? THEN ? ELSE applied_at END, updated_at = ? WHERE answer_package_id = ? AND ticket_id = ?")
+      .run(state, options.deliveryMessageId ?? null, options.lastError ?? null, options.applied ? 1 : 0, options.applied ? now() : null, now(), answerPackageId, ticketId);
+  }
+
+  finalizeTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
+    const items = this.listTicketBatchAnswerItems(answerPackageId);
+    const complete = items.every((item) => ["COMPLETED", "NO_ACTION", "STALE", "INACTIVE"].includes(item.state));
+    const timestamp = now();
+    this.db.prepare("UPDATE ticket_batch_answer_packages SET status = ?, completed_at = CASE WHEN ? THEN ? ELSE completed_at END, updated_at = ? WHERE answer_package_id = ? AND staff_chat_id = ?")
+      .run(complete ? "COMPLETED" : "PARTIAL", complete ? 1 : 0, complete ? timestamp : null, timestamp, answerPackageId, staffChatId);
+    return this.getTicketBatchAnswerPackage(answerPackageId, staffChatId);
   }
 
   getSetting(key: string): string | undefined {
@@ -863,6 +1037,52 @@ export class SupportDatabase {
           this.db.exec(`
             CREATE INDEX IF NOT EXISTS idx_tickets_archive_pending
               ON tickets(staff_chat_id, status, archived_at);
+          `);
+        }
+      },
+      {
+        id: 8,
+        name: "create_ticket_batch_exports",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS ticket_batch_exports (
+              export_id TEXT PRIMARY KEY,
+              staff_chat_id INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              selection_mode TEXT NOT NULL,
+              ticket_count INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ticket_batch_export_items (
+              export_id TEXT NOT NULL,
+              ticket_id INTEGER NOT NULL,
+              snapshot_token TEXT NOT NULL,
+              PRIMARY KEY (export_id, ticket_id),
+              FOREIGN KEY (export_id) REFERENCES ticket_batch_exports(export_id) ON DELETE CASCADE
+            );
+          `);
+        }
+      },
+      {
+        id: 9,
+        name: "create_ticket_batch_answer_packages",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS ticket_batch_answer_packages (
+              answer_package_id TEXT PRIMARY KEY, export_id TEXT NOT NULL, staff_chat_id INTEGER NOT NULL,
+              package_hash TEXT NOT NULL, source_chat_id INTEGER, source_message_id INTEGER,
+              package_created_at TEXT NOT NULL, imported_at TEXT NOT NULL, status TEXT NOT NULL,
+              started_at TEXT, completed_at TEXT, updated_at TEXT NOT NULL,
+              FOREIGN KEY (export_id) REFERENCES ticket_batch_exports(export_id) ON DELETE CASCADE,
+              UNIQUE (staff_chat_id, package_hash)
+            );
+            CREATE TABLE IF NOT EXISTS ticket_batch_answer_items (
+              answer_package_id TEXT NOT NULL, ticket_id INTEGER NOT NULL, snapshot_token TEXT NOT NULL,
+              action TEXT NOT NULL, reply_text TEXT, state TEXT NOT NULL, delivery_message_id INTEGER,
+              applied_at TEXT, last_error TEXT, updated_at TEXT NOT NULL,
+              PRIMARY KEY (answer_package_id, ticket_id),
+              FOREIGN KEY (answer_package_id) REFERENCES ticket_batch_answer_packages(answer_package_id) ON DELETE CASCADE
+            );
           `);
         }
       }

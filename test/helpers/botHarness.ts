@@ -105,6 +105,13 @@ export interface StaffMediaUpdateOptions extends StaffTopicUpdateOptions {
   fileName?: string;
 }
 
+export interface StaffDocumentUpdateOptions extends Omit<StaffTopicUpdateOptions, "messageThreadId"> {
+  messageThreadId?: number;
+  fileId?: string;
+  fileName?: string;
+  fileSize?: number;
+}
+
 export interface BotHarnessOptions {
   quickRepliesRegistry?: QuickRepliesRegistry;
 }
@@ -122,12 +129,17 @@ export interface BotHarness {
   findApiCalls(method: string): RecordedApiCall[];
   countApiCalls(method: string): number;
   clearApiCalls(): void;
+  setDownloadResponse(body: string, status?: number): void;
+  failNextDownload(status?: number): void;
 }
 
 export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
   const db = new SupportDatabase(":memory:");
   const registry = options.quickRepliesRegistry ?? loadQuickRepliesRegistry();
-  const bot = createBot(db, registry);
+  let downloadResponse: { body: string; status: number } = { body: "{}", status: 200 };
+  const bot = createBot(db, registry, {
+    fetch: async () => new Response(downloadResponse.body, { status: downloadResponse.status })
+  });
   const apiCalls: RecordedApiCall[] = [];
   const responseOverrides = new Map<string, ApiResponseOverride>();
   const pendingFailures = new Map<string, ApiMockFailure[]>();
@@ -189,6 +201,12 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
     countApiCalls: (method) => apiCalls.filter((call) => call.method === method).length,
     clearApiCalls: () => {
       apiCalls.length = 0;
+    },
+    setDownloadResponse: (body, status = 200) => {
+      downloadResponse = { body, status };
+    },
+    failNextDownload: (status = 500) => {
+      downloadResponse = { body: "", status };
     }
   };
 }
@@ -312,6 +330,26 @@ export function buildStaffMediaMessageUpdate(options: StaffMediaUpdateOptions = 
   };
 }
 
+export function buildStaffDocumentUpdate(options: StaffDocumentUpdateOptions = {}): Update {
+  const staff = toTelegramUser(options.staff);
+  const message = {
+    message_id: options.messageId ?? 7001,
+    date: 1,
+    from: staff,
+    chat: { id: options.chatId ?? TEST_STAFF_CHAT_ID, type: "supergroup" as const, title: "Test Staff Chat" },
+    document: {
+      file_id: options.fileId ?? "answer-package-file",
+      file_unique_id: "answer-package-unique",
+      file_name: options.fileName ?? "ticket-answers_export_test.json",
+      file_size: options.fileSize ?? 100
+    }
+  };
+  return {
+    update_id: options.updateId ?? 1,
+    message: options.messageThreadId === undefined ? message : { ...message, message_thread_id: options.messageThreadId }
+  };
+}
+
 function seedTicket(db: SupportDatabaseType, options: SeedTicketOptions): TicketWithUser {
   const user = options.user ?? {};
   const userTelegramId = user.id ?? TEST_USER_ID;
@@ -395,6 +433,16 @@ function createDefaultSuccessResponse(
 
   if (method === "copyMessage") {
     return { ok: true, result: { message_id: messageId } };
+  }
+
+  if (method === "getFile") {
+    return {
+      ok: true,
+      result: {
+        file_id: stringPayloadValue(payload, "file_id") ?? "test-file",
+        file_path: "test/answer.json"
+      }
+    };
   }
 
   if (method === "createForumTopic") {
