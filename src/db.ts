@@ -111,7 +111,13 @@ export interface TicketBatchExportRecord {
   created_at: string;
   selection_mode: string;
   ticket_count: number;
+  delivery_state: TicketBatchExportDeliveryState;
+  delivery_message_id: number | null;
+  delivered_at: string | null;
+  last_error: string | null;
 }
+
+export type TicketBatchExportDeliveryState = "PREPARING" | "DELIVERED" | "FAILED" | "UNKNOWN_DELIVERY";
 
 export interface TicketBatchExportItemRecord {
   export_id: string;
@@ -126,6 +132,7 @@ export interface CreateTicketBatchExportInput {
   selectionMode: "all_active";
   ticketCount: number;
   items: Array<{ ticketId: number; snapshotToken: string }>;
+  deliveryState?: TicketBatchExportDeliveryState;
 }
 
 export type TicketBatchAnswerPackageStatus = "PENDING" | "APPLYING" | "COMPLETED" | "PARTIAL" | "CANCELLED";
@@ -136,6 +143,7 @@ export interface TicketBatchAnswerPackageRecord {
   source_chat_id: number | null; source_message_id: number | null; package_created_at: string;
   imported_at: string; status: TicketBatchAnswerPackageStatus; started_at: string | null;
   completed_at: string | null; updated_at: string;
+  preview_token: string | null; preview_chat_id: number | null; preview_message_id: number | null; preview_page: number | null;
 }
 
 export interface TicketBatchAnswerItemRecord {
@@ -677,11 +685,11 @@ export class SupportDatabase {
         .prepare(
           `
           INSERT INTO ticket_batch_exports (
-            export_id, staff_chat_id, created_at, selection_mode, ticket_count
-          ) VALUES (?, ?, ?, ?, ?)
+            export_id, staff_chat_id, created_at, selection_mode, ticket_count, delivery_state
+          ) VALUES (?, ?, ?, ?, ?, ?)
         `
         )
-        .run(value.exportId, value.staffChatId, value.createdAt, value.selectionMode, value.ticketCount);
+        .run(value.exportId, value.staffChatId, value.createdAt, value.selectionMode, value.ticketCount, value.deliveryState ?? "DELIVERED");
 
       const insertItem = this.db.prepare(
         `
@@ -720,6 +728,30 @@ export class SupportDatabase {
       .all(exportId) as TicketBatchExportItemRecord[];
   }
 
+  markTicketBatchExportDelivered(exportId: string, staffChatId: number, deliveryMessageId: number): void {
+    const result = this.db.prepare(`UPDATE ticket_batch_exports
+      SET delivery_state = 'DELIVERED', delivery_message_id = ?, delivered_at = ?, last_error = NULL
+      WHERE export_id = ? AND staff_chat_id = ? AND delivery_state = 'PREPARING'`)
+      .run(deliveryMessageId, now(), exportId, staffChatId);
+    if (result.changes !== 1) {
+      throw new Error("Ticket batch export delivery state could not be confirmed.");
+    }
+  }
+
+  markTicketBatchExportFailed(exportId: string, staffChatId: number, error: string): void {
+    this.db.prepare(`UPDATE ticket_batch_exports
+      SET delivery_state = 'FAILED', last_error = ?
+      WHERE export_id = ? AND staff_chat_id = ? AND delivery_state = 'PREPARING'`)
+      .run(error.slice(0, 160), exportId, staffChatId);
+  }
+
+  markTicketBatchExportUnknownDelivery(exportId: string, staffChatId: number, error: string): void {
+    this.db.prepare(`UPDATE ticket_batch_exports
+      SET delivery_state = 'UNKNOWN_DELIVERY', last_error = ?
+      WHERE export_id = ? AND staff_chat_id = ? AND delivery_state = 'PREPARING'`)
+      .run(error.slice(0, 160), exportId, staffChatId);
+  }
+
   getTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
     return this.db.prepare("SELECT * FROM ticket_batch_answer_packages WHERE answer_package_id = ? AND staff_chat_id = ?")
       .get(answerPackageId, staffChatId) as TicketBatchAnswerPackageRecord | undefined;
@@ -728,6 +760,11 @@ export class SupportDatabase {
   getTicketBatchAnswerPackageByHash(packageHash: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
     return this.db.prepare("SELECT * FROM ticket_batch_answer_packages WHERE package_hash = ? AND staff_chat_id = ?")
       .get(packageHash, staffChatId) as TicketBatchAnswerPackageRecord | undefined;
+  }
+
+  getTicketBatchAnswerPackageByPreviewToken(previewToken: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
+    return this.db.prepare("SELECT * FROM ticket_batch_answer_packages WHERE preview_token = ? AND staff_chat_id = ?")
+      .get(previewToken, staffChatId) as TicketBatchAnswerPackageRecord | undefined;
   }
 
   createTicketBatchAnswerPackage(input: CreateTicketBatchAnswerPackageInput): TicketBatchAnswerPackageRecord {
@@ -745,6 +782,24 @@ export class SupportDatabase {
   listTicketBatchAnswerItems(answerPackageId: string): TicketBatchAnswerItemRecord[] {
     return this.db.prepare("SELECT * FROM ticket_batch_answer_items WHERE answer_package_id = ? ORDER BY ticket_id ASC")
       .all(answerPackageId) as TicketBatchAnswerItemRecord[];
+  }
+
+  setTicketBatchAnswerPackagePreview(answerPackageId: string, staffChatId: number, preview: { token: string; chatId: number; messageId: number; page: number }): boolean {
+    const result = this.db.prepare(`UPDATE ticket_batch_answer_packages
+      SET preview_token = ?, preview_chat_id = ?, preview_message_id = ?, preview_page = ?, updated_at = ?
+      WHERE answer_package_id = ? AND staff_chat_id = ? AND status = 'PENDING' AND preview_message_id IS NULL`)
+      .run(preview.token, preview.chatId, preview.messageId, preview.page, now(), answerPackageId, staffChatId);
+    return result.changes === 1;
+  }
+
+  updateTicketBatchAnswerPackagePreviewPage(answerPackageId: string, staffChatId: number, page: number): void {
+    this.db.prepare("UPDATE ticket_batch_answer_packages SET preview_page = ?, updated_at = ? WHERE answer_package_id = ? AND staff_chat_id = ? AND status = 'PENDING'")
+      .run(page, now(), answerPackageId, staffChatId);
+  }
+
+  clearTicketBatchAnswerPackagePreview(answerPackageId: string, staffChatId: number): void {
+    this.db.prepare("UPDATE ticket_batch_answer_packages SET preview_token = NULL, preview_chat_id = NULL, preview_message_id = NULL, preview_page = NULL, updated_at = ? WHERE answer_package_id = ? AND staff_chat_id = ?")
+      .run(now(), answerPackageId, staffChatId);
   }
 
   claimTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
@@ -1296,6 +1351,27 @@ export class SupportDatabase {
               ON entity_notification_publications(state, updated_at);
           `);
         }
+      },
+      {
+        id: 13,
+        name: "track_ticket_batch_delivery_and_preview",
+        up: () => {
+          this.addColumnIfMissing("ticket_batch_exports", "delivery_state", "TEXT NOT NULL DEFAULT 'DELIVERED'");
+          this.addColumnIfMissing("ticket_batch_exports", "delivery_message_id", "INTEGER");
+          this.addColumnIfMissing("ticket_batch_exports", "delivered_at", "TEXT");
+          this.addColumnIfMissing("ticket_batch_exports", "last_error", "TEXT");
+          this.addColumnIfMissing("ticket_batch_answer_packages", "preview_token", "TEXT");
+          this.addColumnIfMissing("ticket_batch_answer_packages", "preview_chat_id", "INTEGER");
+          this.addColumnIfMissing("ticket_batch_answer_packages", "preview_message_id", "INTEGER");
+          this.addColumnIfMissing("ticket_batch_answer_packages", "preview_page", "INTEGER");
+          this.db.exec(`
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_ticket_batch_preview_token
+              ON ticket_batch_answer_packages(preview_token)
+              WHERE preview_token IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_ticket_batch_exports_delivery
+              ON ticket_batch_exports(staff_chat_id, delivery_state, created_at);
+          `);
+        }
       }
     ];
 
@@ -1323,7 +1399,7 @@ export class SupportDatabase {
     return Boolean(row);
   }
 
-  private hasColumn(tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs", columnName: string): boolean {
+  private hasColumn(tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs" | "ticket_batch_exports" | "ticket_batch_answer_packages", columnName: string): boolean {
     const rows = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as TableColumnInfo[];
     return rows.some((row) => row.name === columnName);
   }
@@ -1337,7 +1413,7 @@ export class SupportDatabase {
   }
 
   private addColumnIfMissing(
-    tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs",
+    tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs" | "ticket_batch_exports" | "ticket_batch_answer_packages",
     columnName: string,
     columnDefinition: string
   ): void {

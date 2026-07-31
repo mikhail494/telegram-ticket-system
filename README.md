@@ -7,7 +7,7 @@ A Telegram-native support desk that turns private user messages into structured 
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-7A3E9D.svg)](LICENSE)
 
-Version: `1.2.0`
+Version: `1.2.1`
 
 Users contact the bot in private chat, while staff work entirely in a dedicated Telegram forum supergroup. Each ticket receives its own topic, Quick Replies speed up routine responses, and closed conversations are archived as text transcripts in Support Logs.
 
@@ -124,9 +124,19 @@ The configuration is validated during startup. A missing, malformed, or invalid 
 
 ## Ticket Batch Operations
 
-Run `/exporttickets` in the configured staff group's main topic to create a deterministic export of active tickets. The export includes complete, unsanitized support data for trusted staff use only; Telegram attachments are mapped best-effort rather than embedded in the ZIP.
+Run `/exporttickets` in the configured staff group's main topic to export every active ticket into one self-contained `ticket-export_<export_id>.zip` document. The ZIP contains unsanitized ticket text, captions, metadata, and stored downloadable media. Each attachment is embedded at `attachments/ticket-<ticket_id>/message-<database_message_id>/...`, with matching entries in `tickets.jsonl`, `tickets.md`, and `media-index.json`; no attachments are copied separately into the staff chat.
 
-Upload a `ticket-answers_*.json` answer package in the staff group's main topic. The bot validates the full package, shows a preview, and lets staff Apply or Cancel it. Apply blocks stale tickets and supports `reply_keep_open` and `reply_and_close`, reusing the normal delivery, transcript, close, archive, and Support Logs paths.
+The export is delivered only after the complete archive has been built and validated. If any stored attachment cannot be embedded, the bot sends no ZIP and reports one concise failure. Only one export can run per staff chat at a time.
+
+Operator workflow:
+
+1. Run `/exporttickets` and download the single ZIP archive.
+2. Process the archive with your approved support workflow.
+3. Receive exactly `ticket-answers_<export_id>.json` and upload it in the staff group's main topic.
+4. Review the single paginated preview message. Previous and Next edit that same Telegram message; no per-ticket preview messages are created.
+5. Press Apply to delete the preview and run the validated instructions, or Cancel to delete it without ticket changes.
+
+Answer packages must contain every exported ticket exactly once. Apply blocks stale tickets and supports `reply_keep_open` and `reply_and_close`, reusing the normal delivery, transcript, close, archive, and Support Logs paths. Apply produces at most one aggregate staff summary, not per-ticket progress messages.
 
 ## Public English-Only Moderation
 
@@ -251,7 +261,7 @@ npm test
 npm run build
 ```
 
-The current suite contains 141 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, and entity-notification publication behavior.
+The current suite contains 146 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, and entity-notification publication behavior.
 
 ## Project Structure
 

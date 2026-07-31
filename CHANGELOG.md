@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+## [1.2.1] - Unreleased
+
+### Fixed
+
+- Replaced per-attachment staff-chat copies with one self-contained ticket export archive.
+- Embedded complete ticket text, metadata, and media into a portable ZIP for offline processing.
+- Added deterministic ticket/message media mapping through archive paths and a media index.
+- Added human-readable ticket context, answer-package instructions, and a machine-readable answer schema.
+- Replaced multi-message answer previews with one paginated editable preview message.
+- Added preview deletion on Apply and Cancel and prevented per-ticket preview and Apply progress spam.
+- Added strict export completeness validation, delivery-state tracking, and per-staff-chat export locking.
+- Preserved deterministic preview validation and idempotent answer execution.
+
 ## [1.2.0] - Unreleased
 
 ### Added
