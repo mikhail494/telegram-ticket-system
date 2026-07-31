@@ -166,6 +166,23 @@ export interface LanguageModerationCleanupJob {
   created_at: string; updated_at: string;
 }
 
+export type EntityNotificationPublicationState = "CLAIMED" | "PUBLISHED" | "FAILED" | "UNKNOWN_DELIVERY";
+
+export interface EntityNotificationPublication {
+  provider: string;
+  entity_type: string;
+  entity_id: string;
+  event_type: "created";
+  observed_at: string;
+  target_chat_id: number | null;
+  state: EntityNotificationPublicationState;
+  telegram_message_id: number | null;
+  first_seen_at: string;
+  published_at: string | null;
+  updated_at: string;
+  last_error: string | null;
+}
+
 interface TableColumnInfo {
   name: string;
 }
@@ -842,6 +859,40 @@ export class SupportDatabase {
     this.db.prepare("UPDATE language_moderation_cleanup_jobs SET state = ?, updated_at = ? WHERE id = ?").run(state, now(), id);
   }
 
+  claimEntityNotificationPublication(input: { provider: string; entityType: string; entityId: string; eventType: "created"; observedAt: string; targetChatId: number }): EntityNotificationPublicationState {
+    const timestamp = now();
+    const result = this.db.prepare(`INSERT OR IGNORE INTO entity_notification_publications (provider, entity_type, entity_id, event_type, observed_at, target_chat_id, state, first_seen_at, updated_at)
+      VALUES (?, ?, ?, 'created', ?, ?, 'CLAIMED', ?, ?)`).run(input.provider, input.entityType, input.entityId, input.observedAt, input.targetChatId, timestamp, timestamp);
+    if (result.changes === 1) return "CLAIMED";
+
+    const existing = this.db.prepare("SELECT state FROM entity_notification_publications WHERE provider = ? AND entity_type = ? AND entity_id = ? AND event_type = 'created'")
+      .get(input.provider, input.entityType, input.entityId) as { state: EntityNotificationPublicationState } | undefined;
+    if (existing?.state === "FAILED") {
+      const retry = this.db.prepare("UPDATE entity_notification_publications SET state = 'CLAIMED', observed_at = ?, target_chat_id = ?, updated_at = ?, last_error = NULL WHERE provider = ? AND entity_type = ? AND entity_id = ? AND event_type = 'created' AND state = 'FAILED'")
+        .run(input.observedAt, input.targetChatId, timestamp, input.provider, input.entityType, input.entityId);
+      if (retry.changes === 1) return "CLAIMED";
+    }
+    if (existing?.state === "CLAIMED") return "UNKNOWN_DELIVERY";
+    return existing?.state ?? "UNKNOWN_DELIVERY";
+  }
+
+  recordEntityNotificationPublished(provider: string, entityType: string, entityId: string, eventType: "created", telegramMessageId: number): void {
+    this.db.prepare("UPDATE entity_notification_publications SET state = 'PUBLISHED', telegram_message_id = ?, published_at = ?, updated_at = ?, last_error = NULL WHERE provider = ? AND entity_type = ? AND entity_id = ? AND event_type = 'created' AND state = 'CLAIMED'")
+      .run(telegramMessageId, now(), now(), provider, entityType, entityId);
+  }
+
+  recordEntityNotificationFailure(provider: string, entityType: string, entityId: string, eventType: "created", error: string): void {
+    this.db.prepare("UPDATE entity_notification_publications SET state = 'FAILED', last_error = ?, updated_at = ? WHERE provider = ? AND entity_type = ? AND entity_id = ? AND event_type = 'created' AND state = 'CLAIMED'")
+      .run(error.slice(0, 160), now(), provider, entityType, entityId);
+  }
+
+  countEntityNotificationPublications(state?: EntityNotificationPublicationState): number {
+    const row = state
+      ? this.db.prepare("SELECT COUNT(*) AS count FROM entity_notification_publications WHERE state = ?").get(state) as { count: number }
+      : this.db.prepare("SELECT COUNT(*) AS count FROM entity_notification_publications").get() as { count: number };
+    return row.count;
+  }
+
   getSetting(key: string): string | undefined {
     const row = this.db
       .prepare("SELECT value FROM settings WHERE key = ?")
@@ -1218,6 +1269,31 @@ export class SupportDatabase {
             DROP INDEX IF EXISTS idx_language_moderation_cleanup_due;
             CREATE INDEX idx_language_moderation_cleanup_due
               ON language_moderation_cleanup_jobs(staff_chat_id, state, cleanup_due_at);
+          `);
+        }
+      },
+      {
+        id: 12,
+        name: "create_entity_notification_publications",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS entity_notification_publications (
+              provider TEXT NOT NULL,
+              entity_type TEXT NOT NULL,
+              entity_id TEXT NOT NULL,
+              event_type TEXT NOT NULL CHECK(event_type = 'created'),
+              observed_at TEXT NOT NULL,
+              target_chat_id INTEGER,
+              state TEXT NOT NULL CHECK(state IN ('CLAIMED', 'PUBLISHED', 'FAILED', 'UNKNOWN_DELIVERY')),
+              telegram_message_id INTEGER,
+              first_seen_at TEXT NOT NULL,
+              published_at TEXT,
+              updated_at TEXT NOT NULL,
+              last_error TEXT,
+              PRIMARY KEY(provider, entity_type, entity_id, event_type)
+            );
+            CREATE INDEX IF NOT EXISTS idx_entity_notification_publications_state
+              ON entity_notification_publications(state, updated_at);
           `);
         }
       }

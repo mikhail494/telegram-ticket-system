@@ -50,6 +50,7 @@ import {
   scheduleModerationCleanup,
   type ModerationCleanupScheduler
 } from "./languageModeration.js";
+import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
@@ -57,6 +58,7 @@ const DEFAULT_BAN_REASON = "No reason provided.";
 const STAFF_HELP_SENT_SETTING_PREFIX = "staff_help_sent";
 const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
 const MODERATION_SETTING_PREFIX = "language_moderation";
+const ENTITY_NOTIFICATION_SETTING_PREFIX = "entity_notifications";
 const pendingWarningTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
 const USER_HELP_TEXT = [
@@ -102,7 +104,8 @@ const STAFF_HELP_TEXT = [
   "/logs - show/create current Support Logs topic status",
   "/exporttickets - export active tickets for an answer package",
   "Upload a validated answer package in the staff group to preview and apply its replies.",
-  "/moderation <subcommand> - configure public English-only moderation"
+  "/moderation <subcommand> - configure public English-only moderation",
+  "/questnotify <subcommand> - configure new-entity notifications"
 ].join("\n");
 
 const STAFF_ONBOARDING_TEXT = [
@@ -120,6 +123,7 @@ const STAFF_ONBOARDING_TEXT = [
   "/ban <telegram_id> [reason], /unban <telegram_id>, /bans",
   "/setlogs, /logs",
   "/exporttickets, /moderation status",
+  "/questnotify status|target|provider|enable|disable|help",
   "",
   "Run /setlogs inside any topic to make it Support Logs.",
   "Run /logs to show or create the current Support Logs topic.",
@@ -168,6 +172,7 @@ interface BotRuntimeDependencies {
   fetch?: typeof fetch;
   now?: () => Date;
   scheduleModerationCleanup?: ModerationCleanupScheduler;
+  entityNotificationProviders?: EntityNotificationProviderRegistry;
 }
 
 interface PendingTicketBatchPreview {
@@ -183,6 +188,7 @@ export function createBot(
   const fetchImpl = runtime.fetch ?? globalThis.fetch;
   const moderationNow = runtime.now ?? (() => new Date());
   const moderationCleanupScheduler = runtime.scheduleModerationCleanup ?? scheduleModerationCleanup;
+  const entityNotificationProviders = runtime.entityNotificationProviders ?? new Map();
   const pendingTicketBatchPreviews = new Map<string, PendingTicketBatchPreview>();
 
   async function deliverAndRecordStaffTextReply(
@@ -671,6 +677,94 @@ export function createBot(
     if (action === "resetstrikes") { db.upsertLanguageModerationUserState({ chat_id: current.targetChatId, user_telegram_id: userId, username: state.username, current_strikes: 0, sanction_tier: state.sanction_tier, first_strike_at: null }); db.clearLanguageModerationCycleViolations(current.targetChatId, userId, state.sanction_tier); await ctx.reply(`Strikes reset for ${userId}. Sanction tier remains ${state.sanction_tier}.`); return; }
     if (action === "resettier") { db.upsertLanguageModerationUserState({ chat_id: current.targetChatId, user_telegram_id: userId, username: state.username, current_strikes: state.current_strikes, sanction_tier: 0, first_strike_at: state.first_strike_at }); await ctx.reply(`Sanction tier reset for ${userId}. This does not unmute or unban the user.`); return; }
     await ctx.reply("Usage: /moderation status|target|enable|disable|allowlist|allow|unallow|user|resetstrikes|resettier");
+  });
+
+  bot.command("questnotify", async (ctx) => {
+    if (!isStaffChat(ctx)) {
+      if (isPrivateChat(ctx)) await ctx.reply(STAFF_ONLY_TEXT);
+      return;
+    }
+
+    const [, action = "status", ...args] = (ctx.message?.text ?? "").trim().split(/\s+/);
+    if (action === "help") {
+      await ctx.reply("Usage: /questnotify status | target <chat_id> | provider <provider_key> | enable | disable | help");
+      return;
+    }
+    if (action === "status") {
+      await ctx.reply(await formatEntityNotificationStatus(ctx.api, db, entityNotificationProviders));
+      return;
+    }
+    if (action === "target") {
+      const targetChatId = Number(args[0]);
+      if (!Number.isSafeInteger(targetChatId) || targetChatId === 0) {
+        await ctx.reply("Usage: /questnotify target <chat_id>");
+        return;
+      }
+      try {
+        await ctx.api.getChat(targetChatId);
+      } catch {
+        await ctx.reply("The notification target is not reachable by this bot.");
+        return;
+      }
+      db.setSetting(entityNotificationSettingKey("target_chat_id"), String(targetChatId));
+      await ctx.reply(`Entity notification target set to ${targetChatId}. It remains disabled until /questnotify enable succeeds.`);
+      return;
+    }
+    if (action === "provider") {
+      const providerKey = args[0]?.trim();
+      const provider = providerKey ? entityNotificationProviders.get(providerKey) : undefined;
+      if (!provider) {
+        await ctx.reply("That entity notification provider is not registered.");
+        return;
+      }
+      if (!provider.authoritative) {
+        await ctx.reply("That entity notification provider is not authoritative.");
+        return;
+      }
+      if (!isEntityNotificationProviderAvailable(provider)) {
+        await ctx.reply(entityNotificationProviderStatus(provider));
+        return;
+      }
+      db.setSetting(entityNotificationSettingKey("provider"), provider.key);
+      await ctx.reply(`Entity notification provider set to ${provider.key}.`);
+      return;
+    }
+    if (action === "enable") {
+      const targetChatId = parseStoredEntityNotificationTarget(db.getSetting(entityNotificationSettingKey("target_chat_id")));
+      if (targetChatId === null) {
+        await ctx.reply("Entity notifications remain disabled: configure a reachable target first.");
+        return;
+      }
+      try {
+        await ctx.api.getChat(targetChatId);
+      } catch {
+        await ctx.reply("Entity notifications remain disabled: the configured target is not reachable.");
+        return;
+      }
+      const providerKey = db.getSetting(entityNotificationSettingKey("provider"));
+      const provider = providerKey ? entityNotificationProviders.get(providerKey) : undefined;
+      if (!provider) {
+        await ctx.reply("Entity notifications remain disabled: configure a registered provider first.");
+        return;
+      }
+      if (!provider.authoritative) {
+        await ctx.reply("Entity notifications remain disabled: the provider is not authoritative.");
+        return;
+      }
+      if (!isEntityNotificationProviderAvailable(provider)) {
+        await ctx.reply(`Entity notifications remain disabled: ${entityNotificationProviderStatus(provider)}`);
+        return;
+      }
+      db.setSetting(entityNotificationSettingKey("enabled"), "true");
+      await ctx.reply("Entity notifications enabled.");
+      return;
+    }
+    if (action === "disable") {
+      db.setSetting(entityNotificationSettingKey("enabled"), "false");
+      await ctx.reply("Entity notifications disabled. Target, provider, and publication history were preserved.");
+      return;
+    }
+    await ctx.reply("Usage: /questnotify status | target <chat_id> | provider <provider_key> | enable | disable | help");
   });
 
   bot.command("status", async (ctx) => {
@@ -1183,6 +1277,7 @@ export async function setBotCommands(bot: Bot<Context>): Promise<void> {
       { command: "whois", description: "Show ticket user details" },
       { command: "exporttickets", description: "Export active tickets" },
       { command: "moderation", description: "Manage public chat moderation" },
+      { command: "questnotify", description: "Manage new-entity notifications" },
       { command: "logs", description: "Show Support Logs topic status" },
       { command: "setlogs", description: "Use this topic as Support Logs" }
     ],
@@ -2024,6 +2119,75 @@ async function replyIfBanned(db: SupportDatabase, ctx: Context): Promise<boolean
 
   await ctx.reply(BANNED_TEXT);
   return true;
+}
+
+function entityNotificationSettingKey(name: string): string {
+  return `${ENTITY_NOTIFICATION_SETTING_PREFIX}:${name}`;
+}
+
+function parseStoredEntityNotificationTarget(value: string | undefined): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed !== 0 ? parsed : null;
+}
+
+async function formatEntityNotificationStatus(
+  api: BotApi,
+  db: SupportDatabase,
+  providers: EntityNotificationProviderRegistry
+): Promise<string> {
+  const targetChatId = parseStoredEntityNotificationTarget(db.getSetting(entityNotificationSettingKey("target_chat_id")));
+  let target = "not configured";
+  let targetReachable = false;
+  if (targetChatId !== null) {
+    try {
+      const chat = await api.getChat(targetChatId);
+      targetReachable = true;
+      const title = typeof chat === "object" && chat !== null && "title" in chat && typeof chat.title === "string"
+        ? ` (${chat.title})`
+        : "";
+      target = `${targetChatId}${title}`;
+    } catch {
+      target = `${targetChatId} (unreachable)`;
+    }
+  }
+  const providerKey = db.getSetting(entityNotificationSettingKey("provider"));
+  const provider = providerKey ? providers.get(providerKey) : undefined;
+  const providerRegistered = Boolean(provider);
+  const providerAuthoritative = provider?.authoritative ?? false;
+  const providerAvailable = provider ? isEntityNotificationProviderAvailable(provider) : false;
+  const canPublish = db.getSetting(entityNotificationSettingKey("enabled")) === "true"
+    && targetChatId !== null
+    && targetReachable
+    && providerRegistered
+    && providerAuthoritative
+    && providerAvailable;
+  return [
+    `Entity notifications: ${db.getSetting(entityNotificationSettingKey("enabled")) === "true" ? "enabled" : "disabled"}`,
+    `Target: ${target}`,
+    `Provider: ${providerKey ?? "not configured"}`,
+    `Provider registered: ${providerRegistered ? "yes" : "no"}`,
+    `Authoritative: ${providerAuthoritative ? "yes" : "no"}`,
+    `Available: ${providerAvailable ? "yes" : "no"}`,
+    `Publication can run: ${canPublish ? "yes" : "no"}`,
+    `Published events: ${db.countEntityNotificationPublications("PUBLISHED")}`
+  ].join("\n");
+}
+
+function isEntityNotificationProviderAvailable(provider: { isAvailable(): boolean }): boolean {
+  try {
+    return provider.isAvailable();
+  } catch {
+    return false;
+  }
+}
+
+function entityNotificationProviderStatus(provider: { status?(): string }): string {
+  try {
+    return provider.status?.() || "That entity notification provider is unavailable.";
+  } catch {
+    return "That entity notification provider is unavailable.";
+  }
 }
 
 function moderationSettingKey(name: string): string {

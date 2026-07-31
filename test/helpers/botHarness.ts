@@ -2,6 +2,7 @@ import type { ApiCallFn, Bot, Context, Transformer } from "grammy";
 import type { Update, User, UserFromGetMe } from "grammy/types";
 import type { QuickRepliesRegistry } from "../../src/quickReplies.js";
 import type { ModerationCleanupScheduler } from "../../src/languageModeration.js";
+import type { EntityNotificationProviderRegistry } from "../../src/entityNotifications.js";
 import type {
   SupportDatabase as SupportDatabaseType,
   TicketStatus,
@@ -117,6 +118,7 @@ export interface BotHarnessOptions {
   quickRepliesRegistry?: QuickRepliesRegistry;
   moderationNow?: () => Date;
   scheduleModerationCleanup?: ModerationCleanupScheduler;
+  entityNotificationProviders?: EntityNotificationProviderRegistry;
 }
 
 export interface BotHarness {
@@ -148,7 +150,8 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
   const bot = createBot(db, registry, {
     fetch: async () => new Response(downloadResponse.body, { status: downloadResponse.status }),
     now: options.moderationNow,
-    scheduleModerationCleanup: scheduleCleanup
+    scheduleModerationCleanup: scheduleCleanup,
+    entityNotificationProviders: options.entityNotificationProviders
   });
   const apiCalls: RecordedApiCall[] = [];
   const responseOverrides = new Map<string, ApiResponseOverride>();
