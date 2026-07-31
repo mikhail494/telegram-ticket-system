@@ -17,6 +17,8 @@ import {
   RECEIVED_TEXT,
   START_TEXT,
   formatPinnedTicketSummary,
+  formatFollowUpState,
+  formatEscalationTarget,
   formatStatus,
   formatTicketDetails,
   formatTicketPost,
@@ -214,6 +216,48 @@ export function createBot(
       fileId: null
     });
     return sent.message_id;
+  }
+
+  async function sendTicketBatchTopicEcho(
+    ticket: TicketWithUser,
+    item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]
+  ): Promise<void> {
+    if (item.topic_echo_state === "SENT") return;
+    if (ticket.staff_chat_id !== config.staffChatId || ticket.message_thread_id === null) {
+      throw new Error("Ticket topic is unavailable for batch echo.");
+    }
+    const hasContext = item.follow_up_state !== "NONE" || item.internal_note !== null || item.escalation_target !== "NONE";
+    if (item.action === "no_action" && !hasContext) {
+      db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
+      return;
+    }
+    const lines = [item.action === "no_action" ? "ℹ️ Batch follow-up updated — no user message sent" : "✅ Batch reply sent to user"];
+    if (item.action !== "no_action" && item.reply_text) lines.push("", item.reply_text);
+    if (item.follow_up_state !== "NONE") lines.push("", `Follow-up: ${formatFollowUpState(item.follow_up_state)}`);
+    if (item.escalation_target !== "NONE") lines.push(`Escalation: ${formatEscalationTarget(item.escalation_target)}`);
+    if (item.internal_note) lines.push(`Internal note: ${item.internal_note}`);
+    const echoed = await bot.api.sendMessage(ticket.staff_chat_id, truncate(lines.join("\n"), 3500), { message_thread_id: ticket.message_thread_id });
+    db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "SENT", {
+      chatId: ticket.staff_chat_id,
+      threadId: ticket.message_thread_id,
+      messageId: echoed.message_id
+    });
+  }
+
+  function persistBatchFollowUp(ticket: TicketWithUser, item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]): void {
+    db.setTicketFollowUpContext(ticket.id, {
+      followUpState: item.follow_up_state,
+      internalNote: item.internal_note,
+      escalationTarget: item.escalation_target,
+      sourceAnswerPackageId: item.answer_package_id
+    });
+    if (item.follow_up_state === "WAITING_USER") db.updateTicketStatus(ticket.id, "WAITING_USER");
+    else if (item.follow_up_state !== "NONE" && ticket.status !== "CLOSED") db.updateTicketStatus(ticket.id, "IN_PROGRESS");
+    else if (item.action !== "no_action" && ticket.status === "OPEN") db.updateTicketStatus(ticket.id, "IN_PROGRESS");
+  }
+
+  function hasBatchFollowUpContext(item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]): boolean {
+    return item.follow_up_state !== "NONE" || item.internal_note !== null || item.escalation_target !== "NONE";
   }
 
   function quickRepliesCategoryKeyboard(ticketId: number): InlineKeyboard {
@@ -583,7 +627,8 @@ export function createBot(
     try {
       const tickets = db.listActiveTicketsForStaffChat(config.staffChatId).map((ticket) => ({
         ticket,
-        messages: db.listMessagesChronological(ticket.id)
+        messages: db.listMessagesChronological(ticket.id),
+        followUpHistory: db.listTicketFollowUpHistory(ticket.id)
       }));
       if (!tickets.length) {
         await ctx.reply("There are no active tickets to export.");
@@ -1131,7 +1176,7 @@ export function createBot(
       await ctx.answerCallbackQuery({ text: "This preview has expired." });
       return;
     }
-    if (packageRecord.status !== "PENDING") {
+    if (packageRecord.status !== "PENDING" && !(action === "apply" && packageRecord.status === "PARTIAL")) {
       await ctx.answerCallbackQuery({ text: "This package can no longer be changed." });
       return;
     }
@@ -1180,10 +1225,15 @@ export function createBot(
     }
 
     await ctx.answerCallbackQuery({ text: "Applying answer package..." });
-    const previewRemoved = await deleteTicketBatchPreview(claimed, "Applying...");
     const summary = await applyTicketBatchAnswerPackage(claimed.answer_package_id, ctx.from);
-    if (!previewRemoved) {
-      await deleteTicketBatchPreview(claimed, "Applying...");
+    const finalized = db.getTicketBatchAnswerPackage(claimed.answer_package_id, config.staffChatId);
+    if (finalized?.status === "PARTIAL" && finalized.preview_chat_id !== null && finalized.preview_message_id !== null && finalized.preview_token) {
+      await ctx.api.editMessageText(finalized.preview_chat_id, finalized.preview_message_id, `${summary}\n\nRetry is available for recoverable staff synchronization or close/archive work.`, {
+        reply_markup: new InlineKeyboard().text("Retry", ticketBatchApplyCallbackData(finalized.preview_token))
+      });
+    } else {
+      const previewRemoved = await deleteTicketBatchPreview(claimed, "Applying...");
+      if (!previewRemoved) await deleteTicketBatchPreview(claimed, "Applying...");
     }
     await ctx.api.sendMessage(config.staffChatId, summary);
   }
@@ -1194,7 +1244,7 @@ export function createBot(
     }
     const answerPackage: TicketAnswerPackage = {
       schema: "telegram_ticket_answer_package",
-      version: 1,
+      version: 2,
       export_id: packageRecord.export_id,
       answer_package_id: packageRecord.answer_package_id,
       created_at: packageRecord.package_created_at,
@@ -1202,7 +1252,10 @@ export function createBot(
         ticket_id: item.ticket_id,
         snapshot_token: item.snapshot_token,
         action: item.action,
-        reply_text: item.reply_text
+        reply_text: item.reply_text,
+        follow_up_state: item.follow_up_state,
+        internal_note: item.internal_note,
+        escalation_target: item.escalation_target
       }))
     };
     return buildTicketBatchPreviewPagesForAnswerPackage(answerPackage, db.listTicketBatchExportItems(packageRecord.export_id));
@@ -1245,17 +1298,54 @@ export function createBot(
     const exportItems = db.listTicketBatchExportItems(packageRecord.export_id);
     const exportTokens = new Map(exportItems.map((item) => [item.ticket_id, item.snapshot_token]));
     const items = db.listTicketBatchAnswerItems(answerPackageId);
-    const totals = { keep: 0, close: 0, noAction: 0, stale: 0, inactive: 0, failed: 0, unknown: 0, replySent: 0, skipped: 0 };
+    const totals = { keep: 0, close: 0, noAction: 0, stale: 0, inactive: 0, failed: 0, unknown: 0, replySent: 0, staffSync: 0, skipped: 0 };
 
     for (const item of items) {
       if (["COMPLETED", "NO_ACTION", "STALE", "INACTIVE"].includes(item.state)) { totals.skipped += 1; continue; }
       if (item.state === "UNKNOWN_DELIVERY" || item.state === "APPLYING") { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "UNKNOWN_DELIVERY", { lastError: "Delivery outcome requires manual review." }); totals.unknown += 1; continue; }
       const ticket = db.getTicketWithUser(item.ticket_id);
+      if (item.state === "STAFF_SYNC_PENDING") {
+        if (!ticket || ticket.staff_chat_id !== config.staffChatId || ticket.status === "CLOSED") { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true }); totals.inactive += 1; continue; }
+        try {
+          await sendTicketBatchTopicEcho(ticket, item);
+          await refreshStaffTicketMessage(db, bot.api, ticket.id);
+          if (item.action === "no_action") {
+            db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "NO_ACTION", { applied: true });
+            totals.noAction += 1;
+          } else if (item.action === "reply_and_close") {
+            const closeResult = await closeTicket(db, bot.api, ticket.id, { notifyUser: true, staffNotice: "Ticket closed by batch answer.", closedBy: staffActor(staffUser) });
+            if (closeResult.includes("pending retry")) {
+              db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { lastError: "Reply sent; close/archive pending." });
+              totals.replySent += 1;
+            } else {
+              db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "COMPLETED", { applied: true });
+              totals.close += 1;
+            }
+          } else {
+            db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "COMPLETED", { applied: true });
+            totals.keep += 1;
+          }
+        } catch {
+          db.recordTicketBatchTopicEcho(answerPackageId, item.ticket_id, "FAILED", { lastError: "Staff topic echo pending retry." });
+          totals.staffSync += 1;
+        }
+        continue;
+      }
       if (item.state === "REPLY_SENT" && item.action === "reply_and_close") {
         if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
           db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true });
           totals.inactive += 1;
           continue;
+        }
+
+        if (item.topic_echo_state !== "SENT") {
+          try {
+            await sendTicketBatchTopicEcho(ticket, item);
+          } catch {
+            db.recordTicketBatchTopicEcho(answerPackageId, item.ticket_id, "FAILED", { lastError: "Staff topic echo pending retry." });
+            totals.staffSync += 1;
+            continue;
+          }
         }
 
         try {
@@ -1281,23 +1371,38 @@ export function createBot(
       if (!ticket || ticket.staff_chat_id !== config.staffChatId || ticket.status === "CLOSED") { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true }); totals.inactive += 1; continue; }
       if (!expectedToken || item.snapshot_token !== expectedToken || getTicketSnapshotToken(ticket, db.listMessagesChronological(ticket.id)) !== expectedToken) { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "STALE", { applied: true }); totals.stale += 1; continue; }
       if (!db.claimTicketBatchAnswerItem(answerPackageId, item.ticket_id)) { totals.skipped += 1; continue; }
-      if (item.action === "no_action") { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "NO_ACTION", { applied: true }); totals.noAction += 1; continue; }
+      if (item.action === "no_action") {
+        try {
+          if (hasBatchFollowUpContext(item)) persistBatchFollowUp(ticket, item);
+          await sendTicketBatchTopicEcho(ticket, item);
+          await refreshStaffTicketMessage(db, bot.api, ticket.id);
+          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "NO_ACTION", { applied: true });
+          totals.noAction += 1;
+        } catch {
+          db.recordTicketBatchTopicEcho(answerPackageId, item.ticket_id, "FAILED", { lastError: "Staff topic echo pending retry." });
+          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "STAFF_SYNC_PENDING", { lastError: "Staff topic echo pending retry." });
+          totals.staffSync += 1;
+        }
+        continue;
+      }
       try {
         const deliveryMessageId = await deliverAndRecordStaffTextReply(ticket, item.reply_text ?? "", staffUser);
+        persistBatchFollowUp(ticket, item);
+        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { deliveryMessageId, applied: true });
+        try {
+          await sendTicketBatchTopicEcho(ticket, item);
+        } catch {
+          db.recordTicketBatchTopicEcho(answerPackageId, item.ticket_id, "FAILED", { lastError: "Staff topic echo pending retry." });
+          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "STAFF_SYNC_PENDING", { deliveryMessageId, lastError: "Staff topic echo pending retry." });
+          totals.staffSync += 1;
+          continue;
+        }
         if (item.action === "reply_keep_open") {
           db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "COMPLETED", { deliveryMessageId, applied: true });
-          if (ticket.status === "OPEN") {
-            db.updateTicketStatus(ticket.id, "IN_PROGRESS");
-            try {
-              await refreshStaffTicketMessage(db, bot.api, ticket.id);
-            } catch (error) {
-              logger.warn({ err: error, ticketId: ticket.id }, "Could not refresh ticket summary after batch reply");
-            }
-          }
+          await refreshStaffTicketMessage(db, bot.api, ticket.id);
           totals.keep += 1;
           continue;
         }
-        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { deliveryMessageId, applied: true });
         try {
           const closeResult = await closeTicket(db, bot.api, ticket.id, { notifyUser: true, staffNotice: "Ticket closed by batch answer.", closedBy: staffActor(staffUser) });
           if (closeResult.includes("pending retry")) { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { lastError: "Reply sent; close/archive pending." }); totals.replySent += 1; } else { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "COMPLETED", { applied: true }); totals.close += 1; }
@@ -1308,7 +1413,7 @@ export function createBot(
       } catch (error) { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "FAILED", { lastError: "Ticket batch action failed." }); totals.failed += 1; }
     }
     db.finalizeTicketBatchAnswerPackage(answerPackageId, config.staffChatId);
-    return `Answer package applied\nReplies sent: ${totals.keep + totals.close}\nTickets closed: ${totals.close}\nKept open: ${totals.keep}\nNo action: ${totals.noAction}\nBlocked: stale ${totals.stale}, inactive ${totals.inactive}, failed ${totals.failed}, manual review ${totals.unknown + totals.replySent}.`;
+    return `Answer package applied\nReplies sent: ${totals.keep + totals.close}\nTickets closed: ${totals.close}\nKept open: ${totals.keep}\nNo action: ${totals.noAction}\nBlocked: stale ${totals.stale}, inactive ${totals.inactive}, failed ${totals.failed}, staff sync ${totals.staffSync}, manual review ${totals.unknown + totals.replySent}.`;
   }
 
   bot.catch(async (error) => {
@@ -1543,7 +1648,8 @@ async function appendToExistingTicket(
     });
 
     if (activeTicket.status === "WAITING_USER") {
-      db.updateTicketStatus(activeTicket.id, "OPEN");
+      db.clearWaitingUserFollowUp(activeTicket.id);
+      db.updateTicketStatus(activeTicket.id, "IN_PROGRESS");
     }
 
     const ticketWithUser = db.getTicketWithUser(activeTicket.id);

@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+## [1.2.2] - Unreleased
+
+### Fixed
+
+- Added visible ticket-topic records for batch replies.
+- Added persistent follow-up state, internal notes, and escalation targets.
+- Included internal follow-up context in ticket exports.
+- Prevented consecutive exports from losing prior staff replies or generating duplicate answers.
+- Preserved idempotent user delivery and close/archive recovery.
+
 ## [1.2.1] - Unreleased
 
 ### Fixed

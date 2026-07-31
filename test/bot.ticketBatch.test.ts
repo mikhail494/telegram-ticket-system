@@ -188,6 +188,87 @@ describe("ticket batch Telegram workflow", () => {
     assert.equal(harness.db.getTicket(ticket.id)?.status, "IN_PROGRESS");
   });
 
+  it("posts one staff-only batch echo and persists follow-up context for a version 2 reply", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const token = getTicketSnapshotToken(ticket, []);
+    harness.db.createTicketBatchExport({ exportId: "export_follow_up", staffChatId: TEST_STAFF_CHAT_ID, createdAt: "2026-07-30T00:00:00.000Z", selectionMode: "all_active", ticketCount: 1, items: [{ ticketId: ticket.id, snapshotToken: token }] });
+    harness.setDownloadResponse(JSON.stringify({
+      schema: "telegram_ticket_answer_package", version: 2, export_id: "export_follow_up", answer_package_id: "answers_follow_up", created_at: "2026-07-31T00:00:00.000Z",
+      answers: [{ ticket_id: ticket.id, snapshot_token: token, action: "reply_keep_open", reply_text: "We are investigating this.", follow_up_state: "WAITING_DEVS", internal_note: "Check the withdrawal service.", escalation_target: "PAYMENTS" }]
+    }));
+
+    await harness.bot.handleUpdate(buildStaffDocumentUpdate({ fileName: "ticket-answers_export_follow_up.json" }));
+    const preview = harness.findApiCalls("sendMessage").find((call) => String(call.payload.text).includes("Ticket answer package preview"));
+    assert.ok(preview);
+    await harness.bot.handleUpdate(batchCallback(callbackData(preview, "Apply"), 99, preview));
+
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "We are investigating this.").length, 1);
+    const echo = harness.findApiCalls("sendMessage").find((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_thread_id === ticket.message_thread_id && String(call.payload.text).includes("Batch reply sent to user"));
+    assert.ok(echo);
+    assert.match(String(echo.payload.text), /We are investigating this\./);
+    assert.match(String(echo.payload.text), /Follow-up: Waiting for developers/);
+    assert.match(String(echo.payload.text), /Escalation: Payments/);
+    assert.match(String(echo.payload.text), /Check the withdrawal service/);
+    assert.equal(harness.db.getTicket(ticket.id)?.follow_up_state, "WAITING_DEVS");
+    assert.equal(harness.db.getTicket(ticket.id)?.escalation_target, "PAYMENTS");
+    assert.equal(harness.db.listTicketBatchAnswerItems("answers_follow_up")[0]?.topic_echo_state, "SENT");
+  });
+
+  it("moves WAITING_USER back to IN_PROGRESS when the user sends a follow-up", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    harness.db.setTicketFollowUpContext(ticket.id, {
+      followUpState: "WAITING_USER",
+      internalNote: "Need the transaction hash.",
+      escalationTarget: "SUPPORT",
+      sourceAnswerPackageId: "answers_waiting"
+    });
+    harness.db.updateTicketStatus(ticket.id, "WAITING_USER");
+
+    await harness.bot.handleUpdate({
+      update_id: 120,
+      message: {
+        message_id: 120,
+        date: 1,
+        from: { id: ticket.user_telegram_id, is_bot: false, first_name: "Test Customer", username: "test_customer" },
+        chat: { id: ticket.user_telegram_id, type: "private", first_name: "Test Customer" },
+        text: "Here is the transaction hash."
+      }
+    });
+
+    assert.equal(harness.db.getTicket(ticket.id)?.status, "IN_PROGRESS");
+    assert.equal(harness.db.getTicket(ticket.id)?.follow_up_state, "NONE");
+    assert.ok(harness.db.listTicketFollowUpHistory(ticket.id).length >= 2);
+  });
+
+  it("retries only a failed topic echo without resending the confirmed user reply", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const token = getTicketSnapshotToken(ticket, []);
+    harness.db.createTicketBatchExport({ exportId: "export_echo_retry", staffChatId: TEST_STAFF_CHAT_ID, createdAt: "2026-07-30T00:00:00.000Z", selectionMode: "all_active", ticketCount: 1, items: [{ ticketId: ticket.id, snapshotToken: token }] });
+    harness.setDownloadResponse(JSON.stringify({
+      schema: "telegram_ticket_answer_package", version: 2, export_id: "export_echo_retry", answer_package_id: "answers_echo_retry", created_at: "2026-07-31T00:00:00.000Z",
+      answers: [{ ticket_id: ticket.id, snapshot_token: token, action: "reply_keep_open", reply_text: "Reply once.", follow_up_state: "WAITING_DEVS", internal_note: null, escalation_target: "DEVS" }]
+    }));
+    await harness.bot.handleUpdate(buildStaffDocumentUpdate({ fileName: "ticket-answers_export_echo_retry.json" }));
+    const preview = harness.findApiCalls("sendMessage").find((call) => String(call.payload.text).includes("Ticket answer package preview"));
+    assert.ok(preview);
+    harness.setApiResponseOverride("sendMessage", (call, success) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_thread_id === ticket.message_thread_id
+      ? { ok: false, error_code: 500, description: "Topic unavailable" }
+      : success);
+
+    await harness.bot.handleUpdate(batchCallback(callbackData(preview, "Apply"), 121, preview));
+    assert.equal(harness.db.listTicketBatchAnswerItems("answers_echo_retry")[0]?.state, "STAFF_SYNC_PENDING");
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "Reply once.").length, 1);
+
+    harness.clearApiOverrides();
+    await harness.bot.handleUpdate(batchCallback(callbackData(preview, "Apply"), 122, preview));
+    assert.equal(harness.db.listTicketBatchAnswerItems("answers_echo_retry")[0]?.state, "COMPLETED");
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "Reply once.").length, 1);
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_thread_id === ticket.message_thread_id && String(call.payload.text).includes("Batch reply sent to user")).length, 2);
+  });
+
   it("rejects malformed packages and answer packages inside ticket topics without forwarding them", async () => {
     const harness = createHarness();
     const ticket = harness.seedTicket();

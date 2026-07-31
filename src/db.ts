@@ -31,6 +31,24 @@ export interface TicketRecord {
   created_at: string;
   updated_at: string;
   closed_at: string | null;
+  follow_up_state: TicketFollowUpState;
+  internal_note: string | null;
+  escalation_target: TicketEscalationTarget;
+  follow_up_updated_at: string | null;
+  follow_up_source_answer_package_id: string | null;
+}
+
+export type TicketFollowUpState = "NONE" | "WAITING_USER" | "WAITING_DEVS" | "WAITING_QUEST_OWNER" | "MONITORING";
+export type TicketEscalationTarget = "NONE" | "DEVS" | "PAYMENTS" | "SECURITY" | "QUEST_OWNER" | "SUPPORT";
+
+export interface TicketFollowUpHistoryRecord {
+  id: number;
+  ticket_id: number;
+  follow_up_state: TicketFollowUpState;
+  internal_note: string | null;
+  escalation_target: TicketEscalationTarget;
+  source_answer_package_id: string | null;
+  created_at: string;
 }
 
 export interface TicketWithUser extends TicketRecord {
@@ -136,7 +154,8 @@ export interface CreateTicketBatchExportInput {
 }
 
 export type TicketBatchAnswerPackageStatus = "PENDING" | "APPLYING" | "COMPLETED" | "PARTIAL" | "CANCELLED";
-export type TicketBatchAnswerItemState = "PENDING" | "APPLYING" | "REPLY_SENT" | "COMPLETED" | "NO_ACTION" | "STALE" | "INACTIVE" | "FAILED" | "UNKNOWN_DELIVERY";
+export type TicketBatchAnswerItemState = "PENDING" | "APPLYING" | "REPLY_SENT" | "STAFF_SYNC_PENDING" | "COMPLETED" | "NO_ACTION" | "STALE" | "INACTIVE" | "FAILED" | "UNKNOWN_DELIVERY";
+export type TicketBatchTopicEchoState = "NOT_REQUIRED" | "PENDING" | "SENT" | "FAILED";
 
 export interface TicketBatchAnswerPackageRecord {
   answer_package_id: string; export_id: string; staff_chat_id: number; package_hash: string;
@@ -150,12 +169,15 @@ export interface TicketBatchAnswerItemRecord {
   answer_package_id: string; ticket_id: number; snapshot_token: string; action: "reply_keep_open" | "reply_and_close" | "no_action";
   reply_text: string | null; state: TicketBatchAnswerItemState; delivery_message_id: number | null;
   applied_at: string | null; last_error: string | null; updated_at: string;
+  follow_up_state: TicketFollowUpState; internal_note: string | null; escalation_target: TicketEscalationTarget;
+  topic_echo_chat_id: number | null; topic_echo_thread_id: number | null; topic_echo_message_id: number | null;
+  topic_echo_state: TicketBatchTopicEchoState; topic_echo_last_error: string | null;
 }
 
 export interface CreateTicketBatchAnswerPackageInput {
   answerPackageId: string; exportId: string; staffChatId: number; packageHash: string;
   sourceChatId?: number | null; sourceMessageId?: number | null; packageCreatedAt: string;
-  items: Array<Pick<TicketBatchAnswerItemRecord, "ticket_id" | "snapshot_token" | "action" | "reply_text">>;
+  items: Array<Pick<TicketBatchAnswerItemRecord, "ticket_id" | "snapshot_token" | "action" | "reply_text"> & Partial<Pick<TicketBatchAnswerItemRecord, "follow_up_state" | "internal_note" | "escalation_target">>>;
 }
 
 export interface LanguageModerationUserState {
@@ -416,14 +438,19 @@ export class SupportDatabase {
         UPDATE tickets
         SET status = 'CLOSED',
             updated_at = ?,
-            closed_at = COALESCE(closed_at, ?)
+            closed_at = COALESCE(closed_at, ?),
+            follow_up_state = 'NONE',
+            internal_note = NULL,
+            escalation_target = 'NONE',
+            follow_up_updated_at = ?,
+            follow_up_source_answer_package_id = NULL
         WHERE user_telegram_id = ?
           AND staff_chat_id = ?
           AND id != ?
           AND status != 'CLOSED'
       `
       )
-      .run(timestamp, timestamp, userTelegramId, staffChatId, keepTicketId);
+      .run(timestamp, timestamp, timestamp, userTelegramId, staffChatId, keepTicketId);
 
     return result.changes;
   }
@@ -467,7 +494,12 @@ export class SupportDatabase {
             closed_at = CASE WHEN ? = 'CLOSED' THEN COALESCE(closed_at, ?) ELSE NULL END,
             closed_by_type = CASE WHEN ? = 'CLOSED' THEN closed_by_type ELSE NULL END,
             closed_by_display_name = CASE WHEN ? = 'CLOSED' THEN closed_by_display_name ELSE NULL END,
-            closed_by_username = CASE WHEN ? = 'CLOSED' THEN closed_by_username ELSE NULL END
+            closed_by_username = CASE WHEN ? = 'CLOSED' THEN closed_by_username ELSE NULL END,
+            follow_up_state = CASE WHEN ? = 'CLOSED' THEN 'NONE' ELSE follow_up_state END,
+            internal_note = CASE WHEN ? = 'CLOSED' THEN NULL ELSE internal_note END,
+            escalation_target = CASE WHEN ? = 'CLOSED' THEN 'NONE' ELSE escalation_target END,
+            follow_up_updated_at = CASE WHEN ? = 'CLOSED' THEN ? ELSE follow_up_updated_at END,
+            follow_up_source_answer_package_id = CASE WHEN ? = 'CLOSED' THEN NULL ELSE follow_up_source_answer_package_id END
         WHERE id = ?
       `
       )
@@ -478,6 +510,12 @@ export class SupportDatabase {
         status === "CLOSED" ? timestamp : null,
         status,
         status,
+        status,
+        status,
+        status,
+        status,
+        status,
+        status === "CLOSED" ? timestamp : null,
         status,
         ticketId
       );
@@ -511,7 +549,12 @@ export class SupportDatabase {
             closed_at = COALESCE(closed_at, ?),
             closed_by_type = ?,
             closed_by_display_name = ?,
-            closed_by_username = ?
+            closed_by_username = ?,
+            follow_up_state = 'NONE',
+            internal_note = NULL,
+            escalation_target = 'NONE',
+            follow_up_updated_at = ?,
+            follow_up_source_answer_package_id = NULL
         WHERE id = ?
       `
       )
@@ -521,6 +564,7 @@ export class SupportDatabase {
         input.type,
         input.displayName,
         input.username ?? null,
+        timestamp,
         ticketId
       );
 
@@ -772,8 +816,8 @@ export class SupportDatabase {
       const timestamp = now();
       this.db.prepare(`INSERT INTO ticket_batch_answer_packages (answer_package_id, export_id, staff_chat_id, package_hash, source_chat_id, source_message_id, package_created_at, imported_at, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`)
         .run(value.answerPackageId, value.exportId, value.staffChatId, value.packageHash, value.sourceChatId ?? null, value.sourceMessageId ?? null, value.packageCreatedAt, timestamp, timestamp);
-      const insert = this.db.prepare(`INSERT INTO ticket_batch_answer_items (answer_package_id, ticket_id, snapshot_token, action, reply_text, state, updated_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?)`);
-      for (const item of value.items) insert.run(value.answerPackageId, item.ticket_id, item.snapshot_token, item.action, item.reply_text, timestamp);
+      const insert = this.db.prepare(`INSERT INTO ticket_batch_answer_items (answer_package_id, ticket_id, snapshot_token, action, reply_text, state, updated_at, follow_up_state, internal_note, escalation_target, topic_echo_state) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, 'PENDING')`);
+      for (const item of value.items) insert.run(value.answerPackageId, item.ticket_id, item.snapshot_token, item.action, item.reply_text, timestamp, item.follow_up_state ?? "NONE", item.internal_note ?? null, item.escalation_target ?? "NONE");
     });
     tx(input);
     return this.getTicketBatchAnswerPackage(input.answerPackageId, input.staffChatId)!;
@@ -829,6 +873,35 @@ export class SupportDatabase {
   updateTicketBatchAnswerItem(answerPackageId: string, ticketId: number, state: TicketBatchAnswerItemState, options: { deliveryMessageId?: number | null; lastError?: string | null; applied?: boolean } = {}): void {
     this.db.prepare("UPDATE ticket_batch_answer_items SET state = ?, delivery_message_id = COALESCE(?, delivery_message_id), last_error = ?, applied_at = CASE WHEN ? THEN ? ELSE applied_at END, updated_at = ? WHERE answer_package_id = ? AND ticket_id = ?")
       .run(state, options.deliveryMessageId ?? null, options.lastError ?? null, options.applied ? 1 : 0, options.applied ? now() : null, now(), answerPackageId, ticketId);
+  }
+
+  recordTicketBatchTopicEcho(answerPackageId: string, ticketId: number, state: TicketBatchTopicEchoState, options: { chatId?: number | null; threadId?: number | null; messageId?: number | null; lastError?: string | null } = {}): void {
+    this.db.prepare(`UPDATE ticket_batch_answer_items
+      SET topic_echo_state = ?, topic_echo_chat_id = COALESCE(?, topic_echo_chat_id), topic_echo_thread_id = COALESCE(?, topic_echo_thread_id), topic_echo_message_id = COALESCE(?, topic_echo_message_id), topic_echo_last_error = ?, updated_at = ?
+      WHERE answer_package_id = ? AND ticket_id = ?`)
+      .run(state, options.chatId ?? null, options.threadId ?? null, options.messageId ?? null, options.lastError ?? null, now(), answerPackageId, ticketId);
+  }
+
+  setTicketFollowUpContext(ticketId: number, input: { followUpState: TicketFollowUpState; internalNote: string | null; escalationTarget: TicketEscalationTarget; sourceAnswerPackageId?: string | null }): TicketRecord | undefined {
+    const timestamp = now();
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`UPDATE tickets SET follow_up_state = ?, internal_note = ?, escalation_target = ?, follow_up_updated_at = ?, follow_up_source_answer_package_id = ?, updated_at = ? WHERE id = ?`)
+        .run(input.followUpState, input.internalNote, input.escalationTarget, timestamp, input.sourceAnswerPackageId ?? null, timestamp, ticketId);
+      this.db.prepare(`INSERT INTO ticket_follow_up_history (ticket_id, follow_up_state, internal_note, escalation_target, source_answer_package_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(ticketId, input.followUpState, input.internalNote, input.escalationTarget, input.sourceAnswerPackageId ?? null, timestamp);
+    });
+    tx();
+    return this.getTicket(ticketId);
+  }
+
+  clearWaitingUserFollowUp(ticketId: number): TicketRecord | undefined {
+    const ticket = this.getTicket(ticketId);
+    if (!ticket || ticket.follow_up_state !== "WAITING_USER") return ticket;
+    return this.setTicketFollowUpContext(ticketId, { followUpState: "NONE", internalNote: null, escalationTarget: "NONE", sourceAnswerPackageId: ticket.follow_up_source_answer_package_id });
+  }
+
+  listTicketFollowUpHistory(ticketId: number): TicketFollowUpHistoryRecord[] {
+    return this.db.prepare("SELECT * FROM ticket_follow_up_history WHERE ticket_id = ? ORDER BY id ASC").all(ticketId) as TicketFollowUpHistoryRecord[];
   }
 
   finalizeTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
@@ -1372,6 +1445,41 @@ export class SupportDatabase {
               ON ticket_batch_exports(staff_chat_id, delivery_state, created_at);
           `);
         }
+      },
+      {
+        id: 14,
+        name: "add_ticket_follow_up_history_and_batch_topic_echoes",
+        up: () => {
+          this.addColumnIfMissing("tickets", "follow_up_state", "TEXT NOT NULL DEFAULT 'NONE' CHECK(follow_up_state IN ('NONE','WAITING_USER','WAITING_DEVS','WAITING_QUEST_OWNER','MONITORING'))");
+          this.addColumnIfMissing("tickets", "internal_note", "TEXT");
+          this.addColumnIfMissing("tickets", "escalation_target", "TEXT NOT NULL DEFAULT 'NONE' CHECK(escalation_target IN ('NONE','DEVS','PAYMENTS','SECURITY','QUEST_OWNER','SUPPORT'))");
+          this.addColumnIfMissing("tickets", "follow_up_updated_at", "TEXT");
+          this.addColumnIfMissing("tickets", "follow_up_source_answer_package_id", "TEXT");
+          this.addColumnIfMissing("ticket_batch_answer_items", "follow_up_state", "TEXT NOT NULL DEFAULT 'NONE'");
+          this.addColumnIfMissing("ticket_batch_answer_items", "internal_note", "TEXT");
+          this.addColumnIfMissing("ticket_batch_answer_items", "escalation_target", "TEXT NOT NULL DEFAULT 'NONE'");
+          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_chat_id", "INTEGER");
+          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_thread_id", "INTEGER");
+          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_message_id", "INTEGER");
+          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_state", "TEXT NOT NULL DEFAULT 'PENDING'");
+          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_last_error", "TEXT");
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS ticket_follow_up_history (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ticket_id INTEGER NOT NULL,
+              follow_up_state TEXT NOT NULL CHECK(follow_up_state IN ('NONE','WAITING_USER','WAITING_DEVS','WAITING_QUEST_OWNER','MONITORING')),
+              internal_note TEXT,
+              escalation_target TEXT NOT NULL CHECK(escalation_target IN ('NONE','DEVS','PAYMENTS','SECURITY','QUEST_OWNER','SUPPORT')),
+              source_answer_package_id TEXT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_ticket_follow_up_history_ticket
+              ON ticket_follow_up_history(ticket_id, id);
+            CREATE INDEX IF NOT EXISTS idx_ticket_batch_answer_item_echo
+              ON ticket_batch_answer_items(answer_package_id, topic_echo_state, ticket_id);
+          `);
+        }
       }
     ];
 
@@ -1399,7 +1507,7 @@ export class SupportDatabase {
     return Boolean(row);
   }
 
-  private hasColumn(tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs" | "ticket_batch_exports" | "ticket_batch_answer_packages", columnName: string): boolean {
+  private hasColumn(tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs" | "ticket_batch_exports" | "ticket_batch_answer_packages" | "ticket_batch_answer_items", columnName: string): boolean {
     const rows = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as TableColumnInfo[];
     return rows.some((row) => row.name === columnName);
   }
@@ -1413,7 +1521,7 @@ export class SupportDatabase {
   }
 
   private addColumnIfMissing(
-    tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs" | "ticket_batch_exports" | "ticket_batch_answer_packages",
+    tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs" | "ticket_batch_exports" | "ticket_batch_answer_packages" | "ticket_batch_answer_items",
     columnName: string,
     columnDefinition: string
   ): void {

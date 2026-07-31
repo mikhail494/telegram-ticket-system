@@ -7,7 +7,7 @@ A Telegram-native support desk that turns private user messages into structured 
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-7A3E9D.svg)](LICENSE)
 
-Version: `1.2.1`
+Version: `1.2.2`
 
 Users contact the bot in private chat, while staff work entirely in a dedicated Telegram forum supergroup. Each ticket receives its own topic, Quick Replies speed up routine responses, and closed conversations are archived as text transcripts in Support Logs.
 
@@ -138,6 +138,14 @@ Operator workflow:
 
 Answer packages must contain every exported ticket exactly once. Apply blocks stale tickets and supports `reply_keep_open` and `reply_and_close`, reusing the normal delivery, transcript, close, archive, and Support Logs paths. Apply produces at most one aggregate staff summary, not per-ticket progress messages.
 
+### Follow-up Context
+
+New exports generate answer-package version 2. In addition to the user-facing `reply_text`, every answer carries a staff-only `follow_up_state`, optional `internal_note`, and `escalation_target`. Supported follow-up states are `NONE`, `WAITING_USER`, `WAITING_DEVS`, `WAITING_QUEST_OWNER`, and `MONITORING`; escalation targets are `NONE`, `DEVS`, `PAYMENTS`, `SECURITY`, `QUEST_OWNER`, and `SUPPORT`.
+
+After a confirmed batch reply, the bot posts one readable staff-only echo in the ticket topic, including the exact user reply and any internal context. Internal notes and escalation data are never delivered to the user. A failed topic echo is retried independently and never resends the user reply. `WAITING_USER` returns to `IN_PROGRESS` when the user provides a new message.
+
+Ticket ZIP exports include current follow-up context, recorded staff replies, and instructions to avoid repeating an answer when no new user message has arrived. Version-1 answer packages remain accepted with `NONE` / `null` defaults for the new fields.
+
 ## Public English-Only Moderation
 
 Public moderation is disabled by default and configured through `/moderation`. It uses a conservative local classifier, grouped warning windows, persistent strikes, and a 24-hour mute, 7-day mute, then permanent-ban ladder. Recovery and delayed cleanup survive restarts and are recorded through Support Logs.
@@ -261,7 +269,7 @@ npm test
 npm run build
 ```
 
-The current suite contains 146 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, and entity-notification publication behavior.
+The current suite contains 151 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, and entity-notification publication behavior.
 
 ## Project Structure
 
