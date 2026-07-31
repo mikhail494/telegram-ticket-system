@@ -7,7 +7,7 @@ A Telegram-native support desk that turns private user messages into structured 
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-7A3E9D.svg)](LICENSE)
 
-Version: `1.2.2`
+Version: `1.2.3`
 
 Users contact the bot in private chat, while staff work entirely in a dedicated Telegram forum supergroup. Each ticket receives its own topic, Quick Replies speed up routine responses, and closed conversations are archived as text transcripts in Support Logs.
 
@@ -136,7 +136,7 @@ Operator workflow:
 4. Review the single paginated preview message. Previous and Next edit that same Telegram message; no per-ticket preview messages are created.
 5. Press Apply to delete the preview and run the validated instructions, or Cancel to delete it without ticket changes.
 
-Answer packages must contain every exported ticket exactly once. Apply blocks stale tickets and supports `reply_keep_open` and `reply_and_close`, reusing the normal delivery, transcript, close, archive, and Support Logs paths. Apply produces at most one aggregate staff summary, not per-ticket progress messages.
+Answer packages must contain every exported ticket exactly once. Apply blocks stale tickets and supports `reply_keep_open` and `reply_and_close`, reusing the normal delivery, transcript, close, archive, and Support Logs paths. Apply produces at most one aggregate staff summary, not per-ticket progress messages. Undelivered batch replies retain a sanitized Telegram failure category, retry context, and staff-topic failure event; permanent and unknown outcomes are never resent automatically.
 
 ### Follow-up Context
 
@@ -269,7 +269,7 @@ npm test
 npm run build
 ```
 
-The current suite contains 151 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, and entity-notification publication behavior.
+The current suite contains 159 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, and entity-notification publication behavior.
 
 ## Project Structure
 

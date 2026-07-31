@@ -263,7 +263,9 @@ describe("ticket batch Telegram workflow", () => {
     assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "Reply once.").length, 1);
 
     harness.clearApiOverrides();
-    await harness.bot.handleUpdate(batchCallback(callbackData(preview, "Apply"), 122, preview));
+    const retryPreview = harness.findApiCalls("editMessageText").find((call) => String(call.payload.text).includes("Retry is available"));
+    assert.ok(retryPreview);
+    await harness.bot.handleUpdate(batchCallback(callbackData(retryPreview, "Retry"), 122, preview));
     assert.equal(harness.db.listTicketBatchAnswerItems("answers_echo_retry")[0]?.state, "COMPLETED");
     assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "Reply once.").length, 1);
     assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_thread_id === ticket.message_thread_id && String(call.payload.text).includes("Batch reply sent to user")).length, 2);
@@ -334,9 +336,52 @@ describe("ticket batch Telegram workflow", () => {
     await harness.bot.handleUpdate(batchCallback(callbackData(preview, "Apply"), 25, preview));
 
     assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "A valid reply").length, 1);
-    assert.equal(harness.countApiCalls("deleteMessage"), 2);
-    assert.equal(harness.countApiCalls("editMessageText"), 1);
+    assert.equal(harness.countApiCalls("deleteMessage"), 1);
+    assert.equal(harness.countApiCalls("editMessageText"), 2);
     assert.equal(harness.findApiCalls("editMessageText")[0]?.payload.message_id, preview.responseMessageId);
+    const packageRecord = harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID);
+    assert.equal(packageRecord?.preview_token, null);
+    assert.equal(packageRecord?.summary_delivery_state, "SENT");
+  });
+
+  it("completes Apply when preview cleanup fails and does not resend the user reply", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const token = getTicketSnapshotToken(ticket, []);
+    harness.db.createTicketBatchExport({ exportId: "export_preview_edit", staffChatId: TEST_STAFF_CHAT_ID, createdAt: "2026-07-30T00:00:00.000Z", selectionMode: "all_active", ticketCount: 1, items: [{ ticketId: ticket.id, snapshotToken: token }] });
+    harness.setDownloadResponse(answerPackage("export_preview_edit", ticket.id, token));
+    await harness.bot.handleUpdate(buildStaffDocumentUpdate({ fileName: "ticket-answers_export_preview_edit.json" }));
+    const preview = harness.findApiCalls("sendMessage").find((call) => String(call.payload.text).includes("Ticket answer package preview"));
+    assert.ok(preview);
+    harness.setApiResponseOverride("editMessageText", () => ({ ok: false, error_code: 500, description: "Temporary edit failure" }));
+
+    await harness.bot.handleUpdate(batchCallback(callbackData(preview, "Apply"), 26, preview));
+
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "A valid reply").length, 1);
+    assert.equal(harness.db.listTicketBatchAnswerItems("answers_1")[0]?.state, "COMPLETED");
+    assert.equal(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID)?.preview_token, null);
+  });
+
+  it("records a failed batch summary independently after a successful delivery", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const token = getTicketSnapshotToken(ticket, []);
+    harness.db.createTicketBatchExport({ exportId: "export_summary_failure", staffChatId: TEST_STAFF_CHAT_ID, createdAt: "2026-07-30T00:00:00.000Z", selectionMode: "all_active", ticketCount: 1, items: [{ ticketId: ticket.id, snapshotToken: token }] });
+    harness.setDownloadResponse(answerPackage("export_summary_failure", ticket.id, token));
+    await harness.bot.handleUpdate(buildStaffDocumentUpdate({ fileName: "ticket-answers_export_summary_failure.json" }));
+    const preview = harness.findApiCalls("sendMessage").find((call) => String(call.payload.text).includes("Ticket answer package preview"));
+    assert.ok(preview);
+    harness.setApiResponseOverride("sendMessage", (call, success) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_thread_id === undefined
+      ? { ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 17 } }
+      : success);
+
+    await harness.bot.handleUpdate(batchCallback(callbackData(preview, "Apply"), 27, preview));
+
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "A valid reply").length, 1);
+    const packageRecord = harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID);
+    assert.equal(packageRecord?.status, "COMPLETED");
+    assert.equal(packageRecord?.summary_delivery_state, "FAILED");
+    assert.equal(packageRecord?.summary_delivery_error, "RATE_LIMITED");
   });
 
   it("paginates a large persistent preview by editing the same message", async () => {
@@ -483,5 +528,48 @@ describe("ticket batch Telegram workflow", () => {
     assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === failed.user_telegram_id).length, 1);
     assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === valid.user_telegram_id && call.payload.text === "Second reply").length, 1);
     assert.equal(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID)?.status, "PARTIAL");
+    const failedItem = harness.db.listTicketBatchAnswerItems("answers_1")[0];
+    assert.equal(failedItem?.delivery_error_category, "FORBIDDEN");
+    assert.equal(failedItem?.delivery_error_permanence, "PERMANENT");
+    assert.equal(failedItem?.delivery_attempt_count, 1);
+    assert.equal(failedItem?.delivery_failure_event_state, "SENT");
+    assert.equal(failedItem?.topic_echo_state, "PENDING");
+    assert.equal(harness.db.getTicket(failed.id)?.status, "OPEN");
+    assert.equal(harness.db.listMessagesChronological(failed.id).filter((message) => message.direction === "STAFF_TO_USER").length, 0);
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_thread_id === failed.message_thread_id && String(call.payload.text).includes("Batch reply was not delivered")).length, 1);
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => String(call.payload.text).includes(`#${failed.id}: FORBIDDEN`)), true);
+
+    const retryPreview = harness.findApiCalls("editMessageText").find((call) => String(call.payload.text).includes("Retry is available"));
+    assert.ok(retryPreview);
+    await harness.bot.handleUpdate(batchCallback(callbackData(retryPreview, "Retry"), 81, preview));
+
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === failed.user_telegram_id).length, 1);
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_thread_id === failed.message_thread_id && String(call.payload.text).includes("Batch reply was not delivered")).length, 1);
+  });
+
+  it("records a rate-limited delivery as temporary without sending a success echo or closing the ticket", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const token = getTicketSnapshotToken(ticket, []);
+    harness.db.createTicketBatchExport({ exportId: "export_rate_limit", staffChatId: TEST_STAFF_CHAT_ID, createdAt: "2026-07-30T00:00:00.000Z", selectionMode: "all_active", ticketCount: 1, items: [{ ticketId: ticket.id, snapshotToken: token }] });
+    harness.setDownloadResponse(answerPackage("export_rate_limit", ticket.id, token, "reply_and_close"));
+    await harness.bot.handleUpdate(buildStaffDocumentUpdate({ fileName: "ticket-answers_export_rate_limit.json" }));
+    const preview = harness.findApiCalls("sendMessage").find((call) => String(call.payload.text).includes("Ticket answer package preview"));
+    assert.ok(preview);
+    harness.setApiResponseOverride("sendMessage", (call, success) => call.payload.chat_id === ticket.user_telegram_id
+      ? { ok: false, error_code: 429, description: "Too Many Requests: retry after 39", parameters: { retry_after: 39 } }
+      : success);
+
+    await harness.bot.handleUpdate(batchCallback(callbackData(preview, "Apply"), 90, preview));
+
+    const item = harness.db.listTicketBatchAnswerItems("answers_1")[0];
+    assert.equal(item?.state, "FAILED");
+    assert.equal(item?.delivery_error_category, "RATE_LIMITED");
+    assert.equal(item?.delivery_error_permanence, "TEMPORARY");
+    assert.equal(item?.delivery_retry_after_seconds, 39);
+    assert.equal(item?.delivery_message_id, null);
+    assert.equal(harness.db.getTicket(ticket.id)?.status, "OPEN");
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_thread_id === ticket.message_thread_id && String(call.payload.text).includes("Batch reply sent to user")), false);
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => String(call.payload.text).includes(`#${ticket.id}: RATE_LIMITED, retry after 39s`)), true);
   });
 });

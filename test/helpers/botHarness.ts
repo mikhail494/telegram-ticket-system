@@ -56,6 +56,7 @@ export interface ApiMockFailure {
   ok: false;
   error_code: number;
   description: string;
+  parameters?: Record<string, unknown>;
 }
 
 export type ApiMockResponse = ApiMockSuccess | ApiMockFailure;

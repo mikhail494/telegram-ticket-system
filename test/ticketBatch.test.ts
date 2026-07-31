@@ -77,6 +77,35 @@ describe("ticket batch export contract", () => {
     assert.equal(snapshot.records[0]?.ticket.internal_note, "Investigate the payment provider.");
     assert.equal(snapshot.records[0]?.follow_up_history[0]?.source_answer_package_id, "answers_history");
   });
+
+  it("includes only normalized delivery-failure context in a later export", () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const snapshot = buildTicketBatchExportSnapshot({
+      exportId: "export_delivery_context",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      tickets: [{
+        ticket,
+        messages: [],
+        deliveryFailure: {
+          category: "RATE_LIMITED",
+          permanence: "TEMPORARY",
+          occurred_at: "2026-08-01T00:00:00.000Z",
+          retry_after_seconds: 39,
+          staff_failure_event_posted: true
+        }
+      }]
+    });
+
+    assert.deepEqual(snapshot.records[0]?.batch_delivery_failure, {
+      category: "RATE_LIMITED",
+      permanence: "TEMPORARY",
+      occurred_at: "2026-08-01T00:00:00.000Z",
+      retry_after_seconds: 39,
+      staff_failure_event_posted: true
+    });
+  });
   it("exports all and only active tickets in ticket/message order without mutating tickets", async () => {
     const harness = createHarness();
     const second = harness.seedTicket({ user: { id: 124, username: "second" }, messageThreadId: 5001 });
