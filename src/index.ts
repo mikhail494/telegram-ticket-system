@@ -5,6 +5,7 @@ import { logger } from "./logger.js";
 import { archiveClosedTicketsPendingUpload, initializeSupportLogsTopic } from "./archive.js";
 import { loadQuickRepliesRegistry } from "./quickReplies.js";
 import { processModerationRecovery } from "./languageModeration.js";
+import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
 
 const quickRepliesRegistry = loadQuickRepliesRegistry();
 const quickReplyCategories = quickRepliesRegistry.listCategories();
@@ -18,7 +19,8 @@ logger.info(
 );
 
 const db = new SupportDatabase(config.databaseUrl);
-const bot = createBot(db, quickRepliesRegistry);
+const entityNotificationProviders: EntityNotificationProviderRegistry = new Map();
+const bot = createBot(db, quickRepliesRegistry, { entityNotificationProviders });
 
 async function main(): Promise<void> {
   await bot.api.deleteWebhook({ drop_pending_updates: false });
