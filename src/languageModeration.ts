@@ -97,6 +97,7 @@ export function scheduleModerationCleanup(
 }
 
 export async function processModerationRecovery(api: import("grammy").Context["api"], db: import("./db.js").SupportDatabase, currentTime = new Date()): Promise<void> {
+  const { config } = await import("./config.js");
   for (const job of db.listLanguageModerationRecoveryJobs(config.staffChatId, currentTime.toISOString())) {
     await processModerationCleanupJob(api, db, job.id, currentTime);
   }
@@ -108,6 +109,7 @@ export async function processModerationCleanupJob(
   jobId: number,
   currentTime = new Date()
 ): Promise<void> {
+  const { config } = await import("./config.js");
   const job = db.getLanguageModerationCleanupJob(jobId);
   if (!job || job.staff_chat_id !== config.staffChatId || job.state === "COMPLETED" || Date.parse(job.cleanup_due_at) > currentTime.getTime()) return;
 
@@ -165,4 +167,3 @@ function isKeyboardMash(value: string): boolean {
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-import { config } from "./config.js";
