@@ -43,6 +43,16 @@ export interface BanLogInput {
   performedBy: ArchiveActor;
 }
 
+export interface ModerationLogInput {
+  userTelegramId: number;
+  username: string | null;
+  publicChatId: number;
+  publicChatTitle: string | null;
+  sanctionTier: number;
+  sanctionKind: string;
+  timestamp: string;
+}
+
 type TopicVerification = "ok" | "closed" | "missing";
 type SupportLogsTopicState = "reachable" | "reopened" | "created";
 
@@ -199,6 +209,21 @@ export async function logBanEvent(
       "Could not write ban event to support logs"
     );
   }
+}
+
+export async function logModerationSanction(api: BotApi, db: SupportDatabase, input: ModerationLogInput): Promise<void> {
+  const topicId = await initializeSupportLogsTopic(api, db);
+  await api.sendMessage(config.staffChatId, [
+    "Public moderation sanction",
+    `User ID: ${input.userTelegramId}`,
+    `Username: ${input.username ? `@${input.username}` : "none"}`,
+    `Public chat ID: ${input.publicChatId}`,
+    `Public chat: ${input.publicChatTitle ?? "unknown"}`,
+    `Sanction tier: ${input.sanctionTier}`,
+    `Sanction: ${input.sanctionKind}`,
+    `UTC: ${input.timestamp}`,
+    "Reason: English-only rule"
+  ].join("\n"), { message_thread_id: topicId });
 }
 
 function actorLabel(actor: ArchiveActor): string {

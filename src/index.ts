@@ -4,6 +4,7 @@ import { createBot, sendStaffOnboardingIfNeeded, setBotCommands } from "./bot.js
 import { logger } from "./logger.js";
 import { archiveClosedTicketsPendingUpload, initializeSupportLogsTopic } from "./archive.js";
 import { loadQuickRepliesRegistry } from "./quickReplies.js";
+import { processModerationRecovery } from "./languageModeration.js";
 
 const quickRepliesRegistry = loadQuickRepliesRegistry();
 const quickReplyCategories = quickRepliesRegistry.listCategories();
@@ -23,6 +24,7 @@ async function main(): Promise<void> {
   await bot.api.deleteWebhook({ drop_pending_updates: false });
   await initializeSupportLogsTopic(bot.api, db);
   await archiveClosedTicketsPendingUpload(bot.api, db);
+  await processModerationRecovery(bot.api, db);
   await setBotCommands(bot);
   await sendStaffOnboardingIfNeeded(bot.api, db);
 

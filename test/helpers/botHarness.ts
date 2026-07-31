@@ -1,6 +1,7 @@
 import type { ApiCallFn, Bot, Context, Transformer } from "grammy";
 import type { Update, User, UserFromGetMe } from "grammy/types";
 import type { QuickRepliesRegistry } from "../../src/quickReplies.js";
+import type { ModerationCleanupScheduler } from "../../src/languageModeration.js";
 import type {
   SupportDatabase as SupportDatabaseType,
   TicketStatus,
@@ -114,6 +115,8 @@ export interface StaffDocumentUpdateOptions extends Omit<StaffTopicUpdateOptions
 
 export interface BotHarnessOptions {
   quickRepliesRegistry?: QuickRepliesRegistry;
+  moderationNow?: () => Date;
+  scheduleModerationCleanup?: ModerationCleanupScheduler;
 }
 
 export interface BotHarness {
@@ -121,6 +124,7 @@ export interface BotHarness {
   registry: QuickRepliesRegistry;
   bot: Bot<Context>;
   apiCalls: RecordedApiCall[];
+  scheduledModerationCleanupJobIds: number[];
   cleanup(): void;
   seedTicket(options?: SeedTicketOptions): TicketWithUser;
   setApiResponseOverride(method: string, override: ApiResponseOverride): void;
@@ -137,8 +141,14 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
   const db = new SupportDatabase(":memory:");
   const registry = options.quickRepliesRegistry ?? loadQuickRepliesRegistry();
   let downloadResponse: { body: string; status: number } = { body: "{}", status: 200 };
+  const scheduledModerationCleanupJobIds: number[] = [];
+  const scheduleCleanup: ModerationCleanupScheduler = options.scheduleModerationCleanup ?? ((_api, _db, jobId) => {
+    scheduledModerationCleanupJobIds.push(jobId);
+  });
   const bot = createBot(db, registry, {
-    fetch: async () => new Response(downloadResponse.body, { status: downloadResponse.status })
+    fetch: async () => new Response(downloadResponse.body, { status: downloadResponse.status }),
+    now: options.moderationNow,
+    scheduleModerationCleanup: scheduleCleanup
   });
   const apiCalls: RecordedApiCall[] = [];
   const responseOverrides = new Map<string, ApiResponseOverride>();
@@ -173,6 +183,7 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
     registry,
     bot,
     apiCalls,
+    scheduledModerationCleanupJobIds,
     cleanup: () => {
       if (closed) {
         return;

@@ -44,12 +44,20 @@ import {
   isCommandText,
   usernameOf
 } from "./telegram.js";
+import {
+  classifyEnglishOnlyMessage,
+  parseModerationConfig,
+  scheduleModerationCleanup,
+  type ModerationCleanupScheduler
+} from "./languageModeration.js";
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
 const DEFAULT_BAN_REASON = "No reason provided.";
 const STAFF_HELP_SENT_SETTING_PREFIX = "staff_help_sent";
 const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
+const MODERATION_SETTING_PREFIX = "language_moderation";
+const pendingWarningTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
 const USER_HELP_TEXT = [
   "Support help",
@@ -91,7 +99,10 @@ const STAFF_HELP_TEXT = [
   "/unban <telegram_id> - unban user",
   "/bans - list banned users",
   "/setlogs - use current topic as Support Logs",
-  "/logs - show/create current Support Logs topic status"
+  "/logs - show/create current Support Logs topic status",
+  "/exporttickets - export active tickets for an answer package",
+  "Upload a validated answer package in the staff group to preview and apply its replies.",
+  "/moderation <subcommand> - configure public English-only moderation"
 ].join("\n");
 
 const STAFF_ONBOARDING_TEXT = [
@@ -108,6 +119,7 @@ const STAFF_ONBOARDING_TEXT = [
   "/help, /chatid, /whois, /ticket <id>, /close <id>",
   "/ban <telegram_id> [reason], /unban <telegram_id>, /bans",
   "/setlogs, /logs",
+  "/exporttickets, /moderation status",
   "",
   "Run /setlogs inside any topic to make it Support Logs.",
   "Run /logs to show or create the current Support Logs topic.",
@@ -154,6 +166,8 @@ type DeliverAndRecordStaffTextReply = (
 
 interface BotRuntimeDependencies {
   fetch?: typeof fetch;
+  now?: () => Date;
+  scheduleModerationCleanup?: ModerationCleanupScheduler;
 }
 
 interface PendingTicketBatchPreview {
@@ -167,6 +181,8 @@ export function createBot(
 ): Bot<Context> {
   const bot = new Bot<Context>(config.botToken);
   const fetchImpl = runtime.fetch ?? globalThis.fetch;
+  const moderationNow = runtime.now ?? (() => new Date());
+  const moderationCleanupScheduler = runtime.scheduleModerationCleanup ?? scheduleModerationCleanup;
   const pendingTicketBatchPreviews = new Map<string, PendingTicketBatchPreview>();
 
   async function deliverAndRecordStaffTextReply(
@@ -456,9 +472,7 @@ export function createBot(
   }
 
   bot.command("start", async (ctx) => {
-    if (!isPrivateChat(ctx)) {
-      return;
-    }
+    if (!isPrivateChat(ctx)) { await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler); return; }
 
     persistUserFromContext(db, ctx);
     if (await replyIfBanned(db, ctx)) {
@@ -620,6 +634,43 @@ export function createBot(
     } finally {
       await cleanupTicketBatchZip(zip);
     }
+  });
+
+  bot.command("moderation", async (ctx) => {
+    if (!isStaffChat(ctx)) { if (isPrivateChat(ctx)) await ctx.reply(STAFF_ONLY_TEXT); return; }
+    const [, action = "status", ...args] = (ctx.message?.text ?? "").trim().split(/\s+/);
+    const current = moderationConfig(db);
+    if (action === "status") { await ctx.reply(await formatModerationStatus(db, current, ctx.api, bot.botInfo?.id)); return; }
+    if (action === "target") {
+      const chatId = Number(args[0]);
+      if (!Number.isSafeInteger(chatId)) { await ctx.reply("Usage: /moderation target <chat_id>"); return; }
+      try { await ctx.api.getChat(chatId); } catch { await ctx.reply("The target chat is not reachable by this bot."); return; }
+      db.setSetting(moderationSettingKey("target"), String(chatId));
+      await ctx.reply(`Moderation target set to ${chatId}. It remains disabled until /moderation enable succeeds.`);
+      return;
+    }
+    if (action === "enable") {
+      const rights = await validateModerationRights(ctx.api, current.targetChatId, bot.botInfo?.id);
+      if (rights !== "ok") { await ctx.reply(`Moderation remains disabled: ${rights}`); return; }
+      db.setSetting(moderationSettingKey("enabled"), "true"); await ctx.reply("English-only moderation is enabled."); return;
+    }
+    if (action === "disable") { db.setSetting(moderationSettingKey("enabled"), "false"); await ctx.reply("Moderation disabled. Existing strikes and tiers were preserved."); return; }
+    if (action === "allowlist") { await ctx.reply(current.allowlist.length ? `Allowlist (${current.allowlist.length}): ${current.allowlist.join(", ")}` : "Allowlist is empty."); return; }
+    if (action === "allow" || action === "unallow") {
+      const term = args.join(" ").trim().toLowerCase();
+      if (!term || term.length > 80) { await ctx.reply(`Usage: /moderation ${action} <term up to 80 characters>`); return; }
+      const entries = new Set(current.allowlist);
+      if (action === "allow") entries.add(term); else entries.delete(term);
+      db.setSetting(moderationSettingKey("allowlist"), JSON.stringify([...entries].sort()));
+      await ctx.reply(action === "allow" ? "Allowlist entry saved." : "Allowlist entry removed."); return;
+    }
+    const userId = Number(args[0]);
+    if (!Number.isSafeInteger(userId) || !current.targetChatId) { await ctx.reply(`Usage: /moderation ${action} <user_id>`); return; }
+    const state = db.getLanguageModerationUserState(current.targetChatId, userId) ?? { username: null, current_strikes: 0, sanction_tier: 0, first_strike_at: null };
+    if (action === "user") { await ctx.reply(`User ${userId}: strikes ${state.current_strikes}/2, sanction tier ${state.sanction_tier}/3.`); return; }
+    if (action === "resetstrikes") { db.upsertLanguageModerationUserState({ chat_id: current.targetChatId, user_telegram_id: userId, username: state.username, current_strikes: 0, sanction_tier: state.sanction_tier, first_strike_at: null }); db.clearLanguageModerationCycleViolations(current.targetChatId, userId, state.sanction_tier); await ctx.reply(`Strikes reset for ${userId}. Sanction tier remains ${state.sanction_tier}.`); return; }
+    if (action === "resettier") { db.upsertLanguageModerationUserState({ chat_id: current.targetChatId, user_telegram_id: userId, username: state.username, current_strikes: state.current_strikes, sanction_tier: 0, first_strike_at: state.first_strike_at }); await ctx.reply(`Sanction tier reset for ${userId}. This does not unmute or unban the user.`); return; }
+    await ctx.reply("Usage: /moderation status|target|enable|disable|allowlist|allow|unallow|user|resetstrikes|resettier");
   });
 
   bot.command("status", async (ctx) => {
@@ -840,6 +891,7 @@ export function createBot(
     }
 
     if (!isPrivateChat(ctx)) {
+      await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler);
       return;
     }
 
@@ -1129,6 +1181,8 @@ export async function setBotCommands(bot: Bot<Context>): Promise<void> {
       { command: "unban", description: "Unban a user" },
       { command: "bans", description: "List banned users" },
       { command: "whois", description: "Show ticket user details" },
+      { command: "exporttickets", description: "Export active tickets" },
+      { command: "moderation", description: "Manage public chat moderation" },
       { command: "logs", description: "Show Support Logs topic status" },
       { command: "setlogs", description: "Use this topic as Support Logs" }
     ],
@@ -1970,6 +2024,158 @@ async function replyIfBanned(db: SupportDatabase, ctx: Context): Promise<boolean
 
   await ctx.reply(BANNED_TEXT);
   return true;
+}
+
+function moderationSettingKey(name: string): string {
+  return `${MODERATION_SETTING_PREFIX}:${name}`;
+}
+
+function moderationConfig(db: SupportDatabase) {
+  return parseModerationConfig({
+    enabled: db.getSetting(moderationSettingKey("enabled")),
+    target: db.getSetting(moderationSettingKey("target")),
+    warning_text: db.getSetting(moderationSettingKey("warning_text")),
+    lookback_minutes: db.getSetting(moderationSettingKey("lookback_minutes")),
+    warning_cooldown_minutes: db.getSetting(moderationSettingKey("warning_cooldown_minutes")),
+    warning_message_threshold: db.getSetting(moderationSettingKey("warning_message_threshold")),
+    allowlist: db.getSetting(moderationSettingKey("allowlist"))
+  });
+}
+
+async function formatModerationStatus(
+  db: SupportDatabase,
+  moderation: ReturnType<typeof moderationConfig>,
+  api: BotApi,
+  botId: number | undefined
+): Promise<string> {
+  const pending = db.listLanguageModerationRecoveryJobs(config.staffChatId, new Date().toISOString()).length;
+  const rights = await validateModerationRights(api, moderation.targetChatId, botId);
+  return [
+    `Moderation: ${moderation.enabled ? "enabled" : "disabled"}`,
+    `Target: ${moderation.targetChatId ?? "not configured"}`,
+    `Bot rights: ${rights}`,
+    `Warning cooldown: ${moderation.warningCooldownMinutes} minutes and ${moderation.warningMessageThreshold} ordinary messages`,
+    `Lookback: ${moderation.lookbackMinutes} minutes`,
+    `Allowlist entries: ${moderation.allowlist.length}`,
+    `Due cleanup/log recovery jobs: ${pending}`
+  ].join("\n");
+}
+
+async function validateModerationRights(api: BotApi, targetChatId: number | null, botId: number | undefined): Promise<string> {
+  if (!targetChatId || !botId) return "configure a reachable target chat first.";
+  try {
+    await api.getChat(targetChatId);
+    const member = await api.getChatMember(targetChatId, botId);
+    if (member.status !== "administrator" && member.status !== "creator") return "the bot is not an administrator in the target chat.";
+    const capabilities = member as { can_delete_messages?: boolean; can_restrict_members?: boolean };
+    const missing = [
+      !capabilities.can_delete_messages ? "delete messages" : null,
+      !capabilities.can_restrict_members ? "restrict and ban members" : null
+    ].filter((entry): entry is string => Boolean(entry));
+    return missing.length ? `missing required rights: ${missing.join(", ")}.` : "ok";
+  } catch {
+    return "the target chat or bot membership could not be verified.";
+  }
+}
+
+async function handlePublicLanguageModeration(
+  db: SupportDatabase,
+  ctx: Context,
+  now: () => Date,
+  cleanupScheduler: ModerationCleanupScheduler
+): Promise<void> {
+  if (!ctx.chat || !ctx.from || !ctx.message || ctx.from.is_bot) return;
+  const moderation = moderationConfig(db);
+  if (!moderation.enabled || moderation.targetChatId !== ctx.chat.id || ctx.chat.id === config.staffChatId) return;
+  const content = getMessageContent(ctx.message).text;
+  const chatState = db.getLanguageModerationChatState(ctx.chat.id);
+  db.upsertLanguageModerationChatState(ctx.chat.id, {
+    lastWarningMessageId: chatState?.last_warning_message_id ?? null,
+    lastWarningAt: chatState?.last_warning_at ?? null,
+    ordinaryMessagesSinceWarning: (chatState?.ordinary_messages_since_warning ?? 0) + 1,
+    pendingWarningDueAt: chatState?.pending_warning_due_at ?? null,
+    pendingWarningStartedAt: chatState?.pending_warning_started_at ?? null
+  });
+  if (!content || isCommandText(content) || classifyEnglishOnlyMessage(content, moderation.allowlist) !== "violation") return;
+
+  const state = db.getLanguageModerationUserState(ctx.chat.id, ctx.from.id) ?? { current_strikes: 0, sanction_tier: 0, first_strike_at: null };
+  if (!db.addLanguageModerationViolation({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, message_id: ctx.message.message_id, username: usernameOf(ctx.from), cycle_tier: state.sanction_tier })) return;
+  if (state.current_strikes === 0) {
+    const currentChatState = db.getLanguageModerationChatState(ctx.chat.id);
+    const currentTime = now();
+    const lastWarningAt = currentChatState?.last_warning_at ? Date.parse(currentChatState.last_warning_at) : 0;
+    const canWarn = !lastWarningAt || (
+      currentTime.getTime() - lastWarningAt >= moderation.warningCooldownMinutes * 60_000 &&
+      (currentChatState?.ordinary_messages_since_warning ?? 0) >= moderation.warningMessageThreshold
+    );
+    if (canWarn) {
+      if (!currentChatState?.pending_warning_due_at) {
+        const startedAt = currentTime;
+        const dueAt = new Date(startedAt.getTime() + 3_000);
+        db.upsertLanguageModerationChatState(ctx.chat.id, { lastWarningMessageId: currentChatState?.last_warning_message_id ?? null, lastWarningAt: currentChatState?.last_warning_at ?? null, ordinaryMessagesSinceWarning: currentChatState?.ordinary_messages_since_warning ?? 0, pendingWarningStartedAt: startedAt.toISOString(), pendingWarningDueAt: dueAt.toISOString() });
+        schedulePendingWarning(ctx.api, db, ctx.chat.id, 3_000);
+      }
+    } else {
+      db.upsertLanguageModerationUserState({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from), current_strikes: 1, sanction_tier: state.sanction_tier, first_strike_at: currentTime.toISOString() });
+      await setModerationReaction(ctx, "⚠️");
+    }
+    return;
+  }
+  if (state.current_strikes === 1) {
+    db.upsertLanguageModerationUserState({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from), current_strikes: 2, sanction_tier: state.sanction_tier, first_strike_at: state.first_strike_at });
+    await setModerationReaction(ctx, "⚠️");
+    return;
+  }
+  const tier = Math.min(state.sanction_tier, 2);
+  try {
+    await setModerationReaction(ctx, "🚫");
+    if (tier === 2) await ctx.api.banChatMember(ctx.chat.id, ctx.from.id);
+    else await ctx.api.restrictChatMember(ctx.chat.id, ctx.from.id, { can_send_messages: false }, { until_date: Math.floor(now().getTime() / 1000) + (tier === 0 ? 86_400 : 604_800) });
+    const nextTier = Math.min(3, state.sanction_tier + 1);
+    db.upsertLanguageModerationUserState({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from), current_strikes: 0, sanction_tier: nextTier, first_strike_at: null });
+    const cleanupJobId = db.createLanguageModerationCleanupJob({ staff_chat_id: config.staffChatId, chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from) ?? null, chat_title: ("title" in ctx.chat ? ctx.chat.title : null) ?? null, sanction_tier: nextTier, sanction_kind: tier === 0 ? "24-hour mute" : tier === 1 ? "7-day mute" : "permanent ban", cleanup_due_at: new Date(now().getTime() + 10_000).toISOString() });
+    cleanupScheduler(ctx.api, db, cleanupJobId);
+  } catch (error) {
+    db.setSetting(moderationSettingKey("enabled"), "false");
+    logger.error({ chatId: ctx.chat.id, userId: ctx.from.id, err: error }, "Language moderation sanction failed; moderation disabled");
+  }
+}
+
+async function setModerationReaction(ctx: Context, emoji: "⚠️" | "🚫"): Promise<void> {
+  if (!ctx.chat || !ctx.message) return;
+  try {
+    // Telegram supports these reactions, while the installed grammY type union lags them.
+    await ctx.api.setMessageReaction(ctx.chat.id, ctx.message.message_id, [{ type: "emoji", emoji: emoji as never }]);
+  } catch (error) { logger.warn({ chatId: ctx.chat.id, messageId: ctx.message.message_id, err: error }, "Could not set moderation reaction"); }
+}
+
+function schedulePendingWarning(api: BotApi, db: SupportDatabase, chatId: number, delayMs: number): void {
+  if (pendingWarningTimers.has(chatId)) return;
+  const timer = setTimeout(() => {
+    pendingWarningTimers.delete(chatId);
+    void processPendingWarning(api, db, chatId);
+  }, delayMs);
+  timer.unref();
+  pendingWarningTimers.set(chatId, timer);
+}
+
+export async function processPendingWarning(api: BotApi, db: SupportDatabase, chatId: number): Promise<void> {
+  const state = db.getLanguageModerationChatState(chatId);
+  if (!state?.pending_warning_due_at || Date.parse(state.pending_warning_due_at) > Date.now()) return;
+  const moderation = moderationConfig(db);
+  if (!moderation.enabled || moderation.targetChatId !== chatId) return;
+  const grouped = db.claimLanguageModerationFirstStrikes(chatId, new Date(Date.now() - moderation.lookbackMinutes * 60_000).toISOString());
+  if (!grouped.length) return;
+  for (const user of grouped) {
+    try { await api.setMessageReaction(chatId, user.messageId, [{ type: "emoji", emoji: "⚠️" as never }]); } catch {}
+  }
+  if (state.last_warning_message_id) { try { await api.deleteMessage(chatId, state.last_warning_message_id); } catch {} }
+  try {
+    const warning = await api.sendMessage(chatId, moderation.warningText);
+    db.upsertLanguageModerationChatState(chatId, { lastWarningMessageId: warning.message_id, lastWarningAt: new Date().toISOString(), ordinaryMessagesSinceWarning: 0, pendingWarningDueAt: null, pendingWarningStartedAt: null });
+  } catch (error) {
+    logger.warn({ chatId, err: error }, "Could not send pending language moderation warning");
+  }
 }
 
 function isPrivateChat(ctx: Context): boolean {
