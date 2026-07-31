@@ -150,6 +150,22 @@ export interface CreateTicketBatchAnswerPackageInput {
   items: Array<Pick<TicketBatchAnswerItemRecord, "ticket_id" | "snapshot_token" | "action" | "reply_text">>;
 }
 
+export interface LanguageModerationUserState {
+  chat_id: number; user_telegram_id: number; username: string | null; current_strikes: number;
+  sanction_tier: number; first_strike_at: string | null; updated_at: string;
+}
+
+export interface LanguageModerationViolation {
+  chat_id: number; user_telegram_id: number; message_id: number; username: string | null;
+  detected_at: string; cycle_tier: number;
+}
+
+export interface LanguageModerationCleanupJob {
+  id: number; staff_chat_id: number | null; chat_id: number; user_telegram_id: number; username: string | null; chat_title: string | null;
+  sanction_tier: number; sanction_kind: string; cleanup_due_at: string; state: "PENDING" | "CLEANING" | "LOG_PENDING" | "COMPLETED";
+  created_at: string; updated_at: string;
+}
+
 interface TableColumnInfo {
   name: string;
 }
@@ -752,6 +768,80 @@ export class SupportDatabase {
     return this.getTicketBatchAnswerPackage(answerPackageId, staffChatId);
   }
 
+  getLanguageModerationUserState(chatId: number, userId: number): LanguageModerationUserState | undefined {
+    return this.db.prepare("SELECT * FROM language_moderation_user_state WHERE chat_id = ? AND user_telegram_id = ?").get(chatId, userId) as LanguageModerationUserState | undefined;
+  }
+
+  upsertLanguageModerationUserState(input: Omit<LanguageModerationUserState, "updated_at">): void {
+    this.db.prepare(`INSERT INTO language_moderation_user_state (chat_id, user_telegram_id, username, current_strikes, sanction_tier, first_strike_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(chat_id, user_telegram_id) DO UPDATE SET username = excluded.username, current_strikes = excluded.current_strikes, sanction_tier = excluded.sanction_tier, first_strike_at = excluded.first_strike_at, updated_at = excluded.updated_at`)
+      .run(input.chat_id, input.user_telegram_id, input.username, input.current_strikes, input.sanction_tier, input.first_strike_at, now());
+  }
+
+  addLanguageModerationViolation(input: Omit<LanguageModerationViolation, "detected_at">): boolean {
+    const result = this.db.prepare("INSERT OR IGNORE INTO language_moderation_violations (chat_id, user_telegram_id, message_id, username, detected_at, cycle_tier) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(input.chat_id, input.user_telegram_id, input.message_id, input.username, now(), input.cycle_tier);
+    return result.changes === 1;
+  }
+
+  listLanguageModerationViolations(chatId: number, since: string): LanguageModerationViolation[] {
+    return this.db.prepare("SELECT * FROM language_moderation_violations WHERE chat_id = ? AND detected_at >= ? ORDER BY detected_at ASC, message_id ASC").all(chatId, since) as LanguageModerationViolation[];
+  }
+
+  claimLanguageModerationFirstStrikes(chatId: number, since: string): Array<{ userId: number; username: string | null; messageId: number }> {
+    const transaction = this.db.transaction(() => {
+      const candidates = this.db.prepare(`
+        SELECT v.user_telegram_id AS userId, MAX(v.message_id) AS messageId, MAX(v.username) AS username
+        FROM language_moderation_violations v
+        LEFT JOIN language_moderation_user_state s ON s.chat_id = v.chat_id AND s.user_telegram_id = v.user_telegram_id
+        WHERE v.chat_id = ? AND v.detected_at >= ? AND COALESCE(s.current_strikes, 0) = 0
+        GROUP BY v.user_telegram_id ORDER BY v.user_telegram_id ASC
+      `).all(chatId, since) as Array<{ userId: number; username: string | null; messageId: number }>;
+      const timestamp = now();
+      const update = this.db.prepare(`INSERT INTO language_moderation_user_state (chat_id, user_telegram_id, username, current_strikes, sanction_tier, first_strike_at, updated_at) VALUES (?, ?, ?, 1, 0, ?, ?) ON CONFLICT(chat_id, user_telegram_id) DO UPDATE SET current_strikes = 1, username = excluded.username, first_strike_at = excluded.first_strike_at, updated_at = excluded.updated_at WHERE language_moderation_user_state.current_strikes = 0`);
+      return candidates.filter((candidate) => update.run(chatId, candidate.userId, candidate.username, timestamp, timestamp).changes === 1);
+    });
+    return transaction();
+  }
+
+  clearLanguageModerationViolations(chatId: number, userId: number): void {
+    this.db.prepare("DELETE FROM language_moderation_violations WHERE chat_id = ? AND user_telegram_id = ?").run(chatId, userId);
+  }
+
+  listLanguageModerationCycleViolations(chatId: number, userId: number, cycleTier: number): LanguageModerationViolation[] {
+    return this.db.prepare("SELECT * FROM language_moderation_violations WHERE chat_id = ? AND user_telegram_id = ? AND cycle_tier = ? ORDER BY message_id ASC").all(chatId, userId, cycleTier) as LanguageModerationViolation[];
+  }
+
+  clearLanguageModerationCycleViolations(chatId: number, userId: number, cycleTier: number): void {
+    this.db.prepare("DELETE FROM language_moderation_violations WHERE chat_id = ? AND user_telegram_id = ? AND cycle_tier = ?").run(chatId, userId, cycleTier);
+  }
+
+  getLanguageModerationChatState(chatId: number): { chat_id: number; last_warning_message_id: number | null; last_warning_at: string | null; ordinary_messages_since_warning: number; pending_warning_due_at: string | null; pending_warning_started_at: string | null; updated_at: string } | undefined {
+    return this.db.prepare("SELECT * FROM language_moderation_chat_state WHERE chat_id = ?").get(chatId) as { chat_id: number; last_warning_message_id: number | null; last_warning_at: string | null; ordinary_messages_since_warning: number; pending_warning_due_at: string | null; pending_warning_started_at: string | null; updated_at: string } | undefined;
+  }
+
+  upsertLanguageModerationChatState(chatId: number, values: { lastWarningMessageId?: number | null; lastWarningAt?: string | null; ordinaryMessagesSinceWarning: number; pendingWarningDueAt?: string | null; pendingWarningStartedAt?: string | null }): void {
+    this.db.prepare(`INSERT INTO language_moderation_chat_state (chat_id, last_warning_message_id, last_warning_at, ordinary_messages_since_warning, pending_warning_due_at, pending_warning_started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET last_warning_message_id = excluded.last_warning_message_id, last_warning_at = excluded.last_warning_at, ordinary_messages_since_warning = excluded.ordinary_messages_since_warning, pending_warning_due_at = excluded.pending_warning_due_at, pending_warning_started_at = excluded.pending_warning_started_at, updated_at = excluded.updated_at`)
+      .run(chatId, values.lastWarningMessageId ?? null, values.lastWarningAt ?? null, values.ordinaryMessagesSinceWarning, values.pendingWarningDueAt ?? null, values.pendingWarningStartedAt ?? null, now());
+  }
+
+  createLanguageModerationCleanupJob(input: Omit<LanguageModerationCleanupJob, "id" | "state" | "created_at" | "updated_at">): number {
+    const result = this.db.prepare("INSERT INTO language_moderation_cleanup_jobs (staff_chat_id, chat_id, user_telegram_id, username, chat_title, sanction_tier, sanction_kind, cleanup_due_at, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)")
+      .run(input.staff_chat_id, input.chat_id, input.user_telegram_id, input.username, input.chat_title, input.sanction_tier, input.sanction_kind, input.cleanup_due_at, now(), now());
+    return Number(result.lastInsertRowid);
+  }
+
+  getLanguageModerationCleanupJob(jobId: number): LanguageModerationCleanupJob | undefined {
+    return this.db.prepare("SELECT * FROM language_moderation_cleanup_jobs WHERE id = ?").get(jobId) as LanguageModerationCleanupJob | undefined;
+  }
+
+  listLanguageModerationRecoveryJobs(staffChatId: number, nowIso: string): LanguageModerationCleanupJob[] {
+    return this.db.prepare("SELECT * FROM language_moderation_cleanup_jobs WHERE staff_chat_id = ? AND state IN ('PENDING', 'CLEANING', 'LOG_PENDING') AND cleanup_due_at <= ? ORDER BY id ASC").all(staffChatId, nowIso) as LanguageModerationCleanupJob[];
+  }
+
+  updateLanguageModerationCleanupJob(id: number, state: LanguageModerationCleanupJob["state"]): void {
+    this.db.prepare("UPDATE language_moderation_cleanup_jobs SET state = ?, updated_at = ? WHERE id = ?").run(state, now(), id);
+  }
+
   getSetting(key: string): string | undefined {
     const row = this.db
       .prepare("SELECT value FROM settings WHERE key = ?")
@@ -1085,6 +1175,51 @@ export class SupportDatabase {
             );
           `);
         }
+      },
+      {
+        id: 10,
+        name: "create_language_moderation_state",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS language_moderation_user_state (
+              chat_id INTEGER NOT NULL, user_telegram_id INTEGER NOT NULL, username TEXT,
+              current_strikes INTEGER NOT NULL DEFAULT 0 CHECK(current_strikes BETWEEN 0 AND 2),
+              sanction_tier INTEGER NOT NULL DEFAULT 0 CHECK(sanction_tier BETWEEN 0 AND 3),
+              first_strike_at TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(chat_id, user_telegram_id)
+            );
+            CREATE TABLE IF NOT EXISTS language_moderation_chat_state (
+              chat_id INTEGER PRIMARY KEY, last_warning_message_id INTEGER, last_warning_at TEXT,
+              ordinary_messages_since_warning INTEGER NOT NULL DEFAULT 0, pending_warning_due_at TEXT, pending_warning_started_at TEXT, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS language_moderation_violations (
+              chat_id INTEGER NOT NULL, user_telegram_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
+              username TEXT, detected_at TEXT NOT NULL, cycle_tier INTEGER NOT NULL,
+              PRIMARY KEY(chat_id, message_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_language_moderation_violations_lookup
+              ON language_moderation_violations(chat_id, detected_at, user_telegram_id);
+            CREATE TABLE IF NOT EXISTS language_moderation_cleanup_jobs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, staff_chat_id INTEGER NOT NULL, chat_id INTEGER NOT NULL, user_telegram_id INTEGER NOT NULL,
+              username TEXT, chat_title TEXT, sanction_tier INTEGER NOT NULL, sanction_kind TEXT NOT NULL,
+              cleanup_due_at TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('PENDING','CLEANING','LOG_PENDING','COMPLETED')),
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_language_moderation_cleanup_due
+              ON language_moderation_cleanup_jobs(staff_chat_id, state, cleanup_due_at);
+          `);
+        }
+      },
+      {
+        id: 11,
+        name: "scope_language_moderation_cleanup_jobs_to_staff_chat",
+        up: () => {
+          this.addColumnIfMissing("language_moderation_cleanup_jobs", "staff_chat_id", "INTEGER");
+          this.db.exec(`
+            DROP INDEX IF EXISTS idx_language_moderation_cleanup_due;
+            CREATE INDEX idx_language_moderation_cleanup_due
+              ON language_moderation_cleanup_jobs(staff_chat_id, state, cleanup_due_at);
+          `);
+        }
       }
     ];
 
@@ -1112,7 +1247,7 @@ export class SupportDatabase {
     return Boolean(row);
   }
 
-  private hasColumn(tableName: "tickets" | "messages", columnName: string): boolean {
+  private hasColumn(tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs", columnName: string): boolean {
     const rows = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as TableColumnInfo[];
     return rows.some((row) => row.name === columnName);
   }
@@ -1126,7 +1261,7 @@ export class SupportDatabase {
   }
 
   private addColumnIfMissing(
-    tableName: "tickets" | "messages",
+    tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs",
     columnName: string,
     columnDefinition: string
   ): void {
