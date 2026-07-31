@@ -7,7 +7,7 @@ A Telegram-native support desk that turns private user messages into structured 
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-7A3E9D.svg)](LICENSE)
 
-Version: `1.1.0`
+Version: `1.2.0`
 
 Users contact the bot in private chat, while staff work entirely in a dedicated Telegram forum supergroup. Each ticket receives its own topic, Quick Replies speed up routine responses, and closed conversations are archived as text transcripts in Support Logs.
 
@@ -16,6 +16,9 @@ Users contact the bot in private chat, while staff work entirely in a dedicated 
 - One ticket equals one Telegram forum topic.
 - Bidirectional user and staff routing, including common Telegram media types.
 - JSON-configured Quick Replies with categories, pagination, and transcript recording.
+- Deterministic ticket-batch export and idempotent answer-package Apply workflow.
+- Configurable English-only public-chat moderation with persistent sanction recovery.
+- Generic, fail-closed entity-notification foundation for future authoritative sources.
 - Persistent ticket lifecycle, bans, settings, and idempotent SQLite migrations.
 - Dedicated Support Logs archive with recovery when a topic is unavailable or misconfigured.
 - Staff controls for status, closure, user lookup, and ban management.
@@ -119,6 +122,24 @@ Validation rules:
 
 The configuration is validated during startup. A missing, malformed, or invalid file prevents startup with an actionable error, so invalid templates cannot reach staff or users.
 
+## Ticket Batch Operations
+
+Run `/exporttickets` in the configured staff group's main topic to create a deterministic export of active tickets. The export includes complete, unsanitized support data for trusted staff use only; Telegram attachments are mapped best-effort rather than embedded in the ZIP.
+
+Upload a `ticket-answers_*.json` answer package in the staff group's main topic. The bot validates the full package, shows a preview, and lets staff Apply or Cancel it. Apply blocks stale tickets and supports `reply_keep_open` and `reply_and_close`, reusing the normal delivery, transcript, close, archive, and Support Logs paths.
+
+## Public English-Only Moderation
+
+Public moderation is disabled by default and configured through `/moderation`. It uses a conservative local classifier, grouped warning windows, persistent strikes, and a 24-hour mute, 7-day mute, then permanent-ban ladder. Recovery and delayed cleanup survive restarts and are recorded through Support Logs.
+
+Public-chat sanctions do not create private-support bans or block users from opening support tickets. The target chat must grant the bot Telegram permissions to delete messages, restrict members, and ban users before moderation can be enabled. Migration 11 scopes cleanup jobs to their originating staff chat; legacy jobs without that association are not replayed into another staff group's Support Logs.
+
+## Entity Notifications
+
+The generic entity-notification foundation accepts validated `created` events and renders supplied quest fields deterministically. Publication state is persisted and deduplicated in SQLite.
+
+Entity notifications use a configurable provider interface and require an authoritative available provider before publication.
+
 ## Support Logs And Transcripts
 
 The bot maintains one `📜 Support Logs` forum topic per `STAFF_CHAT_ID`. It records ticket closure summaries, transcript files, and ban-related events.
@@ -157,7 +178,15 @@ Media is represented as attachment text in the transcript. User media is not dup
 | `/bans` | List banned users. |
 | `/setlogs` | Assign the current non-ticket topic as Support Logs. |
 | `/logs` | Show or create the current Support Logs topic. |
+| `/exporttickets` | Export active tickets from the staff group's main topic. |
+| Answer-package upload | Preview a validated `ticket-answers_*.json` package, then Apply or Cancel it. |
+| `/moderation <subcommand>` | Configure and inspect public English-only moderation. |
+| `/questnotify <subcommand>` | Configure and inspect generic entity notifications. |
 | `Quick replies` button | Choose and send a configured response in an active ticket topic. |
+
+Primary moderation controls are `/moderation status`, `/moderation target <chat_id>`, `/moderation enable`, `/moderation disable`, `/moderation allowlist`, `/moderation allow <term>`, and `/moderation unallow <term>`. The remaining controls are `/moderation user <telegram_id>`, `/moderation resetstrikes <telegram_id>`, and `/moderation resettier <telegram_id>`.
+
+Entity-notification controls are `/questnotify status`, `/questnotify target <chat_id>`, `/questnotify provider <provider_key>`, `/questnotify enable`, `/questnotify disable`, and `/questnotify help`.
 
 `/help` is context-aware. On first use of a new `STAFF_CHAT_ID`, the bot also posts one onboarding message to the staff group's main topic. The marker is stored per staff chat, so a different configured group receives its own onboarding message.
 
@@ -209,6 +238,8 @@ Required in Railway and other deployments:
 
 `LOG_LEVEL` is optional. Never commit `.env`; `.env.example` is safe to commit because it contains placeholders only.
 
+Moderation and entity-notification settings use the existing SQLite settings model rather than environment variables. Moderation is disabled by default; configure its target and policy with `/moderation`. Entity notifications are also disabled by default; configure their target and provider with `/questnotify`, then enable them only after an authoritative available provider is present.
+
 ## Testing
 
 Run the release checks from the project root:
@@ -220,12 +251,16 @@ npm test
 npm run build
 ```
 
-The current suite contains 66 automated tests covering Quick Replies configuration and delivery, Support Logs safety, and staff reply regression behavior.
+The current suite contains 141 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, and entity-notification publication behavior.
 
 ## Project Structure
 
 ```text
-src/                 Bot handlers, routing, SQLite access, archives, and Quick Replies loader
+src/                 Bot handlers, ticket routing, SQLite access, archives, and feature modules
+src/db.ts            SQLite schema migrations and persistent ticket, batch, moderation, and publication state
+src/ticketBatch.ts   Ticket export and answer-package validation/apply workflow
+src/languageModeration.ts  Public English-only moderation and recovery logic
+src/entityNotifications.ts Generic created-event validation, rendering, and publication state
 config/              Editable Quick Replies template configuration
 test/                Node test suites and Telegram API harness
 .github/workflows/   Continuous integration workflow
@@ -261,6 +296,9 @@ Long polling must not run from multiple replicas simultaneously. SQLite needs th
 
 - Never commit `.env` or log `BOT_TOKEN`.
 - Treat every participant who can interact in `STAFF_CHAT_ID` as trusted staff. They can reply to users, change ticket status, close tickets, ban or unban users, and configure Support Logs.
+- Ticket exports contain complete unsanitized support data and must remain inside the trusted staff chat.
+- Public moderation requires delete, restrict, and ban permissions in its configured target chat; its sanctions remain separate from private support bans.
+- Entity notifications use a configurable provider interface and require an authoritative available provider before publication.
 - Point `STAFF_CHAT_ID` only at a controlled staff group.
 - Keep SQLite on persistent storage and review staff access before making the repository public.
 - Support Logs is the durable archive; the bot does not download or duplicate user media into application storage.
