@@ -12,7 +12,7 @@ import {
   getTicketSnapshotToken,
   parseAndValidateAnswerPackage
 } from "../src/ticketBatch.js";
-import { createBotHarness, type BotHarness } from "./helpers/botHarness.js";
+import { TEST_STAFF_CHAT_ID, createBotHarness, type BotHarness } from "./helpers/botHarness.js";
 
 const harnesses: BotHarness[] = [];
 
@@ -30,6 +30,53 @@ function createHarness(): BotHarness {
 }
 
 describe("ticket batch export contract", () => {
+  it("accepts version 2 answers with staff-only follow-up context", () => {
+    const exported = [{ ticket_id: 1, snapshot_token: "sha256:ticket" }];
+    const parsed = parseAndValidateAnswerPackage(JSON.stringify({
+      schema: "telegram_ticket_answer_package",
+      version: 2,
+      export_id: "export_follow_up",
+      answer_package_id: "answers_follow_up",
+      created_at: "2026-07-31T00:00:00.000Z",
+      answers: [{
+        ticket_id: 1,
+        snapshot_token: "sha256:ticket",
+        action: "reply_keep_open",
+        reply_text: "We are investigating this.",
+        follow_up_state: "WAITING_DEVS",
+        internal_note: "Check the withdrawal service.",
+        escalation_target: "PAYMENTS"
+      }]
+    }), "export_follow_up", exported);
+
+    assert.equal(parsed.version, 2);
+    assert.equal(parsed.answers[0]?.follow_up_state, "WAITING_DEVS");
+    assert.equal(parsed.answers[0]?.internal_note, "Check the withdrawal service.");
+    assert.equal(parsed.answers[0]?.escalation_target, "PAYMENTS");
+  });
+
+  it("includes current follow-up and staff-only history in exported ticket records", () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    harness.db.setTicketFollowUpContext(ticket.id, {
+      followUpState: "WAITING_DEVS",
+      internalNote: "Investigate the payment provider.",
+      escalationTarget: "PAYMENTS",
+      sourceAnswerPackageId: "answers_history"
+    });
+    const current = harness.db.getTicketWithUser(ticket.id)!;
+    const snapshot = buildTicketBatchExportSnapshot({
+      exportId: "export_history",
+      createdAt: "2026-07-31T00:00:00.000Z",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      tickets: [{ ticket: current, messages: [], followUpHistory: harness.db.listTicketFollowUpHistory(ticket.id) }]
+    });
+
+    assert.equal(snapshot.manifest.tickets[0]?.follow_up_state, "WAITING_DEVS");
+    assert.equal(snapshot.manifest.tickets[0]?.escalation_target, "PAYMENTS");
+    assert.equal(snapshot.records[0]?.ticket.internal_note, "Investigate the payment provider.");
+    assert.equal(snapshot.records[0]?.follow_up_history[0]?.source_answer_package_id, "answers_history");
+  });
   it("exports all and only active tickets in ticket/message order without mutating tickets", async () => {
     const harness = createHarness();
     const second = harness.seedTicket({ user: { id: 124, username: "second" }, messageThreadId: 5001 });

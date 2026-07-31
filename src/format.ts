@@ -41,7 +41,7 @@ export function formatTicketPost(ticket: TicketWithUser, initialMessage?: string
 }
 
 export function formatPinnedTicketSummary(ticket: TicketWithUser): string {
-  return [
+  const lines = [
     `Ticket #${ticket.id}`,
     "",
     "User:",
@@ -55,7 +55,25 @@ export function formatPinnedTicketSummary(ticket: TicketWithUser): string {
     "",
     "Status:",
     ticket.status
-  ].join("\n");
+  ];
+  if (ticket.follow_up_state !== "NONE") {
+    lines.push("", "Follow-up:", formatFollowUpState(ticket.follow_up_state));
+  }
+  if (ticket.escalation_target !== "NONE") {
+    lines.push("", "Escalation:", formatEscalationTarget(ticket.escalation_target));
+  }
+  if (ticket.follow_up_state !== "NONE" && ticket.follow_up_updated_at) {
+    lines.push("", "Last staff reply:", formatDate(ticket.follow_up_updated_at));
+  }
+  return lines.join("\n");
+}
+
+export function formatFollowUpState(value: TicketWithUser["follow_up_state"]): string {
+  return ({ NONE: "None", WAITING_USER: "Waiting for user", WAITING_DEVS: "Waiting for developers", WAITING_QUEST_OWNER: "Waiting for quest owner", MONITORING: "Monitoring" } as const)[value];
+}
+
+export function formatEscalationTarget(value: TicketWithUser["escalation_target"]): string {
+  return ({ NONE: "None", DEVS: "Development", PAYMENTS: "Payments", SECURITY: "Security", QUEST_OWNER: "Quest owner", SUPPORT: "Support" } as const)[value];
 }
 
 export function formatTicketUpdate(

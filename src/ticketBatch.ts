@@ -5,9 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { Unzip, UnzipInflate, Zip, ZipDeflate, strFromU8, strToU8 } from "fflate";
 import { z } from "zod";
-import type { TicketBatchExportItemRecord, TicketMessageRecord, TicketWithUser } from "./db.js";
+import type { TicketBatchExportItemRecord, TicketFollowUpHistoryRecord, TicketMessageRecord, TicketWithUser } from "./db.js";
 
 const MAX_ANSWER_TEXT_CHARACTERS = 3500;
+const MAX_INTERNAL_NOTE_CHARACTERS = 2000;
 const MAX_ARCHIVE_FILENAME_LENGTH = 120;
 const ARCHIVE_MTIME = new Date("1980-01-01T00:00:00.000Z");
 const WINDOWS_RESERVED_NAMES = new Set([
@@ -19,6 +20,7 @@ const WINDOWS_RESERVED_NAMES = new Set([
 export interface TicketBatchSource {
   ticket: TicketWithUser;
   messages: TicketMessageRecord[];
+  followUpHistory?: TicketFollowUpHistoryRecord[];
 }
 
 export interface TicketBatchExportSnapshotInput {
@@ -37,6 +39,11 @@ export interface TicketBatchExportRecord {
     message_thread_id: number | null;
     created_at: string;
     updated_at: string;
+    follow_up_state: TicketWithUser["follow_up_state"];
+    internal_note: string | null;
+    escalation_target: TicketWithUser["escalation_target"];
+    follow_up_updated_at: string | null;
+    follow_up_source_answer_package_id: string | null;
   };
   user: {
     telegram_id: number;
@@ -46,6 +53,7 @@ export interface TicketBatchExportRecord {
   };
   snapshot_token: string;
   messages: TicketMessageRecord[];
+  follow_up_history: TicketFollowUpHistoryRecord[];
 }
 
 export interface TicketBatchAttachmentSource {
@@ -96,6 +104,9 @@ export interface TicketBatchExportManifest {
     username: string | null;
     created_at: string;
     updated_at: string;
+    follow_up_state: TicketWithUser["follow_up_state"];
+    escalation_target: TicketWithUser["escalation_target"];
+    last_staff_reply_at: string | null;
     message_count: number;
     attachment_count: number;
     snapshot_token: string;
@@ -137,15 +148,32 @@ export interface TemporaryTicketBatchZip {
   attachmentCount: number;
 }
 
-const answerSchema = z
+export const FOLLOW_UP_STATES = ["NONE", "WAITING_USER", "WAITING_DEVS", "WAITING_QUEST_OWNER", "MONITORING"] as const;
+export const ESCALATION_TARGETS = ["NONE", "DEVS", "PAYMENTS", "SECURITY", "QUEST_OWNER", "SUPPORT"] as const;
+
+export type TicketFollowUpState = (typeof FOLLOW_UP_STATES)[number];
+export type TicketEscalationTarget = (typeof ESCALATION_TARGETS)[number];
+
+export interface TicketBatchAnswer {
+  ticket_id: number;
+  snapshot_token: string;
+  action: "reply_keep_open" | "reply_and_close" | "no_action";
+  reply_text: string | null;
+  follow_up_state: TicketFollowUpState;
+  internal_note: string | null;
+  escalation_target: TicketEscalationTarget;
+}
+
+const answerFieldsSchema = z
   .object({
     ticket_id: z.number().int().min(1),
     snapshot_token: z.string().min(1).max(256),
     action: z.enum(["reply_keep_open", "reply_and_close", "no_action"]),
     reply_text: z.string().nullable()
   })
-  .strict()
-  .superRefine((answer, ctx) => {
+  .strict();
+
+function validateAnswerText(answer: { action: string; reply_text: string | null }, ctx: z.RefinementCtx): void {
     if ((answer.action === "reply_keep_open" || answer.action === "reply_and_close") && !answer.reply_text?.trim()) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reply_text"], message: "Reply actions require non-empty reply_text." });
     }
@@ -155,20 +183,58 @@ const answerSchema = z
     if (answer.reply_text !== null && Array.from(answer.reply_text).length > MAX_ANSWER_TEXT_CHARACTERS) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reply_text"], message: `reply_text must not exceed ${MAX_ANSWER_TEXT_CHARACTERS} Unicode characters.` });
     }
-  });
+}
 
-const answerPackageSchema = z
+const answerSchemaV1 = answerFieldsSchema.superRefine(validateAnswerText).transform((answer): TicketBatchAnswer => ({
+  ...answer,
+  follow_up_state: "NONE",
+  internal_note: null,
+  escalation_target: "NONE"
+}));
+
+const answerSchemaV2 = answerFieldsSchema.extend({
+  follow_up_state: z.enum(FOLLOW_UP_STATES),
+  internal_note: z.string().trim().min(1).max(MAX_INTERNAL_NOTE_CHARACTERS).nullable(),
+  escalation_target: z.enum(ESCALATION_TARGETS)
+}).strict().superRefine((answer, ctx) => {
+  validateAnswerText(answer, ctx);
+  if (answer.action === "reply_and_close" && answer.follow_up_state !== "NONE") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["follow_up_state"], message: "reply_and_close requires follow_up_state NONE." });
+  }
+});
+
+const answerPackageV1Schema = z
   .object({
     schema: z.literal("telegram_ticket_answer_package"),
     version: z.literal(1),
     export_id: z.string().min(1),
     answer_package_id: z.string().min(1),
     created_at: z.string().datetime(),
-    answers: z.array(answerSchema).min(1)
+    answers: z.array(answerSchemaV1).min(1)
   })
   .strict();
 
-export type TicketAnswerPackage = z.infer<typeof answerPackageSchema>;
+const answerPackageV2Schema = z
+  .object({
+    schema: z.literal("telegram_ticket_answer_package"),
+    version: z.literal(2),
+    export_id: z.string().min(1),
+    answer_package_id: z.string().min(1),
+    created_at: z.string().datetime(),
+    answers: z.array(answerSchemaV2).min(1)
+  })
+  .strict();
+
+const answerPackageSchema = z.union([answerPackageV1Schema, answerPackageV2Schema]);
+
+export interface TicketAnswerPackage {
+  schema: "telegram_ticket_answer_package";
+  version: 1 | 2;
+  export_id: string;
+  answer_package_id: string;
+  created_at: string;
+  answers: TicketBatchAnswer[];
+}
 
 export class TicketBatchValidationError extends Error {
   constructor(message: string) {
@@ -190,7 +256,10 @@ export function getAnswerPackageHash(answerPackage: TicketAnswerPackage): string
         ticket_id: answer.ticket_id,
         snapshot_token: answer.snapshot_token,
         action: answer.action,
-        reply_text: answer.reply_text
+        reply_text: answer.reply_text,
+        follow_up_state: answer.follow_up_state,
+        internal_note: answer.internal_note,
+        escalation_target: answer.escalation_target
       }))
   };
   return `sha256:${createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex")}`;
@@ -203,6 +272,9 @@ export function getTicketSnapshotToken(ticket: TicketWithUser, messages: TicketM
     staff_chat_id: ticket.staff_chat_id,
     message_thread_id: ticket.message_thread_id,
     updated_at: ticket.updated_at,
+    follow_up_state: ticket.follow_up_state,
+    internal_note: ticket.internal_note,
+    escalation_target: ticket.escalation_target,
     messages: messages.map((message) => ({
       id: message.id,
       direction: message.direction,
@@ -228,7 +300,7 @@ export function getTicketSnapshotToken(ticket: TicketWithUser, messages: TicketM
 export function buildTicketBatchExportSnapshot(input: TicketBatchExportSnapshotInput): TicketBatchExportSnapshot {
   const tickets = [...input.tickets].sort((left, right) => left.ticket.id - right.ticket.id);
   const attachmentSources: TicketBatchAttachmentSource[] = [];
-  const records = tickets.map(({ ticket, messages }) => {
+  const records = tickets.map(({ ticket, messages, followUpHistory = [] }) => {
     const orderedMessages = [...messages].sort(compareMessages);
     for (const message of orderedMessages) {
       if (message.media_type) {
@@ -250,6 +322,11 @@ export function buildTicketBatchExportSnapshot(input: TicketBatchExportSnapshotI
         status: ticket.status,
         staff_chat_id: ticket.staff_chat_id,
         message_thread_id: ticket.message_thread_id,
+        follow_up_state: ticket.follow_up_state,
+        internal_note: ticket.internal_note,
+        escalation_target: ticket.escalation_target,
+        follow_up_updated_at: ticket.follow_up_updated_at,
+        follow_up_source_answer_package_id: ticket.follow_up_source_answer_package_id,
         created_at: ticket.created_at,
         updated_at: ticket.updated_at
       },
@@ -260,7 +337,8 @@ export function buildTicketBatchExportSnapshot(input: TicketBatchExportSnapshotI
         last_name: ticket.last_name
       },
       snapshot_token: getTicketSnapshotToken(ticket, orderedMessages),
-      messages: orderedMessages
+      messages: orderedMessages,
+      follow_up_history: [...followUpHistory]
     };
   });
   const messageCount = records.reduce((count, record) => count + record.messages.length, 0);
@@ -269,6 +347,9 @@ export function buildTicketBatchExportSnapshot(input: TicketBatchExportSnapshotI
     status: record.ticket.status,
     staff_chat_id: record.ticket.staff_chat_id,
     message_thread_id: record.ticket.message_thread_id,
+    follow_up_state: record.ticket.follow_up_state,
+    escalation_target: record.ticket.escalation_target,
+    last_staff_reply_at: record.ticket.follow_up_updated_at,
     user_telegram_id: record.user.telegram_id,
     username: record.user.username,
     created_at: record.ticket.created_at,
@@ -472,28 +553,31 @@ export function buildAnswerPackageInstructions(exportId: string): string {
     "## Accepted JSON contract",
     "",
     "- schema: \`telegram_ticket_answer_package\`",
-    "- version: \`1\`",
+    "- version: \`2\`",
     "- export_id: this export ID",
     "- answer_package_id: a non-empty package identifier",
     "- created_at: ISO-8601 UTC timestamp",
     "- answers: one answer per exported ticket",
     "",
     "Actions:",
-    "- \`no_action\`: reply_text must be null; no ticket change.",
+    "- \`no_action\`: reply_text must be null; use it when the existing reply remains current, optionally updating staff-only follow-up context.",
     "- \`reply_keep_open\`: reply_text must be a non-empty string; the bot sends it through the existing delivery/transcript path and keeps the ticket active.",
     "- \`reply_and_close\`: reply_text must be a non-empty string; the bot sends it, then uses the existing close/archive/Support Logs workflow.",
+    "",
+    "Before replying, inspect previous STAFF_TO_USER messages and current follow-up context. Do not repeat an answer when no new user message has arrived; use no_action and update follow-up state when internal work is pending.",
+    "Use WAITING_USER only when the user must provide information, WAITING_DEVS for technical investigation, WAITING_QUEST_OWNER for independent quest-host review, and MONITORING for an external result that does not need user input.",
     "",
     "```json",
     JSON.stringify({
       schema: "telegram_ticket_answer_package",
-      version: 1,
+      version: 2,
       export_id: exportId,
       answer_package_id: "answer_package_001",
       created_at: "2026-07-31T00:00:00.000Z",
       answers: [
-        { ticket_id: 29, snapshot_token: "<exact snapshot token>", action: "reply_keep_open", reply_text: "..." },
-        { ticket_id: 66, snapshot_token: "<exact snapshot token>", action: "reply_and_close", reply_text: "..." },
-        { ticket_id: 75, snapshot_token: "<exact snapshot token>", action: "no_action", reply_text: null }
+        { ticket_id: 29, snapshot_token: "<exact snapshot token>", action: "reply_keep_open", reply_text: "...", follow_up_state: "WAITING_DEVS", internal_note: "...", escalation_target: "DEVS" },
+        { ticket_id: 66, snapshot_token: "<exact snapshot token>", action: "reply_and_close", reply_text: "...", follow_up_state: "NONE", internal_note: null, escalation_target: "NONE" },
+        { ticket_id: 75, snapshot_token: "<exact snapshot token>", action: "no_action", reply_text: null, follow_up_state: "MONITORING", internal_note: "...", escalation_target: "PAYMENTS" }
       ]
     }, null, 2),
     "```",
@@ -504,13 +588,13 @@ export function buildAnswerPackageInstructions(exportId: string): string {
 export function getAnswerPackageJsonSchema(): Record<string, unknown> {
   return {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://agenton.example/schemas/telegram-ticket-answer-package-v1.json",
+    "$id": "https://agenton.example/schemas/telegram-ticket-answer-package-v2.json",
     "type": "object",
     "additionalProperties": false,
     "required": ["schema", "version", "export_id", "answer_package_id", "created_at", "answers"],
     "properties": {
       "schema": { "const": "telegram_ticket_answer_package" },
-      "version": { "const": 1 },
+      "version": { "const": 2 },
       "export_id": { "type": "string", "minLength": 1 },
       "answer_package_id": { "type": "string", "minLength": 1 },
       "created_at": { "type": "string", "format": "date-time" },
@@ -520,12 +604,15 @@ export function getAnswerPackageJsonSchema(): Record<string, unknown> {
         "items": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["ticket_id", "snapshot_token", "action", "reply_text"],
+          "required": ["ticket_id", "snapshot_token", "action", "reply_text", "follow_up_state", "internal_note", "escalation_target"],
           "properties": {
             "ticket_id": { "type": "integer", "minimum": 1 },
             "snapshot_token": { "type": "string", "minLength": 1, "maxLength": 256 },
             "action": { "enum": ["no_action", "reply_keep_open", "reply_and_close"] },
-            "reply_text": { "type": ["string", "null"], "maxLength": MAX_ANSWER_TEXT_CHARACTERS }
+            "reply_text": { "type": ["string", "null"], "maxLength": MAX_ANSWER_TEXT_CHARACTERS },
+            "follow_up_state": { "enum": FOLLOW_UP_STATES },
+            "internal_note": { "type": ["string", "null"], "minLength": 1, "maxLength": MAX_INTERNAL_NOTE_CHARACTERS },
+            "escalation_target": { "enum": ESCALATION_TARGETS }
           },
           "allOf": [
             { "if": { "properties": { "action": { "const": "no_action" } } }, "then": { "properties": { "reply_text": { "type": "null" } } } },
@@ -534,7 +621,7 @@ export function getAnswerPackageJsonSchema(): Record<string, unknown> {
         }
       }
     },
-    "$comment": "Runtime validation also requires answer ticket IDs to be unique and to match the complete exported ticket set exactly."
+    "$comment": "Runtime validation also requires answer ticket IDs to be unique and to match the complete exported ticket set exactly. Version 1 packages remain accepted for backward compatibility."
   };
 }
 
@@ -613,6 +700,18 @@ function renderTicketRecords(snapshot: TicketBatchExportSnapshot, attachments: T
     last_name: record.user.last_name,
     created_at: record.ticket.created_at,
     updated_at: record.ticket.updated_at,
+    follow_up_state: record.ticket.follow_up_state,
+    internal_note: record.ticket.internal_note,
+    escalation_target: record.ticket.escalation_target,
+    follow_up_updated_at: record.ticket.follow_up_updated_at,
+    source_answer_package_id: record.ticket.follow_up_source_answer_package_id,
+    follow_up_history: record.follow_up_history.map((entry) => ({
+      follow_up_state: entry.follow_up_state,
+      internal_note: entry.internal_note,
+      escalation_target: entry.escalation_target,
+      source_answer_package_id: entry.source_answer_package_id,
+      created_at: entry.created_at
+    })),
     messages: record.messages.map((message) => ({
       message_id: message.id,
       source_telegram_message_id: message.source_message_id,
@@ -643,14 +742,14 @@ function formatTicketsMarkdown(snapshot: TicketBatchExportSnapshot, records: Arr
   for (const record of records) {
     const ticket = record as {
       ticket_id: number; status: string; user_telegram_id: number; username: string | null; first_name: string | null; last_name: string | null;
-      created_at: string; updated_at: string; snapshot_token: string;
+      created_at: string; updated_at: string; snapshot_token: string; follow_up_state: string; internal_note: string | null; escalation_target: string; follow_up_updated_at: string | null;
       messages: Array<{ timestamp: string; sender_type: string | null; direction: string; text: string | null; caption: string | null; attachments: Array<{ media_type: string; archive_path: string }> }>;
     };
     lines.push(`## Ticket #${ticket.ticket_id}`, "", `- Status: ${ticket.status}`, `- User Telegram ID: ${ticket.user_telegram_id}`);
     if (ticket.username) lines.push(`- Username: @${ticket.username}`);
     if (ticket.first_name) lines.push(`- First name: ${ticket.first_name}`);
     if (ticket.last_name) lines.push(`- Last name: ${ticket.last_name}`);
-    lines.push(`- Created: ${ticket.created_at}`, `- Updated: ${ticket.updated_at}`, `- Snapshot token: ${ticket.snapshot_token}`, "", "### Conversation", "");
+    lines.push(`- Created: ${ticket.created_at}`, `- Updated: ${ticket.updated_at}`, `- Snapshot token: ${ticket.snapshot_token}`, "", "### Current follow-up", "", `- State: ${formatFollowUpForExport(ticket.follow_up_state)}`, `- Escalation: ${formatEscalationForExport(ticket.escalation_target)}`, `- Internal note: ${ticket.internal_note ?? "None"}`, `- Last staff reply: ${ticket.follow_up_updated_at ?? "None"}`, "", "### Conversation", "");
     for (const message of ticket.messages) {
       lines.push(`#### ${message.timestamp} - ${message.sender_type ?? "UNKNOWN"}/${message.direction}`, "");
       const content = message.text ?? message.caption;
@@ -926,6 +1025,14 @@ function extensionFor(mediaType: string, mimeType?: string | null): string {
 
 function titleCase(value: string): string {
   return value.split(/[_-]/).map((part) => part.slice(0, 1).toUpperCase() + part.slice(1)).join(" ");
+}
+
+function formatFollowUpForExport(value: string): string {
+  return ({ NONE: "None", WAITING_USER: "Waiting for user", WAITING_DEVS: "Waiting for developers", WAITING_QUEST_OWNER: "Waiting for quest owner", MONITORING: "Monitoring" } as Record<string, string>)[value] ?? value;
+}
+
+function formatEscalationForExport(value: string): string {
+  return ({ NONE: "None", DEVS: "Development", PAYMENTS: "Payments", SECURITY: "Security", QUEST_OWNER: "Quest owner", SUPPORT: "Support" } as Record<string, string>)[value] ?? value;
 }
 
 function compareMessages(left: TicketMessageRecord, right: TicketMessageRecord): number {
