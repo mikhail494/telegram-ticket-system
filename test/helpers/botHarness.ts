@@ -43,6 +43,8 @@ export const TEST_BOT_IDENTITY: UserFromGetMe = {
 export interface RecordedApiCall {
   method: string;
   payload: Record<string, unknown>;
+  documentBytes?: Uint8Array;
+  responseMessageId?: number;
 }
 
 export interface ApiMockSuccess {
@@ -135,20 +137,37 @@ export interface BotHarness {
   findApiCalls(method: string): RecordedApiCall[];
   countApiCalls(method: string): number;
   clearApiCalls(): void;
-  setDownloadResponse(body: string, status?: number): void;
+  setDownloadResponse(body: string | Uint8Array, status?: number): void;
+  setFileDownload(fileId: string, body: string | Uint8Array, options?: { filePath?: string; status?: number }): void;
   failNextDownload(status?: number): void;
 }
 
 export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
   const db = new SupportDatabase(":memory:");
   const registry = options.quickRepliesRegistry ?? loadQuickRepliesRegistry();
-  let downloadResponse: { body: string; status: number } = { body: "{}", status: 200 };
+  let downloadResponse: { body: string | Uint8Array; status: number } = { body: "{}", status: 200 };
+  const fileDownloads = new Map<string, { body: string | Uint8Array; status: number; filePath: string }>();
   const scheduledModerationCleanupJobIds: number[] = [];
   const scheduleCleanup: ModerationCleanupScheduler = options.scheduleModerationCleanup ?? ((_api, _db, jobId) => {
     scheduledModerationCleanupJobIds.push(jobId);
   });
   const bot = createBot(db, registry, {
-    fetch: async () => new Response(downloadResponse.body, { status: downloadResponse.status }),
+    fetch: async (input) => {
+      const pathname = new URL(String(input)).pathname;
+      const downloaded = [...fileDownloads.values()].find((item) => pathname.endsWith(`/${item.filePath}`));
+      const response = downloaded ?? downloadResponse;
+      if (typeof response.body === "string") {
+        return new Response(response.body, { status: response.status });
+      }
+      const bytes = response.body;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        }
+      });
+      return new Response(body, { status: response.status });
+    },
     now: options.moderationNow,
     scheduleModerationCleanup: scheduleCleanup,
     entityNotificationProviders: options.entityNotificationProviders
@@ -166,10 +185,14 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
       method,
       payload: toRecordedPayload(payload)
     };
+    if (method === "sendDocument") {
+      call.documentBytes = await inputFileBytes(call.payload.document);
+    }
     apiCalls.push(call);
 
-    const defaultResponse = createDefaultSuccessResponse(method, call.payload, nextMessageId);
+    const defaultResponse = createDefaultSuccessResponse(method, call.payload, nextMessageId, fileDownloads);
     if (usesGeneratedMessageId(method)) {
+      call.responseMessageId = nextMessageId;
       nextMessageId += 1;
     }
 
@@ -218,6 +241,13 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
     },
     setDownloadResponse: (body, status = 200) => {
       downloadResponse = { body, status };
+    },
+    setFileDownload: (fileId, body, options = {}) => {
+      fileDownloads.set(fileId, {
+        body,
+        status: options.status ?? 200,
+        filePath: options.filePath ?? `test/${fileId}`
+      });
     },
     failNextDownload: (status = 500) => {
       downloadResponse = { body: "", status };
@@ -426,7 +456,8 @@ function toTelegramUser(fixture: TelegramUserFixture | undefined): User {
 function createDefaultSuccessResponse(
   method: string,
   payload: Record<string, unknown>,
-  messageId: number
+  messageId: number,
+  fileDownloads: ReadonlyMap<string, { body: string | Uint8Array; status: number; filePath: string }>
 ): ApiMockSuccess {
   if (method === "getMe") {
     return { ok: true, result: TEST_BOT_IDENTITY };
@@ -450,11 +481,12 @@ function createDefaultSuccessResponse(
   }
 
   if (method === "getFile") {
+    const fileId = stringPayloadValue(payload, "file_id") ?? "test-file";
     return {
       ok: true,
       result: {
-        file_id: stringPayloadValue(payload, "file_id") ?? "test-file",
-        file_path: "test/answer.json"
+        file_id: fileId,
+        file_path: fileDownloads.get(fileId)?.filePath ?? "test/answer.json"
       }
     };
   }
@@ -493,6 +525,35 @@ function stringPayloadValue(payload: Record<string, unknown>, key: string): stri
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+async function inputFileBytes(value: unknown): Promise<Uint8Array | undefined> {
+  if (!isInputFileLike(value)) return undefined;
+  const raw = await value.toRaw();
+  if (raw instanceof Uint8Array) return raw;
+  if (!isAsyncIterable(raw)) return undefined;
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  for await (const chunk of raw) {
+    const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+    chunks.push(bytes);
+    length += bytes.byteLength;
+  }
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+function isInputFileLike(value: unknown): value is { toRaw(): Promise<Uint8Array | AsyncIterable<Uint8Array>> } {
+  return isRecord(value) && typeof value.toRaw === "function";
+}
+
+function isAsyncIterable(value: unknown): value is AsyncIterable<Uint8Array> {
+  return typeof value === "object" && value !== null && Symbol.asyncIterator in value;
 }
 
 function toMockedTransformerResponse(

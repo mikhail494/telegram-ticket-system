@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { afterEach, describe, it } from "node:test";
 import { strFromU8, unzipSync } from "fflate";
 import {
   TicketBatchValidationError,
   buildAnswerPackagePreview,
+  buildTicketBatchPreviewPages,
   buildTicketBatchExportSnapshot,
   cleanupTicketBatchZip,
   createTicketBatchZip,
@@ -59,9 +60,21 @@ describe("ticket batch export contract", () => {
     const zip = await createTicketBatchZip(snapshot);
     try {
       const entries = unzipSync(await (await import("node:fs/promises")).readFile(zip.filePath));
-      assert.deepEqual(Object.keys(entries).sort(), ["manifest.json", "tickets.jsonl"]);
-      assert.equal(JSON.parse(strFromU8(entries["manifest.json"] ?? new Uint8Array())).ticket_count, 2);
+      assert.deepEqual(Object.keys(entries).sort(), [
+        "ANSWER_PACKAGE_INSTRUCTIONS.md",
+        "answer-package.schema.json",
+        "manifest.json",
+        "media-index.json",
+        "tickets.jsonl",
+        "tickets.md"
+      ]);
+      const manifest = JSON.parse(strFromU8(entries["manifest.json"] ?? new Uint8Array()));
+      assert.equal(manifest.schema, "agenton-ticket-export");
+      assert.equal(manifest.version, 2);
+      assert.equal(manifest.ticket_count, 2);
       assert.match(strFromU8(entries["tickets.jsonl"] ?? new Uint8Array()), /<raw>& text/);
+      assert.match(strFromU8(entries["tickets.md"] ?? new Uint8Array()), /<raw>& text/);
+      assert.equal(JSON.parse(strFromU8(entries["media-index.json"] ?? new Uint8Array())).length, 0);
     } finally {
       await cleanupTicketBatchZip(zip);
     }
@@ -122,6 +135,65 @@ describe("ticket batch export contract", () => {
     await cleanupTicketBatchZip(zip);
     await assert.rejects(() => access(zip.filePath));
   });
+
+  it("embeds every supported media attachment with deterministic metadata and verified bytes", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const media = ["photo", "document", "video", "animation", "audio", "voice", "video_note", "sticker"] as const;
+    const contents = new Map<string, Uint8Array>();
+    for (const [index, mediaType] of media.entries()) {
+      const fileId = `media-${mediaType}`;
+      contents.set(fileId, new Uint8Array([index + 1, index + 11, index + 21]));
+      harness.db.addMessage({
+        ticketId: ticket.id,
+        direction: "USER_TO_STAFF",
+        sourceChatId: ticket.user_telegram_id,
+        sourceMessageId: 100 + index,
+        text: `${mediaType} caption`,
+        mediaType,
+        filename: mediaType === "document" ? "../../CON?.pdf" : null,
+        fileId
+      });
+    }
+    const hydratedTicket = harness.db.getTicketWithUser(ticket.id)!;
+    const snapshot = buildTicketBatchExportSnapshot({
+      exportId: "export_media",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      staffChatId: -100900,
+      tickets: [{ ticket: hydratedTicket, messages: harness.db.listMessagesChronological(ticket.id) }]
+    });
+
+    const zip = await createTicketBatchZip(snapshot, async (source) => ({
+      bytes: contents.get(source.fileId ?? "") ?? new Uint8Array(),
+      telegramFilePath: `files/${source.mediaType}`
+    }));
+    try {
+      const entries = unzipSync(await readFile(zip.filePath));
+      const manifest = JSON.parse(strFromU8(entries["manifest.json"]!));
+      const mediaIndex = JSON.parse(strFromU8(entries["media-index.json"]!)) as Array<{ archive_path: string; sha256: string; byte_length: number; media_type: string; disk_path?: string }>;
+      const record = JSON.parse(strFromU8(entries["tickets.jsonl"]!).trim()) as { messages: Array<{ caption: string | null; media_type: string; attachments: Array<{ archive_path: string }> }> };
+
+      assert.equal(manifest.attachment_count, media.length);
+      assert.equal(manifest.embedded_attachment_count, media.length);
+      assert.equal(manifest.failed_attachment_count, 0);
+      assert.equal(mediaIndex.length, media.length);
+      assert.equal(record.messages.length, media.length);
+      assert.match(strFromU8(entries["tickets.md"]!), /document caption/);
+      for (const [index, item] of mediaIndex.entries()) {
+        assert.match(item.archive_path, new RegExp(`^attachments/ticket-${ticket.id}/message-\\d+/[A-Za-z0-9][A-Za-z0-9._ -]*$`));
+        assert.equal("disk_path" in item, false);
+        assert.equal(item.media_type, media[index]);
+        const bytes = entries[item.archive_path];
+        assert.ok(bytes);
+        assert.equal(bytes.byteLength, item.byte_length);
+        assert.equal(`sha256:${(await import("node:crypto")).createHash("sha256").update(bytes).digest("hex")}`, item.sha256);
+        assert.equal(record.messages[index]?.caption, `${media[index]} caption`);
+        assert.equal(record.messages[index]?.attachments[0]?.archive_path, item.archive_path);
+      }
+    } finally {
+      await cleanupTicketBatchZip(zip);
+    }
+  });
 });
 
 describe("ticket answer package validation and preview", () => {
@@ -180,10 +252,17 @@ describe("ticket answer package validation and preview", () => {
           : { status: "OPEN", snapshotToken: "sha256:changed" }
     );
 
-    assert.deepEqual(preview.lines, ["#1 - reply, keep open", "#2 - inactive/closed", "#3 - stale/changed"]);
+    assert.deepEqual(preview.entries.map((entry) => [entry.ticketId, entry.classification, entry.action]), [
+      [1, "ready", "reply_keep_open"],
+      [2, "inactive/closed", "reply_and_close"],
+      [3, "stale/changed", "no_action"]
+    ]);
     assert.equal(preview.totals.readyReplyKeepOpen, 1);
     assert.equal(preview.totals.inactiveClosed, 1);
     assert.equal(preview.totals.staleChanged, 1);
+    const pages = buildTicketBatchPreviewPages("export_answers", preview);
+    assert.equal(pages.length, 1);
+    assert.match(pages[0]!, /Reply:\nHello/);
   });
 });
 
