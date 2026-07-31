@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+## [1.2.0] - Unreleased
+
+### Added
+
+- Deterministic active-ticket exports and answer-package preview, validation, and idempotent Apply operations.
+- `reply_keep_open` and `reply_and_close` answer actions, reusing existing ticket delivery, transcript, close, archive, and Support Logs paths.
+- Best-effort Telegram attachment mapping for ticket batch exports.
+- Configurable English-only public-chat moderation with a conservative local classifier, persistent strikes, grouped warnings, suppression, and staff controls.
+- A 24-hour mute, 7-day mute, and permanent-ban sanction ladder with delayed cleanup, restart recovery, and Support Logs integration.
+- A generic created-entity notification foundation with deterministic quest rendering, persistent publication deduplication, provider registry, and `/questnotify` controls.
+- SQLite migrations 8 through 12 and expanded regression coverage for ticket batches, moderation, and entity notifications.
+
+### Changed
+
+- Ticket batch operations block stale tickets and keep Apply idempotent.
+- Public-chat moderation remains isolated from private-support ticket bans.
+- Entity notifications are fail-closed: no scraper, production fixture provider, or live publication is available until an authoritative provider is registered and configured.
+- Existing ticket, Quick Reply, archive, Support Logs, and moderation behavior remains backward compatible.
+
 ## [1.1.0] - 2026-07-18
 
 ### Added
