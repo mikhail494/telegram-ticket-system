@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+## [1.2.3] - Unreleased
+
+### Fixed
+
+- Preserved sanitized Telegram delivery diagnostics for batch replies.
+- Distinguished permanent, temporary, and unknown delivery outcomes.
+- Added idempotent staff-only failure events in ticket topics.
+- Prevented terminal batch failures from being retried automatically.
+- Made Apply summary delivery independent from preview cleanup.
+- Invalidated stale preview controls before Apply and included delivery-failure context in future exports.
+
 ## [1.2.2] - Unreleased
 
 ### Fixed

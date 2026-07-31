@@ -54,6 +54,11 @@ import {
   type ModerationCleanupScheduler
 } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
+import {
+  formatDeliveryFailureCategory,
+  normalizeTelegramDeliveryError,
+  type NormalizedDeliveryError
+} from "./deliveryDiagnostics.js";
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
@@ -242,6 +247,40 @@ export function createBot(
       threadId: ticket.message_thread_id,
       messageId: echoed.message_id
     });
+  }
+
+  async function sendTicketBatchDeliveryFailureEvent(
+    ticket: TicketWithUser,
+    item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number],
+    diagnostic: NormalizedDeliveryError
+  ): Promise<void> {
+    if (item.delivery_failure_event_state === "SENT") return;
+    if (ticket.staff_chat_id !== config.staffChatId || ticket.message_thread_id === null) {
+      throw new Error("Ticket topic is unavailable for batch delivery failure event.");
+    }
+    const lines = [
+      diagnostic.permanence === "UNKNOWN_DELIVERY"
+        ? "⚠️ Batch delivery outcome is unknown"
+        : "⚠️ Batch reply was not delivered",
+      "",
+      `Category: ${formatDeliveryFailureCategory(diagnostic.category)}`
+    ];
+    if (diagnostic.telegramErrorCode !== null) lines.push(`Telegram code: ${diagnostic.telegramErrorCode}`);
+    if (diagnostic.retryAfterSeconds !== null) lines.push(`Retry after: ${diagnostic.retryAfterSeconds}s`);
+    lines.push("Action: Ticket remains open");
+    lines.push(diagnostic.category === "USER_BLOCKED_BOT" || diagnostic.category === "USER_DEACTIVATED"
+      ? "Next step: Contact is not possible until the user restores bot access."
+      : diagnostic.category === "CHAT_UNAVAILABLE"
+        ? "Next step: Verify that the user can receive bot messages before a controlled retry."
+        : diagnostic.permanence === "PERMANENT"
+          ? "Next step: Manual review required before a controlled retry."
+      : diagnostic.permanence === "TEMPORARY"
+        ? "Next step: Prepare a controlled retry later."
+        : "Next step: Do not resend automatically; manual review required.");
+    const sent = await bot.api.sendMessage(ticket.staff_chat_id, lines.join("\n"), {
+      message_thread_id: ticket.message_thread_id
+    });
+    db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "SENT", sent.message_id);
   }
 
   function persistBatchFollowUp(ticket: TicketWithUser, item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]): void {
@@ -628,7 +667,8 @@ export function createBot(
       const tickets = db.listActiveTicketsForStaffChat(config.staffChatId).map((ticket) => ({
         ticket,
         messages: db.listMessagesChronological(ticket.id),
-        followUpHistory: db.listTicketFollowUpHistory(ticket.id)
+        followUpHistory: db.listTicketFollowUpHistory(ticket.id),
+        deliveryFailure: db.getLatestTicketBatchDeliveryFailure(ticket.id, config.staffChatId)
       }));
       if (!tickets.length) {
         await ctx.reply("There are no active tickets to export.");
@@ -1201,7 +1241,8 @@ export function createBot(
         return;
       }
       await ctx.answerCallbackQuery({ text: "Ticket batch preview cancelled." });
-      await deleteTicketBatchPreview(packageRecord, "Package cancelled.");
+      db.clearTicketBatchAnswerPackagePreview(packageRecord.answer_package_id, config.staffChatId);
+      await cleanupTicketBatchPreview(packageRecord, "Package cancelled.");
       return;
     }
 
@@ -1224,18 +1265,38 @@ export function createBot(
       return;
     }
 
+    db.clearTicketBatchAnswerPackagePreview(claimed.answer_package_id, config.staffChatId);
     await ctx.answerCallbackQuery({ text: "Applying answer package..." });
+    await neutralizeTicketBatchPreview(claimed, "Applying...");
     const summary = await applyTicketBatchAnswerPackage(claimed.answer_package_id, ctx.from);
     const finalized = db.getTicketBatchAnswerPackage(claimed.answer_package_id, config.staffChatId);
-    if (finalized?.status === "PARTIAL" && finalized.preview_chat_id !== null && finalized.preview_message_id !== null && finalized.preview_token) {
-      await ctx.api.editMessageText(finalized.preview_chat_id, finalized.preview_message_id, `${summary}\n\nRetry is available for recoverable staff synchronization or close/archive work.`, {
-        reply_markup: new InlineKeyboard().text("Retry", ticketBatchApplyCallbackData(finalized.preview_token))
-      });
+    if (finalized?.status === "PARTIAL" && claimed.preview_chat_id !== null && claimed.preview_message_id !== null) {
+      const retryToken = randomUUID().replace(/-/g, "");
+      try {
+        await ctx.api.editMessageText(claimed.preview_chat_id, claimed.preview_message_id, `${summary}\n\nRetry is available for staff synchronization or close/archive work.`, {
+          reply_markup: new InlineKeyboard().text("Retry", ticketBatchApplyCallbackData(retryToken))
+        });
+        db.setTicketBatchAnswerPackagePreview(claimed.answer_package_id, config.staffChatId, {
+          token: retryToken,
+          chatId: claimed.preview_chat_id,
+          messageId: claimed.preview_message_id,
+          page: 0
+        });
+      } catch (error) {
+        const diagnostic = normalizeTelegramDeliveryError(error);
+        logger.warn({ answerPackageId: claimed.answer_package_id, category: diagnostic.category }, "Could not create ticket batch retry control");
+      }
     } else {
-      const previewRemoved = await deleteTicketBatchPreview(claimed, "Applying...");
-      if (!previewRemoved) await deleteTicketBatchPreview(claimed, "Applying...");
+      await cleanupTicketBatchPreview(claimed, "Applying...");
     }
-    await ctx.api.sendMessage(config.staffChatId, summary);
+    try {
+      await ctx.api.sendMessage(config.staffChatId, summary);
+      db.recordTicketBatchSummaryDelivery(claimed.answer_package_id, config.staffChatId, "SENT");
+    } catch (error) {
+      const diagnostic = normalizeTelegramDeliveryError(error);
+      db.recordTicketBatchSummaryDelivery(claimed.answer_package_id, config.staffChatId, "FAILED", diagnostic.category);
+      logger.warn({ answerPackageId: claimed.answer_package_id, category: diagnostic.category }, "Could not deliver ticket batch summary");
+    }
   }
 
   function buildStoredTicketBatchPreviewPages(packageRecord: ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>): string[] {
@@ -1273,22 +1334,33 @@ export function createBot(
     return buildTicketBatchPreviewPages(answerPackage.export_id, preview);
   }
 
-  async function deleteTicketBatchPreview(packageRecord: NonNullable<ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>>, fallbackText: string): Promise<boolean> {
+  async function cleanupTicketBatchPreview(packageRecord: NonNullable<ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>>, fallbackText: string): Promise<boolean> {
     if (packageRecord.preview_chat_id === null || packageRecord.preview_message_id === null) {
       return true;
     }
     try {
       await bot.api.deleteMessage(packageRecord.preview_chat_id, packageRecord.preview_message_id);
-      db.clearTicketBatchAnswerPackagePreview(packageRecord.answer_package_id, config.staffChatId);
       return true;
     } catch (error) {
-      logger.warn({ err: error, answerPackageId: packageRecord.answer_package_id }, "Could not delete ticket batch preview");
+      const diagnostic = normalizeTelegramDeliveryError(error);
+      logger.warn({ answerPackageId: packageRecord.answer_package_id, category: diagnostic.category }, "Could not delete ticket batch preview");
       try {
         await bot.api.editMessageText(packageRecord.preview_chat_id, packageRecord.preview_message_id, fallbackText, { reply_markup: undefined });
       } catch (editError) {
-        logger.warn({ err: editError, answerPackageId: packageRecord.answer_package_id }, "Could not neutralize ticket batch preview");
+        const diagnostic = normalizeTelegramDeliveryError(editError);
+        logger.warn({ answerPackageId: packageRecord.answer_package_id, category: diagnostic.category }, "Could not neutralize ticket batch preview");
       }
       return false;
+    }
+  }
+
+  async function neutralizeTicketBatchPreview(packageRecord: NonNullable<ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>>, text: string): Promise<void> {
+    if (packageRecord.preview_chat_id === null || packageRecord.preview_message_id === null) return;
+    try {
+      await bot.api.editMessageText(packageRecord.preview_chat_id, packageRecord.preview_message_id, text, { reply_markup: undefined });
+    } catch (error) {
+      const diagnostic = normalizeTelegramDeliveryError(error);
+      logger.warn({ answerPackageId: packageRecord.answer_package_id, category: diagnostic.category }, "Could not neutralize active ticket batch preview");
     }
   }
 
@@ -1298,7 +1370,11 @@ export function createBot(
     const exportItems = db.listTicketBatchExportItems(packageRecord.export_id);
     const exportTokens = new Map(exportItems.map((item) => [item.ticket_id, item.snapshot_token]));
     const items = db.listTicketBatchAnswerItems(answerPackageId);
-    const totals = { keep: 0, close: 0, noAction: 0, stale: 0, inactive: 0, failed: 0, unknown: 0, replySent: 0, staffSync: 0, skipped: 0 };
+    const totals = {
+      keep: 0, close: 0, noAction: 0, stale: 0, inactive: 0, unknown: 0, replySent: 0, staffSync: 0, skipped: 0,
+      permanentFailures: [] as Array<{ ticketId: number; category: string }>,
+      temporaryFailures: [] as Array<{ ticketId: number; category: string; retryAfter: number | null }>
+    };
 
     for (const item of items) {
       if (["COMPLETED", "NO_ACTION", "STALE", "INACTIVE"].includes(item.state)) { totals.skipped += 1; continue; }
@@ -1385,8 +1461,33 @@ export function createBot(
         }
         continue;
       }
+      let deliveryMessageId: number;
       try {
-        const deliveryMessageId = await deliverAndRecordStaffTextReply(ticket, item.reply_text ?? "", staffUser);
+        deliveryMessageId = await deliverAndRecordStaffTextReply(ticket, item.reply_text ?? "", staffUser);
+      } catch (error) {
+        const diagnostic = normalizeTelegramDeliveryError(error);
+        const state = diagnostic.permanence === "UNKNOWN_DELIVERY" ? "UNKNOWN_DELIVERY" : "FAILED";
+        db.recordTicketBatchDeliveryFailure(answerPackageId, item.ticket_id, state, diagnostic);
+        logger.warn({ answerPackageId, ticketId: item.ticket_id, category: diagnostic.category, permanence: diagnostic.permanence, method: diagnostic.method, telegramErrorCode: diagnostic.telegramErrorCode, retryAfterSeconds: diagnostic.retryAfterSeconds }, "Ticket batch user delivery failed");
+        const failedItem = db.listTicketBatchAnswerItems(answerPackageId).find((candidate) => candidate.ticket_id === item.ticket_id);
+        if (failedItem) {
+          try {
+            await sendTicketBatchDeliveryFailureEvent(ticket, failedItem, diagnostic);
+          } catch {
+            db.recordTicketBatchFailureEvent(answerPackageId, item.ticket_id, "FAILED");
+            logger.warn({ answerPackageId, ticketId: item.ticket_id, category: diagnostic.category }, "Could not post ticket batch delivery failure event");
+          }
+        }
+        if (diagnostic.permanence === "PERMANENT") {
+          totals.permanentFailures.push({ ticketId: item.ticket_id, category: diagnostic.category });
+        } else if (diagnostic.permanence === "TEMPORARY") {
+          totals.temporaryFailures.push({ ticketId: item.ticket_id, category: diagnostic.category, retryAfter: diagnostic.retryAfterSeconds });
+        } else {
+          totals.unknown += 1;
+        }
+        continue;
+      }
+      try {
         persistBatchFollowUp(ticket, item);
         db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { deliveryMessageId, applied: true });
         try {
@@ -1410,10 +1511,30 @@ export function createBot(
           db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { lastError: "Reply sent; close/archive pending." });
           totals.replySent += 1;
         }
-      } catch (error) { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "FAILED", { lastError: "Ticket batch action failed." }); totals.failed += 1; }
+      } catch {
+        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { deliveryMessageId, lastError: "Reply sent; follow-up, staff sync, or close/archive pending." });
+        totals.replySent += 1;
+      }
     }
     db.finalizeTicketBatchAnswerPackage(answerPackageId, config.staffChatId);
-    return `Answer package applied\nReplies sent: ${totals.keep + totals.close}\nTickets closed: ${totals.close}\nKept open: ${totals.keep}\nNo action: ${totals.noAction}\nBlocked: stale ${totals.stale}, inactive ${totals.inactive}, failed ${totals.failed}, staff sync ${totals.staffSync}, manual review ${totals.unknown + totals.replySent}.`;
+    const failures = [
+      ...totals.permanentFailures.map((failure) => `- #${failure.ticketId}: ${failure.category}`),
+      ...totals.temporaryFailures.map((failure) => `- #${failure.ticketId}: ${failure.category}${failure.retryAfter === null ? "" : `, retry after ${failure.retryAfter}s`}`)
+    ];
+    return [
+      totals.permanentFailures.length || totals.temporaryFailures.length || totals.unknown || totals.staffSync || totals.replySent
+        ? "Ticket batch applied with issues."
+        : "Answer package applied",
+      `Delivered: ${totals.keep + totals.close}`,
+      `Tickets closed: ${totals.close}`,
+      `No action: ${totals.noAction}`,
+      `Permanent failures: ${totals.permanentFailures.length}`,
+      `Temporary failures: ${totals.temporaryFailures.length}`,
+      `Unknown delivery: ${totals.unknown}`,
+      `Staff sync pending: ${totals.staffSync}`,
+      `Blocked: stale ${totals.stale}, inactive ${totals.inactive}, manual review ${totals.replySent}.`,
+      ...(failures.length ? ["", "Failures:", ...failures] : [])
+    ].join("\n");
   }
 
   bot.catch(async (error) => {
