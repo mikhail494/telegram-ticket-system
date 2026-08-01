@@ -13,7 +13,7 @@ All notable changes to this project are documented in this file. This project fo
 - Prevented terminal and inert staff events from remaining startup-recovery candidates indefinitely.
 - Preserved internal follow-up context when a Telegram topic event cannot be delivered.
 - Prevented staff synchronization failures from causing duplicate user replies.
-- Production smoke validated reply_keep_open, reply_and_close, no_action, topic echoes, final summaries, permanent user-delivery isolation, and staff-sync failure isolation.
+- Added regression coverage for batch actions, delivery isolation, topic events, and final summaries.
 
 ## [1.2.4] - Unreleased
 
@@ -24,7 +24,7 @@ All notable changes to this project are documented in this file. This project fo
 - Added bounded retry-after handling and per-staff-chat coordination for staff-only batch operations.
 - Added startup recovery for pending batch summaries and staff topic events without retrying user delivery.
 - Preserved durable item outcomes while staff-side synchronization is pending.
-- Enabled previously stuck v1.2.3 packages to finalize without reapplying user actions.
+- Enabled pending package summaries to finalize without repeating user actions.
 - Excluded contradictory success echoes for failed user deliveries and normalized stale legacy echo state during migration.
 - Added defensive recovery eligibility checks so success and failure events cannot be emitted for the same delivery attempt.
 
@@ -54,7 +54,7 @@ All notable changes to this project are documented in this file. This project fo
 ### Fixed
 
 - Replaced per-attachment staff-chat copies with one self-contained ticket export archive.
-- Embedded complete ticket text, metadata, and media into a portable ZIP for ChatGPT processing.
+- Embedded complete ticket text, metadata, and media into a portable ZIP for offline processing.
 - Added deterministic ticket/message media mapping through archive paths and a media index.
 - Added human-readable ticket context, answer-package instructions, and a machine-readable answer schema.
 - Replaced multi-message answer previews with one paginated editable preview message.
@@ -78,7 +78,7 @@ All notable changes to this project are documented in this file. This project fo
 
 - Ticket batch operations block stale tickets and keep Apply idempotent.
 - Public-chat moderation remains isolated from private-support ticket bans.
-- Entity notifications are fail-closed: no scraper, production fixture provider, or live publication is available until an authoritative provider is registered and configured.
+- Entity notifications use a configurable provider interface and require an authoritative available provider before publication.
 - Existing ticket, Quick Reply, archive, Support Logs, and moderation behavior remains backward compatible.
 
 ## [1.1.0] - 2026-07-18
