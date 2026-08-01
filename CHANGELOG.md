@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
-## [1.2.5] - Unreleased
+## [1.2.5] - 2026-08-02
 
 ### Fixed
 
@@ -13,6 +13,7 @@ All notable changes to this project are documented in this file. This project fo
 - Prevented terminal and inert staff events from remaining startup-recovery candidates indefinitely.
 - Preserved internal follow-up context when a Telegram topic event cannot be delivered.
 - Prevented staff synchronization failures from causing duplicate user replies.
+- Production smoke validated reply_keep_open, reply_and_close, no_action, topic echoes, final summaries, permanent user-delivery isolation, and staff-sync failure isolation.
 
 ## [1.2.4] - Unreleased
 
