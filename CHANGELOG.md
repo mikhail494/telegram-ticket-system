@@ -14,6 +14,8 @@ All notable changes to this project are documented in this file. This project fo
 - Added startup recovery for pending batch summaries and staff topic events without retrying user delivery.
 - Preserved durable item outcomes while staff-side synchronization is pending.
 - Enabled previously stuck v1.2.3 packages to finalize without reapplying user actions.
+- Excluded contradictory success echoes for failed user deliveries and normalized stale legacy echo state during migration.
+- Added defensive recovery eligibility checks so success and failure events cannot be emitted for the same delivery attempt.
 
 ## [1.2.3] - Unreleased
 

@@ -198,6 +198,15 @@ export interface TicketBatchAnswerItemRecord {
   delivery_failure_event_next_retry_at: string | null;
 }
 
+export interface TicketBatchRecoveryAudit {
+  successTopicEchoes: number;
+  failureEvents: number;
+  noActionFollowUpEvents: number;
+  finalSummaries: number;
+  invalidSuccessEchoes: number;
+  userFacingCandidates: number;
+}
+
 export interface CreateTicketBatchAnswerPackageInput {
   answerPackageId: string; exportId: string; staffChatId: number; packageHash: string;
   sourceChatId?: number | null; sourceMessageId?: number | null; packageCreatedAt: string;
@@ -957,7 +966,9 @@ export class SupportDatabase {
     return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
       JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
       WHERE p.staff_chat_id = ? AND i.delivery_failure_event_state IN ('PENDING', 'FAILED')
+        AND i.action IN ('reply_keep_open', 'reply_and_close')
         AND i.delivery_error_category IS NOT NULL
+        AND i.delivery_message_id IS NULL
         AND (i.delivery_failure_event_next_retry_at IS NULL OR i.delivery_failure_event_next_retry_at <= ?)
       ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
   }
@@ -1021,7 +1032,40 @@ export class SupportDatabase {
       JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
       WHERE p.staff_chat_id = ? AND i.topic_echo_state IN ('PENDING', 'FAILED')
         AND (i.topic_echo_next_retry_at IS NULL OR i.topic_echo_next_retry_at <= ?)
+        AND (
+          (i.action = 'no_action' AND (i.follow_up_state != 'NONE' OR i.internal_note IS NOT NULL OR i.escalation_target != 'NONE'))
+          OR
+          (i.action IN ('reply_keep_open', 'reply_and_close') AND i.delivery_message_id IS NOT NULL
+            AND i.delivery_error_category IS NULL AND i.delivery_error_permanence IS NULL
+            AND i.delivery_failure_event_state != 'SENT'
+            AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING', 'COMPLETED'))
+        )
       ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
+  }
+
+  listInvalidTicketBatchSuccessEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {
+    return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
+      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
+      WHERE p.staff_chat_id = ? AND i.topic_echo_state IN ('PENDING', 'FAILED')
+        AND i.action IN ('reply_keep_open', 'reply_and_close')
+        AND (i.delivery_message_id IS NULL OR i.delivery_error_category IS NOT NULL OR i.delivery_error_permanence IS NOT NULL OR i.delivery_failure_event_state = 'SENT')
+      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, limit) as TicketBatchAnswerItemRecord[];
+  }
+
+  getTicketBatchRecoveryAudit(staffChatId: number, at: string): TicketBatchRecoveryAudit {
+    const due = "(i.topic_echo_next_retry_at IS NULL OR i.topic_echo_next_retry_at <= @at)";
+    const base = "p.staff_chat_id = @staffChatId";
+    const count = (where: string): number => (this.db.prepare(`SELECT COUNT(*) AS count FROM ticket_batch_answer_items i JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id WHERE ${base} AND ${where}`).get({ staffChatId, at }) as { count: number }).count;
+    const finalSummaries = (this.db.prepare(`SELECT COUNT(*) AS count FROM ticket_batch_answer_packages WHERE staff_chat_id = ? AND final_summary_state IN ('PENDING', 'FAILED') AND (final_summary_next_retry_at IS NULL OR final_summary_next_retry_at <= ?)`)
+      .get(staffChatId, at) as { count: number }).count;
+    return {
+      successTopicEchoes: count(`i.topic_echo_state IN ('PENDING','FAILED') AND ${due} AND i.action IN ('reply_keep_open','reply_and_close') AND i.delivery_message_id IS NOT NULL AND i.delivery_error_category IS NULL AND i.delivery_error_permanence IS NULL AND i.delivery_failure_event_state != 'SENT'`),
+      failureEvents: count("i.delivery_failure_event_state IN ('PENDING','FAILED') AND i.action IN ('reply_keep_open','reply_and_close') AND i.delivery_error_category IS NOT NULL AND i.delivery_message_id IS NULL AND (i.delivery_failure_event_next_retry_at IS NULL OR i.delivery_failure_event_next_retry_at <= @at)"),
+      noActionFollowUpEvents: count(`i.topic_echo_state IN ('PENDING','FAILED') AND ${due} AND i.action = 'no_action' AND (i.follow_up_state != 'NONE' OR i.internal_note IS NOT NULL OR i.escalation_target != 'NONE')`),
+      finalSummaries,
+      invalidSuccessEchoes: count(`i.topic_echo_state IN ('PENDING','FAILED') AND i.action IN ('reply_keep_open','reply_and_close') AND (i.delivery_message_id IS NULL OR i.delivery_error_category IS NOT NULL OR i.delivery_error_permanence IS NOT NULL OR i.delivery_failure_event_state = 'SENT')`),
+      userFacingCandidates: 0
+    };
   }
 
   setTicketFollowUpContext(ticketId: number, input: { followUpState: TicketFollowUpState; internalNote: string | null; escalationTarget: TicketEscalationTarget; sourceAnswerPackageId?: string | null }): TicketRecord | undefined {
@@ -1677,6 +1721,14 @@ export class SupportDatabase {
             WHERE final_summary_state = 'NOT_PENDING'
               AND status IN ('COMPLETED', 'PARTIAL')
               AND summary_delivery_state = 'FAILED';
+            UPDATE ticket_batch_answer_items
+            SET topic_echo_state = 'NOT_REQUIRED',
+                topic_echo_last_error = 'Success echo is not applicable after an unconfirmed user delivery.',
+                topic_echo_next_retry_at = NULL
+            WHERE action IN ('reply_keep_open', 'reply_and_close')
+              AND delivery_message_id IS NULL
+              AND delivery_error_category IS NOT NULL
+              AND topic_echo_state IN ('PENDING', 'FAILED');
             UPDATE ticket_batch_answer_items
             SET topic_echo_next_retry_at = COALESCE(topic_echo_next_retry_at, updated_at)
             WHERE topic_echo_state IN ('PENDING', 'FAILED');

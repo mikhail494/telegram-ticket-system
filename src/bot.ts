@@ -252,9 +252,18 @@ export function createBot(
     }
     const threadId = ticket.message_thread_id;
     const staffChatId = ticket.staff_chat_id;
-    const hasContext = item.follow_up_state !== "NONE" || item.internal_note !== null || item.escalation_target !== "NONE";
+    const hasContext = hasBatchFollowUpContext(item);
     if (item.action === "no_action" && !hasContext) {
       db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
+      return;
+    }
+    const persistedItem = db.listTicketBatchAnswerItems(item.answer_package_id)
+      .find((candidate) => candidate.ticket_id === item.ticket_id) ?? item;
+    if (item.action !== "no_action" && !isConfirmedBatchReply(persistedItem)) {
+      db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED", {
+        lastError: "Success echo is not applicable after an unconfirmed user delivery."
+      });
+      logger.warn({ answerPackageId: item.answer_package_id, ticketId: item.ticket_id }, "Skipped contradictory ticket batch success echo");
       return;
     }
     const lines = [item.action === "no_action" ? "ℹ️ Batch follow-up updated — no user message sent" : "✅ Batch reply sent to user"];
@@ -288,6 +297,10 @@ export function createBot(
     diagnostic: NormalizedDeliveryError
   ): Promise<void> {
     if (item.delivery_failure_event_state === "SENT") return;
+    if (item.action === "no_action" || item.delivery_message_id !== null || item.delivery_error_category === null) {
+      db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
+      return;
+    }
     if (ticket.staff_chat_id !== config.staffChatId || ticket.message_thread_id === null) {
       throw new Error("Ticket topic is unavailable for batch delivery failure event.");
     }
@@ -343,6 +356,14 @@ export function createBot(
 
   function hasBatchFollowUpContext(item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]): boolean {
     return item.follow_up_state !== "NONE" || item.internal_note !== null || item.escalation_target !== "NONE";
+  }
+
+  function isConfirmedBatchReply(item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]): boolean {
+    return item.action !== "no_action"
+      && item.delivery_message_id !== null
+      && item.delivery_error_category === null
+      && item.delivery_error_permanence === null
+      && item.delivery_failure_event_state !== "SENT";
   }
 
   function quickRepliesCategoryKeyboard(ticketId: number): InlineKeyboard {
@@ -1585,7 +1606,7 @@ export function createBot(
     const permanent = items.filter((item) => item.delivery_error_permanence === "PERMANENT");
     const temporary = items.filter((item) => item.delivery_error_permanence === "TEMPORARY");
     const unknown = items.filter((item) => item.delivery_error_permanence === "UNKNOWN_DELIVERY" || item.state === "UNKNOWN_DELIVERY").length;
-    const staffPending = items.filter((item) => item.topic_echo_state !== "SENT" && item.topic_echo_state !== "NOT_REQUIRED").length;
+    const staffPending = items.filter((item) => item.topic_echo_state !== "SENT" && item.topic_echo_state !== "NOT_REQUIRED" && (item.action === "no_action" ? hasBatchFollowUpContext(item) : isConfirmedBatchReply(item))).length;
     return [
       permanent.length || temporary.length || unknown || staffPending ? "Ticket batch applied with issues." : "Answer package applied.",
       "",
@@ -1601,6 +1622,14 @@ export function createBot(
 
   async function recoverTicketBatchStaffOperations(answerPackageId?: string): Promise<void> {
     const at = new Date().toISOString();
+    const invalidSuccessEchoes = db.listInvalidTicketBatchSuccessEchoes(config.staffChatId, 20)
+      .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
+    for (const item of invalidSuccessEchoes) {
+      db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED", {
+        lastError: "Success echo is not applicable after an unconfirmed user delivery."
+      });
+      logger.warn({ answerPackageId: item.answer_package_id, ticketId: item.ticket_id }, "Skipped invalid ticket batch success-echo recovery candidate");
+    }
     const failureEvents = db.listPendingTicketBatchFailureEvents(config.staffChatId, at, 20)
       .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
     for (const item of failureEvents) {
