@@ -12,7 +12,7 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-it("upgrades a v1.2.1 ticket batch schema through migration 16 without changing legacy exports", async () => {
+it("upgrades a v1.2.1 ticket batch schema through migration 17 without changing legacy exports", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "telegram-ticket-batch-migration-"));
   temporaryDirectories.push(directory);
   const databasePath = path.join(directory, "support.db");
@@ -62,7 +62,7 @@ it("upgrades a v1.2.1 ticket batch schema through migration 16 without changing 
 
     const itemColumns = inspected.prepare("PRAGMA table_info(ticket_batch_answer_items)").all() as Array<{ name: string }>;
     const ticketColumns = inspected.prepare("PRAGMA table_info(tickets)").all() as Array<{ name: string }>;
-    assert.deepEqual(migrationIds.map((row) => row.id), Array.from({ length: 16 }, (_, index) => index + 1));
+    assert.deepEqual(migrationIds.map((row) => row.id), Array.from({ length: 17 }, (_, index) => index + 1));
     assert.deepEqual(exportColumns.map((column) => column.name).filter((name) => name.startsWith("delivery_") || name === "delivered_at" || name === "last_error"), ["delivery_state", "delivery_message_id", "delivered_at", "last_error"]);
     assert.deepEqual(packageColumns.map((column) => column.name).filter((name) => name.startsWith("preview_")), ["preview_token", "preview_chat_id", "preview_message_id", "preview_page"]);
     assert.ok(itemColumns.some((column) => column.name === "topic_echo_state"));
@@ -71,6 +71,8 @@ it("upgrades a v1.2.1 ticket batch schema through migration 16 without changing 
     assert.ok(packageColumns.some((column) => column.name === "summary_delivery_state"));
     assert.ok(packageColumns.some((column) => column.name === "final_summary_state"));
     assert.ok(itemColumns.some((column) => column.name === "topic_echo_next_retry_at"));
+    assert.ok(itemColumns.some((column) => column.name === "topic_echo_error_category"));
+    assert.ok(itemColumns.some((column) => column.name === "topic_echo_terminal_at"));
     assert.ok(itemColumns.some((column) => column.name === "delivery_failure_event_next_retry_at"));
     assert.ok(ticketColumns.some((column) => column.name === "follow_up_state"));
     assert.deepEqual(legacyExport, { delivery_state: "DELIVERED", delivery_message_id: null, delivered_at: null, last_error: null });
@@ -80,4 +82,45 @@ it("upgrades a v1.2.1 ticket batch schema through migration 16 without changing 
 
   const reopened = new SupportDatabase(databasePath);
   reopened.close();
+});
+
+it("normalizes a legacy terminal staff event and retains its safe category", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "telegram-ticket-batch-terminal-migration-"));
+  temporaryDirectories.push(directory);
+  const databasePath = path.join(directory, "support.db");
+  const legacy = new Database(databasePath);
+  const timestamp = "2026-08-01T08:00:00.000Z";
+  legacy.exec(`
+    CREATE TABLE schema_migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);
+    CREATE TABLE tickets (id INTEGER PRIMARY KEY, status TEXT NOT NULL);
+    CREATE TABLE ticket_batch_answer_items (
+      answer_package_id TEXT NOT NULL, ticket_id INTEGER NOT NULL, action TEXT NOT NULL,
+      follow_up_state TEXT NOT NULL, internal_note TEXT, escalation_target TEXT NOT NULL,
+      topic_echo_state TEXT NOT NULL, topic_echo_last_error TEXT, topic_echo_next_retry_at TEXT,
+      delivery_failure_event_state TEXT NOT NULL, delivery_failure_event_next_retry_at TEXT, updated_at TEXT NOT NULL,
+      PRIMARY KEY (answer_package_id, ticket_id)
+    );
+  `);
+  const migration = legacy.prepare("INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)");
+  for (let id = 1; id <= 16; id += 1) migration.run(id, `migration_${id}`, timestamp);
+  legacy.prepare("INSERT INTO tickets (id, status) VALUES (29, 'OPEN')").run();
+  legacy.prepare(`INSERT INTO ticket_batch_answer_items VALUES (?, 29, 'no_action', 'WAITING_USER', 'context', 'NONE', 'FAILED', 'TELEGRAM_BAD_REQUEST', '9999-12-31T23:59:59.999Z', 'NOT_REQUIRED', NULL, ?)`)
+    .run("terminal", timestamp);
+  legacy.close();
+
+  const upgraded = new SupportDatabase(databasePath);
+  upgraded.close();
+  const inspected = new Database(databasePath, { readonly: true });
+  try {
+    const item = inspected.prepare(`SELECT topic_echo_state, topic_echo_next_retry_at, topic_echo_error_category, topic_echo_terminal_at
+      FROM ticket_batch_answer_items WHERE answer_package_id = 'terminal'`).get() as {
+      topic_echo_state: string; topic_echo_next_retry_at: string | null; topic_echo_error_category: string | null; topic_echo_terminal_at: string | null;
+    };
+    assert.equal(item.topic_echo_state, "TERMINAL_FAILED");
+    assert.equal(item.topic_echo_next_retry_at, null);
+    assert.equal(item.topic_echo_error_category, "TELEGRAM_BAD_REQUEST");
+    assert.ok(item.topic_echo_terminal_at);
+  } finally {
+    inspected.close();
+  }
 });

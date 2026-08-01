@@ -7,7 +7,7 @@ A Telegram-native support desk that turns private user messages into structured 
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Version: `1.2.4`
+Version: `1.2.5`
 
 Users contact the bot in private chat, while staff work entirely in a dedicated Telegram forum supergroup. Each ticket receives its own topic, Quick Replies speed up routine responses, and closed conversations are archived as text transcripts in Support Logs.
 
@@ -136,7 +136,7 @@ Operator workflow:
 4. Review the single paginated preview message. Previous and Next edit that same Telegram message; no per-ticket preview messages are created.
 5. Press Apply to delete the preview and run the validated instructions, or Cancel to delete it without ticket changes.
 
-Answer packages must contain every exported ticket exactly once. Apply blocks stale tickets and supports `reply_keep_open` and `reply_and_close`, reusing the normal delivery, transcript, close, archive, and Support Logs paths. Apply produces at most one aggregate staff summary, not per-ticket progress messages. Staff-only topic events and final summaries are coordinated per staff chat, persist retry state after Telegram rate limits, and recover after restart without retrying user-facing delivery. Undelivered batch replies retain a sanitized Telegram failure category, retry context, and staff-topic failure event; permanent and unknown outcomes are never resent automatically.
+Answer packages must contain every exported ticket exactly once. Apply blocks stale tickets and supports `reply_keep_open` and `reply_and_close`, reusing the normal delivery, transcript, close, archive, and Support Logs paths. Apply produces at most one aggregate staff summary, not per-ticket progress messages. Staff-only topic events and final summaries are coordinated per staff chat, persist retry state after Telegram rate limits, and recover after restart without retrying user-facing delivery. The summary counts requested `no_action` answers independently from staff-topic synchronization and reports pending or terminal staff-sync failures separately. Undelivered batch replies retain a sanitized Telegram failure category, retry context, and staff-topic failure event; permanent and unknown outcomes are never resent automatically.
 
 ### Follow-up Context
 
@@ -144,7 +144,7 @@ New exports generate answer-package version 2. In addition to the user-facing `r
 
 After a confirmed batch reply, the bot posts one readable staff-only echo in the ticket topic, including the exact user reply and any internal context. Internal notes and escalation data are never delivered to the user. A failed topic echo is retried independently and never resends the user reply. `WAITING_USER` returns to `IN_PROGRESS` when the user provides a new message.
 
-Ticket ZIP exports include current follow-up context, recorded staff replies, and instructions to avoid repeating an answer when no new user message has arrived. Version-1 answer packages remain accepted with `NONE` / `null` defaults for the new fields.
+Ticket ZIP exports include current follow-up context, recorded staff replies, and terminal staff-sync state where applicable. The instructions explicitly forbid repeating a user-facing reply solely because a staff-topic synchronization event failed. Version-1 answer packages remain accepted with `NONE` / `null` defaults for the new fields.
 
 ## Public English-Only Moderation
 
@@ -269,7 +269,7 @@ npm test
 npm run build
 ```
 
-The current suite contains 159 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, and entity-notification publication behavior.
+The current suite contains 168 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, and entity-notification publication behavior.
 
 ## Project Structure
 

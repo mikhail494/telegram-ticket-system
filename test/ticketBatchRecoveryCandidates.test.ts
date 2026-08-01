@@ -38,31 +38,44 @@ function createPackage(db: SupportDatabase, id: string, ticketId: number, action
   });
 }
 
+function createTicket(db: SupportDatabase, telegramId: number): number {
+  db.upsertUser({ telegramId, username: null, firstName: `User${telegramId}`, lastName: null });
+  const ticket = db.createTicket(telegramId, staffChatId);
+  db.updateTicketForumTopic(ticket.id, staffChatId, telegramId + 10_000);
+  return ticket.id;
+}
+
 describe("ticket batch staff-recovery candidates", () => {
   it("excludes failed or unknown user delivery from success echoes while retaining valid staff-only candidates", () => {
     const db = new SupportDatabase(":memory:");
-    createPackage(db, "permanent", 98, "reply_and_close");
-    db.recordTicketBatchDeliveryFailure("permanent", 98, "FAILED", permanentFailure);
-    db.recordTicketBatchFailureEvent("permanent", 98, "SENT", 700);
+    const permanentTicket = createTicket(db, 98);
+    createPackage(db, "permanent", permanentTicket, "reply_and_close");
+    db.recordTicketBatchDeliveryFailure("permanent", permanentTicket, "FAILED", permanentFailure);
+    db.recordTicketBatchFailureEvent("permanent", permanentTicket, "SENT", 700);
 
-    createPackage(db, "temporary", 99, "reply_keep_open");
-    db.recordTicketBatchDeliveryFailure("temporary", 99, "FAILED", { ...permanentFailure, category: "RATE_LIMITED", permanence: "TEMPORARY", telegramErrorCode: 429, retryAfterSeconds: 30 });
-    db.recordTicketBatchFailureEvent("temporary", 99, "PENDING");
+    const temporaryTicket = createTicket(db, 99);
+    createPackage(db, "temporary", temporaryTicket, "reply_keep_open");
+    db.recordTicketBatchDeliveryFailure("temporary", temporaryTicket, "FAILED", { ...permanentFailure, category: "RATE_LIMITED", permanence: "TEMPORARY", telegramErrorCode: 429, retryAfterSeconds: 30 });
+    db.recordTicketBatchFailureEvent("temporary", temporaryTicket, "PENDING");
 
-    createPackage(db, "unknown", 100, "reply_keep_open");
-    db.recordTicketBatchDeliveryFailure("unknown", 100, "UNKNOWN_DELIVERY", { ...permanentFailure, category: "NETWORK_TIMEOUT", permanence: "UNKNOWN_DELIVERY", telegramErrorCode: null, description: null });
+    const unknownTicket = createTicket(db, 100);
+    createPackage(db, "unknown", unknownTicket, "reply_keep_open");
+    db.recordTicketBatchDeliveryFailure("unknown", unknownTicket, "UNKNOWN_DELIVERY", { ...permanentFailure, category: "NETWORK_TIMEOUT", permanence: "UNKNOWN_DELIVERY", telegramErrorCode: null, description: null });
 
-    createPackage(db, "confirmed", 101, "reply_keep_open");
-    db.updateTicketBatchAnswerItem("confirmed", 101, "STAFF_SYNC_PENDING", { deliveryMessageId: 701 });
-    db.recordTicketBatchTopicEcho("confirmed", 101, "FAILED");
+    const confirmedTicket = createTicket(db, 101);
+    createPackage(db, "confirmed", confirmedTicket, "reply_keep_open");
+    db.updateTicketBatchAnswerItem("confirmed", confirmedTicket, "STAFF_SYNC_PENDING", { deliveryMessageId: 701 });
+    db.recordTicketBatchTopicEcho("confirmed", confirmedTicket, "FAILED");
 
-    createPackage(db, "followup", 102, "no_action", { internalNote: "internal follow-up" });
-    createPackage(db, "plain", 103, "no_action");
+    const followUpTicket = createTicket(db, 102);
+    createPackage(db, "followup", followUpTicket, "no_action", { internalNote: "internal follow-up" });
+    const plainTicket = createTicket(db, 103);
+    createPackage(db, "plain", plainTicket, "no_action");
 
     const audit = db.getTicketBatchRecoveryAudit(staffChatId, "2026-08-01T09:00:00.000Z");
     const echoes = db.listPendingTicketBatchTopicEchoes(staffChatId, "2026-08-01T09:00:00.000Z");
 
-    assert.deepEqual(echoes.map((item) => item.ticket_id).sort((a, b) => a - b), [101, 102]);
+    assert.deepEqual(echoes.map((item) => item.ticket_id).sort((a, b) => a - b), [confirmedTicket, followUpTicket].sort((a, b) => a - b));
     assert.equal(audit.successTopicEchoes, 1);
     assert.equal(audit.noActionFollowUpEvents, 1);
     assert.equal(audit.failureEvents, 1);
@@ -78,6 +91,7 @@ describe("ticket batch staff-recovery candidates", () => {
     const legacy = new Database(databasePath);
     legacy.exec(`
       CREATE TABLE schema_migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);
+      CREATE TABLE tickets (id INTEGER PRIMARY KEY, status TEXT NOT NULL);
       CREATE TABLE ticket_batch_answer_packages (
         answer_package_id TEXT PRIMARY KEY, export_id TEXT NOT NULL, staff_chat_id INTEGER NOT NULL, package_hash TEXT NOT NULL,
         source_chat_id INTEGER, source_message_id INTEGER, package_created_at TEXT NOT NULL, imported_at TEXT NOT NULL,
@@ -103,6 +117,7 @@ describe("ticket batch staff-recovery candidates", () => {
       .run("legacy", "export", staffChatId, "hash", timestamp, timestamp, timestamp, timestamp, timestamp);
     legacy.prepare("INSERT INTO ticket_batch_answer_items VALUES (?, 98, 'token', 'reply_and_close', 'Reply', 'FAILED', NULL, NULL, 'USER_BLOCKED_BOT', ?, 'NONE', NULL, 'NONE', NULL, NULL, NULL, 'PENDING', NULL, 'USER_BLOCKED_BOT', 'PERMANENT', 403, NULL, 'sendMessage', NULL, 'Forbidden', ?, 1, 'SENT', 701)")
       .run("legacy", timestamp, timestamp);
+    legacy.prepare("INSERT INTO tickets (id, status) VALUES (98, 'OPEN')").run();
     legacy.close();
 
     const upgraded = new SupportDatabase(databasePath);
@@ -167,5 +182,36 @@ describe("ticket batch staff-recovery candidates", () => {
     assert.ok(summary);
     assert.match(String(summary.payload.text), /Staff sync pending: 0/);
     assert.match(String(summary.payload.text), new RegExp(`#${failedTicket.id} .* USER_BLOCKED_BOT`));
+  });
+
+  it("keeps a terminal no_action staff failure out of recovery while reporting it separately", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket({ user: { id: 108 }, messageThreadId: 8108 });
+    createPackage(harness.db, "terminal_staff_failure", ticket.id, "no_action", { internalNote: "reviewed" });
+    harness.db.updateTicketBatchAnswerItem("terminal_staff_failure", ticket.id, "STAFF_SYNC_PENDING", { applied: true });
+    harness.db.recordTicketBatchTopicEcho("terminal_staff_failure", ticket.id, "TERMINAL_FAILED", {
+      lastError: "TELEGRAM_BAD_REQUEST",
+      diagnostic: {
+        category: "TELEGRAM_BAD_REQUEST", permanence: "PERMANENT", method: "sendMessage",
+        telegramErrorCode: 400, httpStatus: 400, retryAfterSeconds: null,
+        description: null, occurredAt: "2026-08-01T08:00:00.000Z"
+      }
+    });
+    harness.db.queueTicketBatchFinalSummary("terminal_staff_failure", TEST_STAFF_CHAT_ID, {
+      text: "stale summary", chatId: TEST_STAFF_CHAT_ID
+    });
+
+    await harness.bot.recoverPendingTicketBatchStaffOperations();
+
+    assert.equal(harness.findApiCalls("sendMessage").some((call) =>
+      call.payload.message_thread_id === ticket.message_thread_id
+    ), false);
+    const summary = harness.findApiCalls("sendMessage").find((call) =>
+      call.payload.chat_id === TEST_STAFF_CHAT_ID && String(call.payload.text).includes("Staff sync terminal failures: 1")
+    );
+    assert.ok(summary);
+    assert.match(String(summary.payload.text), /No action: 1/);
+    assert.match(String(summary.payload.text), new RegExp(`#${ticket.id} .* TELEGRAM_BAD_REQUEST`));
+    assert.equal(harness.db.listTicketBatchAnswerItems("terminal_staff_failure")[0]?.state, "STAFF_SYNC_PENDING");
   });
 });

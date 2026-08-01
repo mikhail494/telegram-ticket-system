@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+## [1.2.5] - Unreleased
+
+### Fixed
+
+- Separated `no_action` accounting from staff-topic synchronization.
+- Reported terminal staff synchronization failures independently from user-delivery outcomes.
+- Prevented terminal and inert staff events from remaining startup-recovery candidates indefinitely.
+- Preserved internal follow-up context when a Telegram topic event cannot be delivered.
+- Prevented staff synchronization failures from causing duplicate user replies.
+
 ## [1.2.4] - Unreleased
 
 ### Fixed
