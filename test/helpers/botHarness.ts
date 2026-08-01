@@ -1,4 +1,5 @@
-import type { ApiCallFn, Bot, Context, Transformer } from "grammy";
+import type { ApiCallFn, Context, Transformer } from "grammy";
+import type { SupportBot } from "../../src/bot.js";
 import type { Update, User, UserFromGetMe } from "grammy/types";
 import type { QuickRepliesRegistry } from "../../src/quickReplies.js";
 import type { ModerationCleanupScheduler } from "../../src/languageModeration.js";
@@ -127,7 +128,7 @@ export interface BotHarnessOptions {
 export interface BotHarness {
   db: SupportDatabaseType;
   registry: QuickRepliesRegistry;
-  bot: Bot<Context>;
+  bot: SupportBot;
   apiCalls: RecordedApiCall[];
   scheduledModerationCleanupJobIds: number[];
   cleanup(): void;
@@ -171,7 +172,8 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
     },
     now: options.moderationNow,
     scheduleModerationCleanup: scheduleCleanup,
-    entityNotificationProviders: options.entityNotificationProviders
+    entityNotificationProviders: options.entityNotificationProviders,
+    staffChatDelivery: { minimumIntervalMs: 0, sleep: async () => undefined }
   });
   const apiCalls: RecordedApiCall[] = [];
   const responseOverrides = new Map<string, ApiResponseOverride>();

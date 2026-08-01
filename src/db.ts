@@ -167,6 +167,7 @@ export type TicketBatchAnswerItemState = "PENDING" | "APPLYING" | "REPLY_SENT" |
 export type TicketBatchTopicEchoState = "NOT_REQUIRED" | "PENDING" | "SENT" | "FAILED";
 export type TicketBatchFailureEventState = "NOT_REQUIRED" | "PENDING" | "SENT" | "FAILED";
 export type TicketBatchSummaryDeliveryState = "NOT_ATTEMPTED" | "SENT" | "FAILED";
+export type TicketBatchFinalSummaryState = "NOT_PENDING" | "PENDING" | "SENT" | "FAILED" | "UNKNOWN_DELIVERY";
 
 export interface TicketBatchAnswerPackageRecord {
   answer_package_id: string; export_id: string; staff_chat_id: number; package_hash: string;
@@ -175,6 +176,10 @@ export interface TicketBatchAnswerPackageRecord {
   completed_at: string | null; updated_at: string;
   preview_token: string | null; preview_chat_id: number | null; preview_message_id: number | null; preview_page: number | null;
   summary_delivery_state: TicketBatchSummaryDeliveryState; summary_delivery_error: string | null; summary_delivery_attempted_at: string | null;
+  final_summary_state: TicketBatchFinalSummaryState; final_summary_text: string | null;
+  final_summary_chat_id: number | null; final_summary_origin_chat_id: number | null; final_summary_origin_message_id: number | null;
+  final_summary_message_id: number | null; final_summary_attempt_count: number; final_summary_next_retry_at: string | null;
+  final_summary_last_error: string | null; final_summary_delivered_at: string | null;
 }
 
 export interface TicketBatchAnswerItemRecord {
@@ -184,11 +189,13 @@ export interface TicketBatchAnswerItemRecord {
   follow_up_state: TicketFollowUpState; internal_note: string | null; escalation_target: TicketEscalationTarget;
   topic_echo_chat_id: number | null; topic_echo_thread_id: number | null; topic_echo_message_id: number | null;
   topic_echo_state: TicketBatchTopicEchoState; topic_echo_last_error: string | null;
+  topic_echo_attempt_count: number; topic_echo_next_retry_at: string | null;
   delivery_error_category: DeliveryErrorCategory | null; delivery_error_permanence: DeliveryErrorPermanence | null;
   delivery_error_code: number | null; delivery_http_status: number | null; delivery_error_method: string | null;
   delivery_retry_after_seconds: number | null; delivery_error_description: string | null; delivery_failed_at: string | null;
   delivery_attempt_count: number; delivery_failure_event_state: TicketBatchFailureEventState;
-  delivery_failure_event_message_id: number | null;
+  delivery_failure_event_message_id: number | null; delivery_failure_event_attempt_count: number;
+  delivery_failure_event_next_retry_at: string | null;
 }
 
 export interface CreateTicketBatchAnswerPackageInput {
@@ -860,7 +867,7 @@ export class SupportDatabase {
   setTicketBatchAnswerPackagePreview(answerPackageId: string, staffChatId: number, preview: { token: string; chatId: number; messageId: number; page: number }): boolean {
     const result = this.db.prepare(`UPDATE ticket_batch_answer_packages
       SET preview_token = ?, preview_chat_id = ?, preview_message_id = ?, preview_page = ?, updated_at = ?
-      WHERE answer_package_id = ? AND staff_chat_id = ? AND status IN ('PENDING', 'PARTIAL') AND preview_message_id IS NULL`)
+      WHERE answer_package_id = ? AND staff_chat_id = ? AND status = 'PENDING' AND preview_message_id IS NULL`)
       .run(preview.token, preview.chatId, preview.messageId, preview.page, now(), answerPackageId, staffChatId);
     return result.changes === 1;
   }
@@ -878,9 +885,9 @@ export class SupportDatabase {
   claimTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
     const tx = this.db.transaction(() => {
       const item = this.getTicketBatchAnswerPackage(answerPackageId, staffChatId);
-      if (!item || (item.status !== "PENDING" && item.status !== "PARTIAL")) return item;
+      if (!item || item.status !== "PENDING") return item;
       const timestamp = now();
-      this.db.prepare("UPDATE ticket_batch_answer_packages SET status = 'APPLYING', started_at = COALESCE(started_at, ?), updated_at = ? WHERE answer_package_id = ? AND status IN ('PENDING', 'PARTIAL')")
+      this.db.prepare("UPDATE ticket_batch_answer_packages SET status = 'APPLYING', started_at = COALESCE(started_at, ?), updated_at = ? WHERE answer_package_id = ? AND status = 'PENDING'")
         .run(timestamp, timestamp, answerPackageId);
       return this.getTicketBatchAnswerPackage(answerPackageId, staffChatId);
     });
@@ -937,12 +944,22 @@ export class SupportDatabase {
     answerPackageId: string,
     ticketId: number,
     state: TicketBatchFailureEventState,
-    messageId?: number | null
+    messageId?: number | null,
+    options: { nextRetryAt?: string | null; incrementAttempt?: boolean } = {}
   ): void {
     this.db.prepare(`UPDATE ticket_batch_answer_items
-      SET delivery_failure_event_state = ?, delivery_failure_event_message_id = COALESCE(?, delivery_failure_event_message_id), updated_at = ?
+      SET delivery_failure_event_state = ?, delivery_failure_event_message_id = COALESCE(?, delivery_failure_event_message_id), delivery_failure_event_next_retry_at = COALESCE(?, delivery_failure_event_next_retry_at), delivery_failure_event_attempt_count = delivery_failure_event_attempt_count + ?, updated_at = ?
       WHERE answer_package_id = ? AND ticket_id = ?`)
-      .run(state, messageId ?? null, now(), answerPackageId, ticketId);
+      .run(state, messageId ?? null, options.nextRetryAt ?? null, options.incrementAttempt ? 1 : 0, now(), answerPackageId, ticketId);
+  }
+
+  listPendingTicketBatchFailureEvents(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[] {
+    return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
+      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
+      WHERE p.staff_chat_id = ? AND i.delivery_failure_event_state IN ('PENDING', 'FAILED')
+        AND i.delivery_error_category IS NOT NULL
+        AND (i.delivery_failure_event_next_retry_at IS NULL OR i.delivery_failure_event_next_retry_at <= ?)
+      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
   }
 
   recordTicketBatchSummaryDelivery(answerPackageId: string, staffChatId: number, state: TicketBatchSummaryDeliveryState, error: string | null = null): void {
@@ -952,11 +969,59 @@ export class SupportDatabase {
       .run(state, error, now(), now(), answerPackageId, staffChatId);
   }
 
-  recordTicketBatchTopicEcho(answerPackageId: string, ticketId: number, state: TicketBatchTopicEchoState, options: { chatId?: number | null; threadId?: number | null; messageId?: number | null; lastError?: string | null } = {}): void {
+  queueTicketBatchFinalSummary(
+    answerPackageId: string,
+    staffChatId: number,
+    input: { text: string; chatId: number; originChatId?: number | null; originMessageId?: number | null }
+  ): void {
+    this.db.prepare(`UPDATE ticket_batch_answer_packages
+      SET final_summary_state = 'PENDING', final_summary_text = ?, final_summary_chat_id = ?,
+          final_summary_origin_chat_id = ?, final_summary_origin_message_id = ?,
+          final_summary_next_retry_at = ?, final_summary_last_error = NULL, updated_at = ?
+      WHERE answer_package_id = ? AND staff_chat_id = ? AND final_summary_state != 'SENT'`)
+      .run(input.text, input.chatId, input.originChatId ?? null, input.originMessageId ?? null, now(), now(), answerPackageId, staffChatId);
+  }
+
+  listPendingTicketBatchFinalSummaries(staffChatId: number, at: string, limit = 20): TicketBatchAnswerPackageRecord[] {
+    return this.db.prepare(`SELECT * FROM ticket_batch_answer_packages
+      WHERE staff_chat_id = ? AND final_summary_state IN ('PENDING', 'FAILED')
+        AND (final_summary_next_retry_at IS NULL OR final_summary_next_retry_at <= ?)
+      ORDER BY updated_at ASC, answer_package_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerPackageRecord[];
+  }
+
+  recordTicketBatchFinalSummaryAttempt(answerPackageId: string, staffChatId: number): void {
+    this.db.prepare(`UPDATE ticket_batch_answer_packages SET final_summary_attempt_count = final_summary_attempt_count + 1, updated_at = ?
+      WHERE answer_package_id = ? AND staff_chat_id = ?`).run(now(), answerPackageId, staffChatId);
+  }
+
+  recordTicketBatchFinalSummarySent(answerPackageId: string, staffChatId: number, messageId: number): void {
+    this.db.prepare(`UPDATE ticket_batch_answer_packages
+      SET final_summary_state = 'SENT', final_summary_message_id = ?, final_summary_delivered_at = ?,
+          final_summary_next_retry_at = NULL, final_summary_last_error = NULL,
+          summary_delivery_state = 'SENT', summary_delivery_error = NULL, summary_delivery_attempted_at = ?, updated_at = ?
+      WHERE answer_package_id = ? AND staff_chat_id = ?`).run(messageId, now(), now(), now(), answerPackageId, staffChatId);
+  }
+
+  recordTicketBatchFinalSummaryFailure(answerPackageId: string, staffChatId: number, state: "FAILED" | "UNKNOWN_DELIVERY", error: string, nextRetryAt: string | null): void {
+    this.db.prepare(`UPDATE ticket_batch_answer_packages
+      SET final_summary_state = ?, final_summary_last_error = ?, final_summary_next_retry_at = ?,
+          summary_delivery_state = 'FAILED', summary_delivery_error = ?, summary_delivery_attempted_at = ?, updated_at = ?
+      WHERE answer_package_id = ? AND staff_chat_id = ?`).run(state, error, nextRetryAt, error, now(), now(), answerPackageId, staffChatId);
+  }
+
+  recordTicketBatchTopicEcho(answerPackageId: string, ticketId: number, state: TicketBatchTopicEchoState, options: { chatId?: number | null; threadId?: number | null; messageId?: number | null; lastError?: string | null; nextRetryAt?: string | null; incrementAttempt?: boolean } = {}): void {
     this.db.prepare(`UPDATE ticket_batch_answer_items
-      SET topic_echo_state = ?, topic_echo_chat_id = COALESCE(?, topic_echo_chat_id), topic_echo_thread_id = COALESCE(?, topic_echo_thread_id), topic_echo_message_id = COALESCE(?, topic_echo_message_id), topic_echo_last_error = ?, updated_at = ?
+      SET topic_echo_state = ?, topic_echo_chat_id = COALESCE(?, topic_echo_chat_id), topic_echo_thread_id = COALESCE(?, topic_echo_thread_id), topic_echo_message_id = COALESCE(?, topic_echo_message_id), topic_echo_last_error = ?, topic_echo_next_retry_at = COALESCE(?, topic_echo_next_retry_at), topic_echo_attempt_count = topic_echo_attempt_count + ?, updated_at = ?
       WHERE answer_package_id = ? AND ticket_id = ?`)
-      .run(state, options.chatId ?? null, options.threadId ?? null, options.messageId ?? null, options.lastError ?? null, now(), answerPackageId, ticketId);
+      .run(state, options.chatId ?? null, options.threadId ?? null, options.messageId ?? null, options.lastError ?? null, options.nextRetryAt ?? null, options.incrementAttempt ? 1 : 0, now(), answerPackageId, ticketId);
+  }
+
+  listPendingTicketBatchTopicEchoes(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[] {
+    return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
+      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
+      WHERE p.staff_chat_id = ? AND i.topic_echo_state IN ('PENDING', 'FAILED')
+        AND (i.topic_echo_next_retry_at IS NULL OR i.topic_echo_next_retry_at <= ?)
+      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
   }
 
   setTicketFollowUpContext(ticketId: number, input: { followUpState: TicketFollowUpState; internalNote: string | null; escalationTarget: TicketEscalationTarget; sourceAnswerPackageId?: string | null }): TicketRecord | undefined {
@@ -1579,6 +1644,46 @@ export class SupportDatabase {
           this.db.exec(`
             CREATE INDEX IF NOT EXISTS idx_ticket_batch_answer_items_delivery_failure
               ON ticket_batch_answer_items(answer_package_id, delivery_error_permanence, ticket_id);
+          `);
+        }
+      },
+      {
+        id: 16,
+        name: "make_ticket_batch_staff_finalization_retryable",
+        up: () => {
+          this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_state", "TEXT NOT NULL DEFAULT 'NOT_PENDING'");
+          this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_text", "TEXT");
+          this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_chat_id", "INTEGER");
+          this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_origin_chat_id", "INTEGER");
+          this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_origin_message_id", "INTEGER");
+          this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_message_id", "INTEGER");
+          this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_attempt_count", "INTEGER NOT NULL DEFAULT 0");
+          this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_next_retry_at", "TEXT");
+          this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_last_error", "TEXT");
+          this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_delivered_at", "TEXT");
+          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_attempt_count", "INTEGER NOT NULL DEFAULT 0");
+          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_next_retry_at", "TEXT");
+          this.addColumnIfMissing("ticket_batch_answer_items", "delivery_failure_event_attempt_count", "INTEGER NOT NULL DEFAULT 0");
+          this.addColumnIfMissing("ticket_batch_answer_items", "delivery_failure_event_next_retry_at", "TEXT");
+          this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_ticket_batch_final_summary_recovery
+              ON ticket_batch_answer_packages(staff_chat_id, final_summary_state, final_summary_next_retry_at);
+            CREATE INDEX IF NOT EXISTS idx_ticket_batch_topic_echo_recovery
+              ON ticket_batch_answer_items(topic_echo_state, topic_echo_next_retry_at, answer_package_id);
+            UPDATE ticket_batch_answer_packages
+            SET final_summary_state = 'PENDING',
+                final_summary_chat_id = staff_chat_id,
+                final_summary_next_retry_at = COALESCE(final_summary_next_retry_at, updated_at)
+            WHERE final_summary_state = 'NOT_PENDING'
+              AND status IN ('COMPLETED', 'PARTIAL')
+              AND summary_delivery_state = 'FAILED';
+            UPDATE ticket_batch_answer_items
+            SET topic_echo_next_retry_at = COALESCE(topic_echo_next_retry_at, updated_at)
+            WHERE topic_echo_state IN ('PENDING', 'FAILED');
+            UPDATE ticket_batch_answer_items
+            SET delivery_failure_event_next_retry_at = COALESCE(delivery_failure_event_next_retry_at, updated_at)
+            WHERE delivery_failure_event_state IN ('PENDING', 'FAILED')
+              AND delivery_error_category IS NOT NULL;
           `);
         }
       }

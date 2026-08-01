@@ -27,6 +27,7 @@ async function main(): Promise<void> {
   await initializeSupportLogsTopic(bot.api, db);
   await archiveClosedTicketsPendingUpload(bot.api, db);
   await processModerationRecovery(bot.api, db);
+  await bot.recoverPendingTicketBatchStaffOperations();
   await setBotCommands(bot);
   await sendStaffOnboardingIfNeeded(bot.api, db);
 

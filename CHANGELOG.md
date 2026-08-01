@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+## [1.2.4] - Unreleased
+
+### Fixed
+
+- Made batch Apply final summaries durable and retryable.
+- Prevented staff-chat rate limiting from leaving packages visibly stuck on Applying.
+- Added bounded retry-after handling and per-staff-chat coordination for staff-only batch operations.
+- Added startup recovery for pending batch summaries and staff topic events without retrying user delivery.
+- Preserved durable item outcomes while staff-side synchronization is pending.
+- Enabled previously stuck v1.2.3 packages to finalize without reapplying user actions.
+
 ## [1.2.3] - Unreleased
 
 ### Fixed
