@@ -1,6 +1,6 @@
 {
   "name": "telegram-support-ticket-bot",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Production-ready Telegram support ticket bot built with Node.js, TypeScript, grammY, and SQLite.",
   "type": "module",
   "engines": {
