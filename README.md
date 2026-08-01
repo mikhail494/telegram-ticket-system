@@ -18,7 +18,7 @@ Users contact the bot in private chat, while staff work entirely in a dedicated 
 - JSON-configured Quick Replies with categories, pagination, and transcript recording.
 - Deterministic ticket-batch export and idempotent answer-package Apply workflow.
 - Configurable English-only public-chat moderation with persistent sanction recovery.
-- Generic, fail-closed entity-notification foundation for future authoritative sources.
+- Generic entity-notification interface for authoritative event providers.
 - Persistent ticket lifecycle, bans, settings, and idempotent SQLite migrations.
 - Dedicated Support Logs archive with recovery when a topic is unavailable or misconfigured.
 - Staff controls for status, closure, user lookup, and ban management.
@@ -124,7 +124,7 @@ The configuration is validated during startup. A missing, malformed, or invalid 
 
 ## Ticket Batch Operations
 
-Run `/exporttickets` in the configured staff group's main topic to export every active ticket into one self-contained `ticket-export_<export_id>.zip` document. The ZIP contains unsanitized ticket text, captions, metadata, and stored downloadable media. Each attachment is embedded at `attachments/ticket-<ticket_id>/message-<database_message_id>/...`, with matching entries in `tickets.jsonl`, `tickets.md`, and `media-index.json`; no attachments are copied separately into the staff chat.
+Run `/exporttickets` in the configured staff group's main topic to export every active ticket into one self-contained ZIP document. The ZIP contains ticket text, captions, metadata, and stored downloadable media. Each attachment is embedded with matching entries in `tickets.jsonl`, `tickets.md`, and `media-index.json`; no attachments are copied separately into the staff chat.
 
 The export is delivered only after the complete archive has been built and validated. If any stored attachment cannot be embedded, the bot sends no ZIP and reports one concise failure. Only one export can run per staff chat at a time.
 
@@ -132,11 +132,11 @@ Operator workflow:
 
 1. Run `/exporttickets` and download the single ZIP archive.
 2. Process the archive with your approved support workflow.
-3. Receive exactly `ticket-answers_<export_id>.json` and upload it in the staff group's main topic.
+3. Upload the resulting validated answer package in the staff group's main topic.
 4. Review the single paginated preview message. Previous and Next edit that same Telegram message; no per-ticket preview messages are created.
 5. Press Apply to delete the preview and run the validated instructions, or Cancel to delete it without ticket changes.
 
-Answer packages must contain every exported ticket exactly once. Apply blocks stale tickets and supports `reply_keep_open` and `reply_and_close`, reusing the normal delivery, transcript, close, archive, and Support Logs paths. Apply produces at most one aggregate staff summary, not per-ticket progress messages. Staff-only topic events and final summaries are coordinated per staff chat, persist retry state after Telegram rate limits, and recover after restart without retrying user-facing delivery. The summary counts requested `no_action` answers independently from staff-topic synchronization and reports pending or terminal staff-sync failures separately. Undelivered batch replies retain a sanitized Telegram failure category, retry context, and staff-topic failure event; permanent and unknown outcomes are never resent automatically.
+Answer packages must contain every exported ticket exactly once. Apply blocks stale tickets and supports `reply_keep_open` and `reply_and_close`, reusing the normal delivery, transcript, close, archive, and Support Logs paths. Apply produces at most one aggregate staff summary, not per-ticket progress messages. Staff-only topic events and final summaries are coordinated per staff chat, persist retry state after Telegram rate limits, and recover after restart without retrying user-facing delivery. The summary counts requested `no_action` answers independently from staff-topic synchronization and reports pending or terminal staff-sync failures separately. Undelivered batch replies retain sanitized delivery diagnostics; permanent and unknown outcomes are never resent automatically.
 
 ### Follow-up Context
 
@@ -156,7 +156,7 @@ Public-chat sanctions do not create private-support bans or block users from ope
 
 The generic entity-notification foundation accepts validated `created` events and renders supplied quest fields deterministically. Publication state is persisted and deduplicated in SQLite.
 
-Entity notifications use a configurable provider interface and require an authoritative available provider before publication.
+Notifications are disabled by default. Configure their target and provider through `/questnotify`; enablement requires a reachable target plus an authoritative, available provider. The interface is intentionally provider-neutral and publishes only validated created events.
 
 ## Support Logs And Transcripts
 
@@ -197,7 +197,7 @@ Media is represented as attachment text in the transcript. User media is not dup
 | `/setlogs` | Assign the current non-ticket topic as Support Logs. |
 | `/logs` | Show or create the current Support Logs topic. |
 | `/exporttickets` | Export active tickets from the staff group's main topic. |
-| Answer-package upload | Preview a validated `ticket-answers_*.json` package, then Apply or Cancel it. |
+| Answer-package upload | Preview a validated answer package, then Apply or Cancel it. |
 | `/moderation <subcommand>` | Configure and inspect public English-only moderation. |
 | `/questnotify <subcommand>` | Configure and inspect generic entity notifications. |
 | `Quick replies` button | Choose and send a configured response in an active ticket topic. |
@@ -314,9 +314,9 @@ Long polling must not run from multiple replicas simultaneously. SQLite needs th
 
 - Never commit `.env` or log `BOT_TOKEN`.
 - Treat every participant who can interact in `STAFF_CHAT_ID` as trusted staff. They can reply to users, change ticket status, close tickets, ban or unban users, and configure Support Logs.
-- Ticket exports contain complete unsanitized support data and must remain inside the trusted staff chat.
+- Ticket exports contain complete support data and must remain inside the trusted staff chat.
 - Public moderation requires delete, restrict, and ban permissions in its configured target chat; its sanctions remain separate from private support bans.
-- Entity notifications use a configurable provider interface and require an authoritative available provider before publication.
+- Entity notification publication requires an authoritative, available provider and an explicitly configured target.
 - Point `STAFF_CHAT_ID` only at a controlled staff group.
 - Keep SQLite on persistent storage and review staff access before making the repository public.
 - Support Logs is the durable archive; the bot does not download or duplicate user media into application storage.

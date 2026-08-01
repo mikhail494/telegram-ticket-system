@@ -13,6 +13,7 @@ All notable changes to this project are documented in this file. This project fo
 - Prevented terminal and inert staff events from remaining startup-recovery candidates indefinitely.
 - Preserved internal follow-up context when a Telegram topic event cannot be delivered.
 - Prevented staff synchronization failures from causing duplicate user replies.
+- Added regression coverage for batch actions, delivery isolation, topic events, and final summaries.
 
 ## [1.2.4] - Unreleased
 
@@ -23,7 +24,7 @@ All notable changes to this project are documented in this file. This project fo
 - Added bounded retry-after handling and per-staff-chat coordination for staff-only batch operations.
 - Added startup recovery for pending batch summaries and staff topic events without retrying user delivery.
 - Preserved durable item outcomes while staff-side synchronization is pending.
-- Enabled previously stuck v1.2.3 packages to finalize without reapplying user actions.
+- Enabled pending package summaries to finalize without repeating user actions.
 - Excluded contradictory success echoes for failed user deliveries and normalized stale legacy echo state during migration.
 - Added defensive recovery eligibility checks so success and failure events cannot be emitted for the same delivery attempt.
 
