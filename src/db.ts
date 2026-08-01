@@ -152,6 +152,15 @@ export interface TicketBatchDeliveryFailureContext {
   staff_failure_event_posted: boolean;
 }
 
+export interface TicketBatchStaffSyncContext {
+  state: TicketBatchTopicEchoState;
+  delivered: boolean;
+  terminal_failure_category: DeliveryErrorCategory | null;
+  intended_follow_up_state: TicketFollowUpState;
+  intended_escalation_target: TicketEscalationTarget;
+  internal_context_available: boolean;
+}
+
 export interface CreateTicketBatchExportInput {
   exportId: string;
   staffChatId: number;
@@ -164,7 +173,7 @@ export interface CreateTicketBatchExportInput {
 
 export type TicketBatchAnswerPackageStatus = "PENDING" | "APPLYING" | "COMPLETED" | "PARTIAL" | "CANCELLED";
 export type TicketBatchAnswerItemState = "PENDING" | "APPLYING" | "REPLY_SENT" | "STAFF_SYNC_PENDING" | "COMPLETED" | "NO_ACTION" | "STALE" | "INACTIVE" | "FAILED" | "UNKNOWN_DELIVERY";
-export type TicketBatchTopicEchoState = "NOT_REQUIRED" | "PENDING" | "SENT" | "FAILED";
+export type TicketBatchTopicEchoState = "NOT_REQUIRED" | "PENDING" | "SENT" | "FAILED" | "TERMINAL_FAILED";
 export type TicketBatchFailureEventState = "NOT_REQUIRED" | "PENDING" | "SENT" | "FAILED";
 export type TicketBatchSummaryDeliveryState = "NOT_ATTEMPTED" | "SENT" | "FAILED";
 export type TicketBatchFinalSummaryState = "NOT_PENDING" | "PENDING" | "SENT" | "FAILED" | "UNKNOWN_DELIVERY";
@@ -190,6 +199,9 @@ export interface TicketBatchAnswerItemRecord {
   topic_echo_chat_id: number | null; topic_echo_thread_id: number | null; topic_echo_message_id: number | null;
   topic_echo_state: TicketBatchTopicEchoState; topic_echo_last_error: string | null;
   topic_echo_attempt_count: number; topic_echo_next_retry_at: string | null;
+  topic_echo_error_category: DeliveryErrorCategory | null; topic_echo_error_code: number | null;
+  topic_echo_http_status: number | null; topic_echo_error_method: string | null;
+  topic_echo_error_description: string | null; topic_echo_terminal_at: string | null;
   delivery_error_category: DeliveryErrorCategory | null; delivery_error_permanence: DeliveryErrorPermanence | null;
   delivery_error_code: number | null; delivery_http_status: number | null; delivery_error_method: string | null;
   delivery_retry_after_seconds: number | null; delivery_error_description: string | null; delivery_failed_at: string | null;
@@ -204,6 +216,7 @@ export interface TicketBatchRecoveryAudit {
   noActionFollowUpEvents: number;
   finalSummaries: number;
   invalidSuccessEchoes: number;
+  terminalStaffFailures: number;
   userFacingCandidates: number;
 }
 
@@ -873,6 +886,22 @@ export class SupportDatabase {
     return row ? { ...row, staff_failure_event_posted: row.staff_failure_event_posted === 1 } : undefined;
   }
 
+  getLatestTicketBatchStaffSyncContext(ticketId: number, staffChatId: number): TicketBatchStaffSyncContext | undefined {
+    const row = this.db.prepare(`SELECT i.topic_echo_state AS state, i.topic_echo_message_id IS NOT NULL AS delivered,
+      i.topic_echo_error_category AS terminal_failure_category, i.follow_up_state AS intended_follow_up_state,
+      i.escalation_target AS intended_escalation_target, (i.internal_note IS NOT NULL OR i.follow_up_state != 'NONE' OR i.escalation_target != 'NONE') AS internal_context_available
+      FROM ticket_batch_answer_items i
+      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
+      WHERE i.ticket_id = ? AND p.staff_chat_id = ? AND (i.topic_echo_state = 'TERMINAL_FAILED' OR i.topic_echo_state = 'SENT')
+      ORDER BY i.updated_at DESC LIMIT 1`)
+      .get(ticketId, staffChatId) as (Omit<TicketBatchStaffSyncContext, "delivered" | "internal_context_available"> & { delivered: number; internal_context_available: number }) | undefined;
+    return row ? {
+      ...row,
+      delivered: row.delivered === 1,
+      internal_context_available: row.internal_context_available === 1
+    } : undefined;
+  }
+
   setTicketBatchAnswerPackagePreview(answerPackageId: string, staffChatId: number, preview: { token: string; chatId: number; messageId: number; page: number }): boolean {
     const result = this.db.prepare(`UPDATE ticket_batch_answer_packages
       SET preview_token = ?, preview_chat_id = ?, preview_message_id = ?, preview_page = ?, updated_at = ?
@@ -965,7 +994,9 @@ export class SupportDatabase {
   listPendingTicketBatchFailureEvents(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[] {
     return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
       JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
+      JOIN tickets t ON t.id = i.ticket_id
       WHERE p.staff_chat_id = ? AND i.delivery_failure_event_state IN ('PENDING', 'FAILED')
+        AND t.status != 'CLOSED'
         AND i.action IN ('reply_keep_open', 'reply_and_close')
         AND i.delivery_error_category IS NOT NULL
         AND i.delivery_message_id IS NULL
@@ -1020,17 +1051,19 @@ export class SupportDatabase {
       WHERE answer_package_id = ? AND staff_chat_id = ?`).run(state, error, nextRetryAt, error, now(), now(), answerPackageId, staffChatId);
   }
 
-  recordTicketBatchTopicEcho(answerPackageId: string, ticketId: number, state: TicketBatchTopicEchoState, options: { chatId?: number | null; threadId?: number | null; messageId?: number | null; lastError?: string | null; nextRetryAt?: string | null; incrementAttempt?: boolean } = {}): void {
+  recordTicketBatchTopicEcho(answerPackageId: string, ticketId: number, state: TicketBatchTopicEchoState, options: { chatId?: number | null; threadId?: number | null; messageId?: number | null; lastError?: string | null; nextRetryAt?: string | null; incrementAttempt?: boolean; diagnostic?: NormalizedDeliveryError } = {}): void {
     this.db.prepare(`UPDATE ticket_batch_answer_items
-      SET topic_echo_state = ?, topic_echo_chat_id = COALESCE(?, topic_echo_chat_id), topic_echo_thread_id = COALESCE(?, topic_echo_thread_id), topic_echo_message_id = COALESCE(?, topic_echo_message_id), topic_echo_last_error = ?, topic_echo_next_retry_at = COALESCE(?, topic_echo_next_retry_at), topic_echo_attempt_count = topic_echo_attempt_count + ?, updated_at = ?
+      SET topic_echo_state = ?, topic_echo_chat_id = COALESCE(?, topic_echo_chat_id), topic_echo_thread_id = COALESCE(?, topic_echo_thread_id), topic_echo_message_id = COALESCE(?, topic_echo_message_id), topic_echo_last_error = ?, topic_echo_next_retry_at = ?, topic_echo_attempt_count = topic_echo_attempt_count + ?, topic_echo_error_category = COALESCE(?, topic_echo_error_category), topic_echo_error_code = COALESCE(?, topic_echo_error_code), topic_echo_http_status = COALESCE(?, topic_echo_http_status), topic_echo_error_method = COALESCE(?, topic_echo_error_method), topic_echo_error_description = COALESCE(?, topic_echo_error_description), topic_echo_terminal_at = CASE WHEN ? THEN COALESCE(topic_echo_terminal_at, ?) ELSE topic_echo_terminal_at END, updated_at = ?
       WHERE answer_package_id = ? AND ticket_id = ?`)
-      .run(state, options.chatId ?? null, options.threadId ?? null, options.messageId ?? null, options.lastError ?? null, options.nextRetryAt ?? null, options.incrementAttempt ? 1 : 0, now(), answerPackageId, ticketId);
+      .run(state, options.chatId ?? null, options.threadId ?? null, options.messageId ?? null, options.lastError ?? null, options.nextRetryAt ?? null, options.incrementAttempt ? 1 : 0, options.diagnostic?.category ?? null, options.diagnostic?.telegramErrorCode ?? null, options.diagnostic?.httpStatus ?? null, options.diagnostic?.method ?? null, options.diagnostic?.description ?? null, state === "TERMINAL_FAILED" ? 1 : 0, now(), now(), answerPackageId, ticketId);
   }
 
   listPendingTicketBatchTopicEchoes(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[] {
     return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
       JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
+      JOIN tickets t ON t.id = i.ticket_id
       WHERE p.staff_chat_id = ? AND i.topic_echo_state IN ('PENDING', 'FAILED')
+        AND t.status != 'CLOSED'
         AND (i.topic_echo_next_retry_at IS NULL OR i.topic_echo_next_retry_at <= ?)
         AND (
           (i.action = 'no_action' AND (i.follow_up_state != 'NONE' OR i.internal_note IS NOT NULL OR i.escalation_target != 'NONE'))
@@ -1064,6 +1097,7 @@ export class SupportDatabase {
       noActionFollowUpEvents: count(`i.topic_echo_state IN ('PENDING','FAILED') AND ${due} AND i.action = 'no_action' AND (i.follow_up_state != 'NONE' OR i.internal_note IS NOT NULL OR i.escalation_target != 'NONE')`),
       finalSummaries,
       invalidSuccessEchoes: count(`i.topic_echo_state IN ('PENDING','FAILED') AND i.action IN ('reply_keep_open','reply_and_close') AND (i.delivery_message_id IS NULL OR i.delivery_error_category IS NOT NULL OR i.delivery_error_permanence IS NOT NULL OR i.delivery_failure_event_state = 'SENT')`),
+      terminalStaffFailures: count("i.topic_echo_state = 'TERMINAL_FAILED'"),
       userFacingCandidates: 0
     };
   }
@@ -1736,6 +1770,43 @@ export class SupportDatabase {
             SET delivery_failure_event_next_retry_at = COALESCE(delivery_failure_event_next_retry_at, updated_at)
             WHERE delivery_failure_event_state IN ('PENDING', 'FAILED')
               AND delivery_error_category IS NOT NULL;
+          `);
+        }
+      },
+      {
+        id: 17,
+        name: "classify_terminal_ticket_batch_staff_events",
+        up: () => {
+          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_error_category", "TEXT");
+          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_error_code", "INTEGER");
+          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_http_status", "INTEGER");
+          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_error_method", "TEXT");
+          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_error_description", "TEXT");
+          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_terminal_at", "TEXT");
+          this.db.exec(`
+            UPDATE ticket_batch_answer_items
+            SET topic_echo_state = 'TERMINAL_FAILED',
+                topic_echo_error_category = CASE
+                  WHEN topic_echo_error_category IS NOT NULL THEN topic_echo_error_category
+                  WHEN topic_echo_last_error IN ('USER_BLOCKED_BOT', 'USER_DEACTIVATED', 'CHAT_UNAVAILABLE', 'FORBIDDEN', 'RATE_LIMITED', 'TELEGRAM_BAD_REQUEST', 'TELEGRAM_SERVER_ERROR', 'NETWORK_TIMEOUT', 'NETWORK_ERROR', 'UNKNOWN_TELEGRAM_ERROR') THEN topic_echo_last_error
+                  ELSE NULL
+                END,
+                topic_echo_terminal_at = COALESCE(topic_echo_terminal_at, updated_at), topic_echo_next_retry_at = NULL
+            WHERE topic_echo_state = 'FAILED' AND topic_echo_next_retry_at = '9999-12-31T23:59:59.999Z';
+            UPDATE ticket_batch_answer_items
+            SET topic_echo_state = 'NOT_REQUIRED', topic_echo_next_retry_at = NULL,
+                topic_echo_last_error = 'Staff topic event is no longer needed for a closed ticket.'
+            WHERE topic_echo_state IN ('PENDING', 'FAILED')
+              AND ticket_id IN (SELECT id FROM tickets WHERE status = 'CLOSED');
+            UPDATE ticket_batch_answer_items
+            SET topic_echo_state = 'NOT_REQUIRED', topic_echo_next_retry_at = NULL,
+                topic_echo_last_error = 'No staff topic event was requested.'
+            WHERE topic_echo_state IN ('PENDING', 'FAILED') AND action = 'no_action'
+              AND follow_up_state = 'NONE' AND internal_note IS NULL AND escalation_target = 'NONE';
+            UPDATE ticket_batch_answer_items
+            SET delivery_failure_event_state = 'NOT_REQUIRED', delivery_failure_event_next_retry_at = NULL
+            WHERE delivery_failure_event_state IN ('PENDING', 'FAILED')
+              AND ticket_id IN (SELECT id FROM tickets WHERE status = 'CLOSED');
           `);
         }
       }

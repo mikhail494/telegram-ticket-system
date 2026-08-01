@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { Unzip, UnzipInflate, Zip, ZipDeflate, strFromU8, strToU8 } from "fflate";
 import { z } from "zod";
-import type { TicketBatchDeliveryFailureContext, TicketBatchExportItemRecord, TicketFollowUpHistoryRecord, TicketMessageRecord, TicketWithUser } from "./db.js";
+import type { TicketBatchDeliveryFailureContext, TicketBatchExportItemRecord, TicketBatchStaffSyncContext, TicketFollowUpHistoryRecord, TicketMessageRecord, TicketWithUser } from "./db.js";
 
 const MAX_ANSWER_TEXT_CHARACTERS = 3500;
 const MAX_INTERNAL_NOTE_CHARACTERS = 2000;
@@ -22,6 +22,7 @@ export interface TicketBatchSource {
   messages: TicketMessageRecord[];
   followUpHistory?: TicketFollowUpHistoryRecord[];
   deliveryFailure?: TicketBatchDeliveryFailureContext;
+  staffSync?: TicketBatchStaffSyncContext;
 }
 
 export interface TicketBatchExportSnapshotInput {
@@ -56,6 +57,7 @@ export interface TicketBatchExportRecord {
   messages: TicketMessageRecord[];
     follow_up_history: TicketFollowUpHistoryRecord[];
   batch_delivery_failure?: TicketBatchDeliveryFailureContext;
+  batch_staff_sync?: TicketBatchStaffSyncContext;
 }
 
 export interface TicketBatchAttachmentSource {
@@ -302,7 +304,7 @@ export function getTicketSnapshotToken(ticket: TicketWithUser, messages: TicketM
 export function buildTicketBatchExportSnapshot(input: TicketBatchExportSnapshotInput): TicketBatchExportSnapshot {
   const tickets = [...input.tickets].sort((left, right) => left.ticket.id - right.ticket.id);
   const attachmentSources: TicketBatchAttachmentSource[] = [];
-  const records = tickets.map(({ ticket, messages, followUpHistory = [], deliveryFailure }) => {
+  const records = tickets.map(({ ticket, messages, followUpHistory = [], deliveryFailure, staffSync }) => {
     const orderedMessages = [...messages].sort(compareMessages);
     for (const message of orderedMessages) {
       if (message.media_type) {
@@ -341,7 +343,8 @@ export function buildTicketBatchExportSnapshot(input: TicketBatchExportSnapshotI
       snapshot_token: getTicketSnapshotToken(ticket, orderedMessages),
       messages: orderedMessages,
       follow_up_history: [...followUpHistory],
-      ...(deliveryFailure ? { batch_delivery_failure: deliveryFailure } : {})
+      ...(deliveryFailure ? { batch_delivery_failure: deliveryFailure } : {}),
+      ...(staffSync ? { batch_staff_sync: staffSync } : {})
     };
   });
   const messageCount = records.reduce((count, record) => count + record.messages.length, 0);
@@ -569,6 +572,7 @@ export function buildAnswerPackageInstructions(exportId: string): string {
     "",
     "Before replying, inspect previous STAFF_TO_USER messages and current follow-up context. Do not repeat an answer when no new user message has arrived; use no_action and update follow-up state when internal work is pending.",
     "Inspect any batch_delivery_failure context before choosing an action. Permanent Telegram delivery failures normally require no_action until contact is restored. Temporary failures may be retried later through a controlled package after the retry window. Unknown delivery must not be retried automatically.",
+    "A terminal staff-topic synchronization failure preserves internal follow-up context and is never a reason to repeat a user-facing reply.",
     "Use WAITING_USER only when the user must provide information, WAITING_DEVS for technical investigation, WAITING_QUEST_OWNER for independent quest-host review, and MONITORING for an external result that does not need user input.",
     "",
     "```json",

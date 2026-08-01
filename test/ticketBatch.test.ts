@@ -106,6 +106,37 @@ describe("ticket batch export contract", () => {
       staff_failure_event_posted: true
     });
   });
+
+  it("includes terminal staff-sync context without implying another user reply", () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const snapshot = buildTicketBatchExportSnapshot({
+      exportId: "export_staff_sync_context",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      tickets: [{
+        ticket,
+        messages: [],
+        staffSync: {
+          state: "TERMINAL_FAILED",
+          delivered: false,
+          terminal_failure_category: "TELEGRAM_BAD_REQUEST",
+          intended_follow_up_state: "WAITING_DEVS",
+          intended_escalation_target: "DEVS",
+          internal_context_available: true
+        }
+      }]
+    });
+
+    assert.deepEqual(snapshot.records[0]?.batch_staff_sync, {
+      state: "TERMINAL_FAILED",
+      delivered: false,
+      terminal_failure_category: "TELEGRAM_BAD_REQUEST",
+      intended_follow_up_state: "WAITING_DEVS",
+      intended_escalation_target: "DEVS",
+      internal_context_available: true
+    });
+  });
   it("exports all and only active tickets in ticket/message order without mutating tickets", async () => {
     const harness = createHarness();
     const second = harness.seedTicket({ user: { id: 124, username: "second" }, messageThreadId: 5001 });
