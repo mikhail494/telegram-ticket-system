@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyEnglishOnlyMessage, preprocessModerationText } from "../src/languageModeration.js";
+
+process.env.NODE_ENV = "test";
+process.env.BOT_TOKEN = "123456:TEST_BOT_TOKEN";
+process.env.STAFF_CHAT_ID = "-100900";
+process.env.DATABASE_URL = ":memory:";
+process.env.LOG_LEVEL = "silent";
+
+const { classifyEnglishOnlyMessage, preprocessModerationText } = await import("../src/languageModeration.js");
 
 describe("language moderation classifier", () => {
   it("ignores technical and non-linguistic input", () => {
