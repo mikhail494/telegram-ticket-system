@@ -1,0 +1,79 @@
+import { constants } from "node:fs";
+import { access, chmod, readFile, rename, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import readline from "node:readline";
+import dotenv from "dotenv";
+
+interface SetupOptions {
+  env?: NodeJS.ProcessEnv;
+  envPath?: string | false;
+  interactive?: boolean;
+  promptToken?: () => Promise<string>;
+  confirmOverwrite?: () => Promise<boolean>;
+  verifyToken?: (token: string) => Promise<{ id: number; username: string }>;
+  writeOutput?: (line: string) => void;
+}
+
+async function exists(file: string): Promise<boolean> { try { await access(file, constants.F_OK); return true; } catch { return false; } }
+
+async function hiddenPrompt(): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("BOT_TOKEN is missing in non-interactive mode. Set it in the environment or run npm run setup in a terminal.");
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    process.stdout.write("Bot token (input hidden): ");
+    const mutable = rl as readline.Interface & { _writeToOutput?: (value: string) => void };
+    const original = mutable._writeToOutput;
+    mutable._writeToOutput = () => undefined;
+    rl.question("", (answer) => { mutable._writeToOutput = original; rl.close(); process.stdout.write("\n"); resolve(answer); });
+  });
+}
+
+async function confirmTokenOverwrite(): Promise<boolean> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
+  const prompt = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise<string>((resolve) => prompt.question("A different BOT_TOKEN is already saved. Replace it? Type REPLACE: ", resolve));
+  prompt.close();
+  return answer.trim() === "REPLACE";
+}
+
+async function verifyWithTelegram(token: string): Promise<{ id: number; username: string }> {
+  const response = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+  const body = await response.json() as { ok?: boolean; result?: { id?: number; username?: string }; description?: string };
+  if (!response.ok || !body.ok || !body.result?.id || !body.result.username) throw new Error(`Telegram rejected the bot token: ${body.description ?? response.statusText}`);
+  return { id: body.result.id, username: body.result.username };
+}
+
+export async function runSetup(options: SetupOptions = {}): Promise<{ botId: number; botUsername: string; envPath: string | null }> {
+  const env = options.env ?? process.env;
+  const envPath = options.envPath === undefined ? path.resolve(process.cwd(), ".env") : options.envPath;
+  let existing: Record<string, string> = {};
+  if (envPath && await exists(envPath)) existing = dotenv.parse(await readFile(envPath));
+  let token = env.BOT_TOKEN?.trim() || existing.BOT_TOKEN?.trim();
+  let tokenToPersist = token;
+  if (!token) {
+    if (options.interactive === false) throw new Error("BOT_TOKEN is missing in non-interactive mode. Set it in the environment or run npm run setup in a terminal.");
+    token = (await (options.promptToken ?? hiddenPrompt)()).trim();
+  } else if (env.BOT_TOKEN && existing.BOT_TOKEN && env.BOT_TOKEN !== existing.BOT_TOKEN) {
+    const overwrite = await (options.confirmOverwrite ?? confirmTokenOverwrite)();
+    tokenToPersist = overwrite ? token : existing.BOT_TOKEN;
+  }
+  if (!/^\d{5,}:[A-Za-z0-9_-]{10,}$/.test(token)) throw new Error("BOT_TOKEN has an invalid format. Paste the complete token from BotFather.");
+  const identity = await (options.verifyToken ?? verifyWithTelegram)(token);
+  const output = options.writeOutput ?? console.log;
+  output(`Verified bot: @${identity.username} (${identity.id})`);
+  if (envPath) {
+    const values = { ...existing, BOT_TOKEN: tokenToPersist ?? token, DATABASE_URL: env.DATABASE_URL ?? existing.DATABASE_URL ?? "file:./data/support.db", LOG_LEVEL: env.LOG_LEVEL ?? existing.LOG_LEVEL ?? "info" };
+    const lines = Object.entries(values).filter(([, value]) => value !== undefined).map(([key, value]) => `${key}=${value}`).join("\n") + "\n";
+    const temporary = `${envPath}.${process.pid}.tmp`;
+    await writeFile(temporary, lines, { mode: 0o600 });
+    await rename(temporary, envPath);
+    try { await chmod(envPath, 0o600); } catch { /* Windows may not implement POSIX modes. */ }
+  }
+  output("Local configuration is ready.");
+  return { botId: identity.id, botUsername: identity.username, envPath: envPath || null };
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+  runSetup().catch((error) => { console.error(error instanceof Error ? error.message : "Setup failed."); process.exitCode = 1; });
+}

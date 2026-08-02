@@ -7,7 +7,7 @@ A Telegram-native support desk that turns private user messages into structured 
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-7A3E9D.svg)](LICENSE)
 
-Version: `1.2.5`
+Version: `1.2.6` (v1.3.0 phase 1 development branch)
 
 Users contact the bot in private chat, while staff work entirely in a dedicated Telegram forum supergroup. Each ticket receives its own topic, Quick Replies speed up routine responses, and closed conversations are archived as text transcripts in Support Logs.
 
@@ -43,29 +43,17 @@ flowchart LR
 git clone https://github.com/mikhail494/telegram-ticket-system.git
 cd telegram-ticket-system
 npm install
-```
-
-Create a local environment file, then configure the values described in [Environment Variables](#environment-variables):
-
-```bash
-# macOS/Linux
-cp .env.example .env
-
-# Windows PowerShell
-Copy-Item .env.example .env
-```
-
-Start the bot in development mode:
-
-```bash
+npm run setup
 npm run dev
 ```
 
-Before starting it, create a Telegram supergroup with Topics enabled, add the bot as an administrator, and set `STAFF_CHAT_ID` to that group. The full setup is below.
+`npm run setup` securely prompts for the BotFather token, validates it with Telegram, and atomically creates an ignored local `.env`. The token is masked and never printed. Open the one-use OWNER link shown by the bot, then select the staff forum group by title through Telegram's native picker. New installations do not enter numeric chat IDs.
+
+Explicit process environment variables take precedence over `.env`; existing `.env` deployments remain compatible. For owner recovery, run `npm run owner:recover` locally. The current OWNER remains active until the transfer is explicitly confirmed in the private bot UI.
 
 ## Ticket Workflow
 
-`STAFF_CHAT_ID` must be a Telegram supergroup with Topics enabled.
+The configured staff workspace must be a Telegram supergroup with Topics enabled. `STAFF_CHAT_ID` remains an optional legacy import value.
 
 1. A user sends the bot a private message.
 2. The bot creates one ticket row and one forum topic.
@@ -206,9 +194,26 @@ Primary moderation controls are `/moderation status`, `/moderation target <chat_
 
 Entity-notification controls are `/questnotify status`, `/questnotify target <chat_id>`, `/questnotify provider <provider_key>`, `/questnotify enable`, `/questnotify disable`, and `/questnotify help`.
 
-`/help` is context-aware. On first use of a new `STAFF_CHAT_ID`, the bot also posts one onboarding message to the staff group's main topic. The marker is stored per staff chat, so a different configured group receives its own onboarding message.
+`/help` is context-aware. A newly configured guided workspace receives one staff onboarding message after activation; legacy imports preserve their existing onboarding marker and do not resend migration-time onboarding.
+
+### Team Roles And Cutover
+
+- `OWNER`: full configuration and team control; exactly one active OWNER.
+- `ADMIN`: operational configuration, batch operations, bans, and management of SENIOR_AGENT/AGENT.
+- `SENIOR_AGENT`: ticket work, closure, and senior ban tools.
+- `AGENT`: ticket replies, Quick Replies, status, and closure.
+
+Invitations are hashed, one-use, 30-minute private deep links. Invitees must also join the configured staff workspace. Before RBAC activation, a legacy installation keeps its current trusted-group behavior even after OWNER pairing. After explicit OWNER confirmation, both an assigned application role and staff-group membership are required. Private staff dashboards include `Open test ticket as user`; ordinary staff text cannot accidentally create tickets or change configuration.
+
+Phase 1 keeps public-chat management and batch delivery in their current group-command workflows. Multi-public-chat management, topic-aware public moderation, and moving batch operations fully into the private dashboard remain later work.
 
 ## Telegram Setup
+
+### Guided Owner Setup
+
+On first startup the console prints a 30-minute, one-use OWNER pairing link. The link works only in private chat and only its hash is stored. Pairing starts a durable nine-stage onboarding flow covering bot identity, staff workspace, rights validation, Support Logs, optional public-chat guidance, team roles, summary, and activation. Setup can be exited and resumed after restart.
+
+OWNER pairing does not activate role-based access on legacy installations. Existing trusted-group authorization remains active until the OWNER reviews the retained-role summary and explicitly confirms `Activate role-based access` in private chat.
 
 ### Staff Supergroup
 
@@ -231,28 +236,32 @@ The bot needs Manage topics to create, reopen, close, and delete ticket or Suppo
 2. Copy the issued token into `BOT_TOKEN`.
 3. Keep the token out of source code and Git history.
 
-### Get `STAFF_CHAT_ID`
+### Select The Staff Workspace
 
-After the bot is running in the staff group, run `/chatid` there. The bot replies with the chat ID to place in `STAFF_CHAT_ID`. This command is staff-only and is unavailable in private chat.
+Use the private onboarding button to open Telegram's forum-group picker. The bot validates supergroup/forum status, OWNER administration, bot administration, Manage Topics, Delete Messages, Send Messages, and Pin Messages before storing the workspace. Public `@username` and `t.me/username` references are also accepted. For private invite links, add the bot to the group first and use the picker; setup never asks for a numeric chat ID.
+
+`/chatid` remains available in the configured staff group for diagnostics and legacy automation.
 
 ## Configuration
 
 ### Environment Variables
 
-Create `.env` from `.env.example`:
+Run `npm run setup`, or provide environment variables for automation:
 
 ```bash
 BOT_TOKEN=<telegram-bot-token>
-STAFF_CHAT_ID=<telegram-supergroup-id>
 DATABASE_URL=file:./data/support.db
 LOG_LEVEL=info
+# Optional legacy migration input only:
+STAFF_CHAT_ID=<existing-telegram-supergroup-id>
 ```
 
-Required in Railway and other deployments:
+Required in Railway and other non-interactive deployments:
 
 - `BOT_TOKEN`
-- `STAFF_CHAT_ID`
 - `DATABASE_URL`
+
+`STAFF_CHAT_ID` is optional. When present, it is imported idempotently as the active legacy workspace; Support Logs, tickets, moderation state, archives, batch state, and onboarding markers remain unchanged.
 
 `LOG_LEVEL` is optional. Never commit `.env`; `.env.example` is safe to commit because it contains placeholders only.
 
@@ -269,7 +278,7 @@ npm test
 npm run build
 ```
 
-The current suite contains 168 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, and entity-notification publication behavior.
+The current suite contains 203 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, entity notifications, bootstrap configuration, owner pairing, onboarding, workspace validation, and role authorization.
 
 ## Project Structure
 
@@ -279,6 +288,9 @@ src/db.ts            SQLite schema migrations and persistent ticket, batch, mode
 src/ticketBatch.ts   Ticket export and answer-package validation/apply workflow
 src/languageModeration.ts  Public English-only moderation and recovery logic
 src/entityNotifications.ts Generic created-event validation, rendering, and publication state
+src/installation.ts   Setup state, workspaces, OWNER pairing, team roles, invitations, and authorization
+src/workspaceValidation.ts  Telegram forum-group and administrator-rights validation
+src/setup.ts          Local token bootstrap and atomic ignored configuration writer
 config/              Editable Quick Replies template configuration
 test/                Node test suites and Telegram API harness
 .github/workflows/   Continuous integration workflow
@@ -305,7 +317,7 @@ docker run --env-file .env -e DATABASE_URL=file:/data/support.db -v support-data
 1. Push the repository to GitHub and create a Railway project from it.
 2. Use the included Dockerfile.
 3. Add a volume mounted at `/data`.
-4. Set `BOT_TOKEN`, `STAFF_CHAT_ID`, `DATABASE_URL=file:/data/support.db`, and optionally `LOG_LEVEL=info`.
+4. Set `BOT_TOKEN`, `DATABASE_URL=file:/data/support.db`, and optionally `LOG_LEVEL=info`. Existing deployments may keep legacy `STAFF_CHAT_ID`.
 5. Deploy one replica only.
 
 Long polling must not run from multiple replicas simultaneously. SQLite needs the Railway volume to survive restarts.
@@ -313,11 +325,13 @@ Long polling must not run from multiple replicas simultaneously. SQLite needs th
 ## Security Model
 
 - Never commit `.env` or log `BOT_TOKEN`.
-- Treat every participant who can interact in `STAFF_CHAT_ID` as trusted staff. They can reply to users, change ticket status, close tickets, ban or unban users, and configure Support Logs.
+- Legacy mode treats every participant in the configured staff workspace as trusted staff. Pair the OWNER and assign roles before explicitly activating RBAC.
+- RBAC mode requires both configured staff-workspace membership and an active application role. Telegram administrator status is not an application role.
+- Pairing and invitation tokens are random, expiring, one-use, and stored only as hashes. Keep console setup links private.
 - Ticket exports contain complete support data and must remain inside the trusted staff chat.
 - Public moderation requires delete, restrict, and ban permissions in its configured target chat; its sanctions remain separate from private support bans.
 - Entity notification publication requires an authoritative, available provider and an explicitly configured target.
-- Point `STAFF_CHAT_ID` only at a controlled staff group.
+- Select only a controlled staff workspace; `STAFF_CHAT_ID` is a legacy compatibility input.
 - Keep SQLite on persistent storage and review staff access before making the repository public.
 - Support Logs is the durable archive; the bot does not download or duplicate user media into application storage.
 
@@ -327,9 +341,9 @@ Long polling must not run from multiple replicas simultaneously. SQLite needs th
 
 Check network stability, restart the process, and make sure only one bot replica is running.
 
-### Wrong `STAFF_CHAT_ID`
+### Wrong staff workspace
 
-Staff commands and callbacks work only in `STAFF_CHAT_ID`. Confirm it with `/chatid` in the configured staff group.
+Staff commands and callbacks work only in the configured workspace. Confirm it with `/chatid`; legacy deployments can correct `STAFF_CHAT_ID`, while guided installations should resume OWNER setup and select the group again.
 
 ### The bot does not create ticket topics
 

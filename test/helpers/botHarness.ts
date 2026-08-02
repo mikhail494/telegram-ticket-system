@@ -4,6 +4,7 @@ import type { Update, User, UserFromGetMe } from "grammy/types";
 import type { QuickRepliesRegistry } from "../../src/quickReplies.js";
 import type { ModerationCleanupScheduler } from "../../src/languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "../../src/entityNotifications.js";
+import type { InstallationService } from "../../src/installation.js";
 import type {
   SupportDatabase as SupportDatabaseType,
   TicketStatus,
@@ -124,6 +125,7 @@ export interface BotHarnessOptions {
   moderationNow?: () => Date;
   scheduleModerationCleanup?: ModerationCleanupScheduler;
   entityNotificationProviders?: EntityNotificationProviderRegistry;
+  installationServiceFactory?: (db: SupportDatabaseType) => InstallationService;
 }
 
 export interface BotHarness {
@@ -154,6 +156,7 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
   const scheduleCleanup: ModerationCleanupScheduler = options.scheduleModerationCleanup ?? ((_api, _db, jobId) => {
     scheduledModerationCleanupJobIds.push(jobId);
   });
+  const installationService = options.installationServiceFactory?.(db);
   const bot = createBot(db, registry, {
     fetch: async (input) => {
       const pathname = new URL(String(input)).pathname;
@@ -174,6 +177,7 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
     now: options.moderationNow,
     scheduleModerationCleanup: scheduleCleanup,
     entityNotificationProviders: options.entityNotificationProviders,
+    installationService,
     staffChatDelivery: { minimumIntervalMs: 0, sleep: async () => undefined }
   });
   const apiCalls: RecordedApiCall[] = [];
@@ -465,6 +469,18 @@ function createDefaultSuccessResponse(
 ): ApiMockSuccess {
   if (method === "getMe") {
     return { ok: true, result: TEST_BOT_IDENTITY };
+  }
+
+  if (method === "getChat") {
+    const chatId = payload.chat_id;
+    return { ok: true, result: { id: typeof chatId === "number" ? chatId : -100900, type: "supergroup", title: "Test Staff Chat", username: "test_staff_chat", is_forum: true } };
+  }
+
+  if (method === "getChatMember") {
+    const userId = numericPayloadValue(payload, "user_id");
+    return { ok: true, result: userId === TEST_BOT_IDENTITY.id
+      ? { status: "administrator", user: TEST_BOT_IDENTITY, can_be_edited: false, is_anonymous: false, can_manage_chat: true, can_delete_messages: true, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: false, can_change_info: false, can_invite_users: true, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_post_messages: false, can_edit_messages: false, can_pin_messages: true, can_manage_topics: true }
+      : { status: "administrator", user: { id: userId, is_bot: false, first_name: "Owner" }, can_be_edited: true, is_anonymous: false, can_manage_chat: true, can_delete_messages: true, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: true, can_change_info: true, can_invite_users: true, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_post_messages: false, can_edit_messages: false, can_pin_messages: true, can_manage_topics: true } };
   }
 
   if (method === "sendMessage" || method === "sendDocument") {

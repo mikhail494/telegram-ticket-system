@@ -6,6 +6,37 @@ import type { DeliveryErrorCategory, DeliveryErrorPermanence, NormalizedDelivery
 export type TicketStatus = "OPEN" | "WAITING_USER" | "IN_PROGRESS" | "CLOSED";
 export type MessageDirection = "USER_TO_STAFF" | "STAFF_TO_USER" | "SYSTEM";
 export type MessageSenderType = "USER" | "STAFF" | "SYSTEM";
+export type InstallationSetupState = "SETUP_REQUIRED" | "READY";
+export type AuthorizationMode = "LEGACY_TRUSTED_GROUP" | "RBAC_ACTIVE";
+export type TeamRole = "OWNER" | "ADMIN" | "SENIOR_AGENT" | "AGENT";
+
+export interface InstallationStateRecord {
+  setup_state: InstallationSetupState;
+  authorization_mode: AuthorizationMode;
+  active_workspace_id: number | null;
+  updated_at: string;
+}
+
+export interface WorkspaceRecord {
+  id: number; telegram_chat_id: number; title: string | null; username: string | null;
+  active: number; imported_from_legacy: number; created_at: string; updated_at: string;
+}
+
+export interface TeamMemberRecord {
+  user_telegram_id: number; username: string | null; display_name: string | null;
+  role: TeamRole; active: number; added_by: number | null; created_at: string; updated_at: string;
+}
+
+export interface SecureTokenRecord {
+  id: number; token_hash: string; kind: "OWNER_PAIRING" | "OWNER_RECOVERY" | "TEAM_INVITE";
+  role: TeamRole | null; created_by: number | null; claimed_by: number | null;
+  expires_at: string; consumed_at: string | null; created_at: string;
+}
+
+export interface OnboardingSessionRecord {
+  user_telegram_id: number; stage: string; state: string; candidate_chat_id: number | null;
+  primary_message_chat_id: number | null; primary_message_id: number | null; updated_at: string;
+}
 
 export interface UserRecord {
   telegram_id: number;
@@ -1392,6 +1423,159 @@ export class SupportDatabase {
       .run(key, value, now());
   }
 
+  getInstallationState(): InstallationStateRecord {
+    return this.db.prepare("SELECT setup_state, authorization_mode, active_workspace_id, updated_at FROM installation_state WHERE id = 1")
+      .get() as InstallationStateRecord;
+  }
+
+  setInstallationState(input: Partial<Pick<InstallationStateRecord, "setup_state" | "authorization_mode" | "active_workspace_id">>): void {
+    const current = this.getInstallationState();
+    this.db.prepare(`UPDATE installation_state SET setup_state = ?, authorization_mode = ?, active_workspace_id = ?, updated_at = ? WHERE id = 1`)
+      .run(input.setup_state ?? current.setup_state, input.authorization_mode ?? current.authorization_mode,
+        input.active_workspace_id === undefined ? current.active_workspace_id : input.active_workspace_id, now());
+  }
+
+  upsertWorkspace(input: { telegramChatId: number; title?: string | null; username?: string | null; importedFromLegacy?: boolean }): WorkspaceRecord {
+    const timestamp = now();
+    this.db.prepare(`INSERT INTO workspaces (telegram_chat_id, title, username, active, imported_from_legacy, created_at, updated_at)
+      VALUES (?, ?, ?, 1, ?, ?, ?)
+      ON CONFLICT(telegram_chat_id) DO UPDATE SET title = COALESCE(excluded.title, workspaces.title), username = COALESCE(excluded.username, workspaces.username), active = 1, updated_at = excluded.updated_at`)
+      .run(input.telegramChatId, input.title ?? null, input.username ?? null, input.importedFromLegacy ? 1 : 0, timestamp, timestamp);
+    return this.getWorkspaceByChatId(input.telegramChatId)!;
+  }
+
+  getWorkspaceByChatId(chatId: number): WorkspaceRecord | undefined {
+    return this.db.prepare("SELECT * FROM workspaces WHERE telegram_chat_id = ?").get(chatId) as WorkspaceRecord | undefined;
+  }
+
+  getActiveWorkspace(): WorkspaceRecord | undefined {
+    return this.db.prepare(`SELECT w.* FROM workspaces w JOIN installation_state i ON i.active_workspace_id = w.id WHERE i.id = 1 AND w.active = 1`).get() as WorkspaceRecord | undefined;
+  }
+
+  listWorkspaces(): WorkspaceRecord[] {
+    return this.db.prepare("SELECT * FROM workspaces ORDER BY id").all() as WorkspaceRecord[];
+  }
+
+  importManagedPublicChat(chatId: number, workspaceId: number): void {
+    const timestamp = now();
+    this.db.prepare(`INSERT INTO managed_public_chats (chat_id, workspace_id, active, imported_from_legacy, created_at, updated_at)
+      VALUES (?, ?, 1, 1, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET workspace_id = COALESCE(managed_public_chats.workspace_id, excluded.workspace_id), updated_at = excluded.updated_at`)
+      .run(chatId, workspaceId, timestamp, timestamp);
+  }
+
+  getTeamMember(userId: number): TeamMemberRecord | undefined {
+    return this.db.prepare("SELECT * FROM team_members WHERE user_telegram_id = ? AND active = 1").get(userId) as TeamMemberRecord | undefined;
+  }
+
+  listTeamMembers(): TeamMemberRecord[] {
+    return this.db.prepare("SELECT * FROM team_members WHERE active = 1 ORDER BY CASE role WHEN 'OWNER' THEN 0 WHEN 'ADMIN' THEN 1 WHEN 'SENIOR_AGENT' THEN 2 ELSE 3 END, user_telegram_id").all() as TeamMemberRecord[];
+  }
+
+  upsertTeamMember(input: { userId: number; username?: string | null; displayName?: string | null; role: TeamRole; addedBy?: number | null }): void {
+    const timestamp = now();
+    this.db.prepare(`INSERT INTO team_members (user_telegram_id, username, display_name, role, active, added_by, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+      ON CONFLICT(user_telegram_id) DO UPDATE SET username = COALESCE(excluded.username, team_members.username), display_name = COALESCE(excluded.display_name, team_members.display_name), role = excluded.role, active = 1, added_by = excluded.added_by, updated_at = excluded.updated_at`)
+      .run(input.userId, input.username ?? null, input.displayName ?? null, input.role, input.addedBy ?? null, timestamp, timestamp);
+  }
+
+  revokeTeamMember(userId: number): boolean {
+    return this.db.prepare("UPDATE team_members SET active = 0, updated_at = ? WHERE user_telegram_id = ? AND active = 1 AND role != 'OWNER'").run(now(), userId).changes > 0;
+  }
+
+  transferOwner(newOwnerId: number): void {
+    this.db.transaction(() => {
+      const oldOwner = this.db.prepare("SELECT user_telegram_id FROM team_members WHERE role = 'OWNER' AND active = 1").get() as { user_telegram_id: number } | undefined;
+      if (!oldOwner) throw new Error("An active owner is required for transfer.");
+      const timestamp = now();
+      this.db.prepare("UPDATE team_members SET role = 'ADMIN', updated_at = ? WHERE user_telegram_id = ?").run(timestamp, oldOwner.user_telegram_id);
+      this.db.prepare(`INSERT INTO team_members (user_telegram_id, role, active, created_at, updated_at) VALUES (?, 'OWNER', 1, ?, ?)
+        ON CONFLICT(user_telegram_id) DO UPDATE SET role = 'OWNER', active = 1, updated_at = excluded.updated_at`).run(newOwnerId, timestamp, timestamp);
+    })();
+  }
+
+  invalidateUnconsumedTokens(kind: SecureTokenRecord["kind"]): void {
+    this.db.prepare("UPDATE secure_setup_tokens SET consumed_at = ? WHERE kind = ? AND consumed_at IS NULL").run(now(), kind);
+  }
+
+  insertSecureToken(input: { tokenHash: string; kind: SecureTokenRecord["kind"]; role?: TeamRole | null; createdBy?: number | null; expiresAt: string }): void {
+    this.db.prepare(`INSERT INTO secure_setup_tokens (token_hash, kind, role, created_by, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(input.tokenHash, input.kind, input.role ?? null, input.createdBy ?? null, input.expiresAt, now());
+  }
+
+  listUnconsumedTokens(kind?: SecureTokenRecord["kind"]): SecureTokenRecord[] {
+    return (kind
+      ? this.db.prepare("SELECT * FROM secure_setup_tokens WHERE kind = ? AND consumed_at IS NULL").all(kind)
+      : this.db.prepare("SELECT * FROM secure_setup_tokens WHERE consumed_at IS NULL").all()) as SecureTokenRecord[];
+  }
+
+  consumeOwnerTokenAndCreateOwner(tokenId: number, user: UserInput, at: string): "PAIRED" | "TRANSFER_PENDING" | "INVALID" {
+    return this.db.transaction(() => {
+      const token = this.db.prepare("SELECT * FROM secure_setup_tokens WHERE id = ? AND consumed_at IS NULL AND expires_at > ?").get(tokenId, at) as SecureTokenRecord | undefined;
+      if (!token || (token.kind !== "OWNER_PAIRING" && token.kind !== "OWNER_RECOVERY")) return "INVALID";
+      const existing = this.db.prepare("SELECT user_telegram_id FROM team_members WHERE role = 'OWNER' AND active = 1").get() as { user_telegram_id: number } | undefined;
+      const timestamp = now();
+      this.db.prepare("UPDATE secure_setup_tokens SET consumed_at = ?, claimed_by = ? WHERE id = ? AND consumed_at IS NULL").run(timestamp, user.telegramId, tokenId);
+      this.upsertUser(user);
+      if (existing) {
+        this.db.prepare("INSERT OR REPLACE INTO owner_transfer_confirmations (claimant_telegram_id, token_id, created_at) VALUES (?, ?, ?)").run(user.telegramId, tokenId, timestamp);
+        return "TRANSFER_PENDING";
+      }
+      this.upsertTeamMember({ userId: user.telegramId, username: user.username, displayName: [user.firstName, user.lastName].filter(Boolean).join(" ") || null, role: "OWNER" });
+      this.db.prepare("UPDATE secure_setup_tokens SET consumed_at = ? WHERE kind IN ('OWNER_PAIRING','OWNER_RECOVERY') AND consumed_at IS NULL").run(timestamp);
+      return "PAIRED";
+    })();
+  }
+
+  invalidateTokenAndAssignMember(tokenId: number, user: UserInput, role: TeamRole, at: string): void {
+    this.db.transaction(() => {
+      const token = this.db.prepare("SELECT id FROM secure_setup_tokens WHERE id = ? AND kind = 'TEAM_INVITE' AND consumed_at IS NULL AND expires_at > ?").get(tokenId, at);
+      if (!token) throw new Error("Invitation is no longer available.");
+      this.upsertUser(user);
+      this.upsertTeamMember({ userId: user.telegramId, username: user.username, displayName: [user.firstName, user.lastName].filter(Boolean).join(" ") || null, role });
+      this.db.prepare("UPDATE secure_setup_tokens SET consumed_at = ?, claimed_by = ? WHERE id = ? AND consumed_at IS NULL").run(now(), user.telegramId, tokenId);
+    })();
+  }
+
+  hasPendingOwnerTransfer(userId: number): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM owner_transfer_confirmations WHERE claimant_telegram_id = ?").get(userId));
+  }
+
+  confirmOwnerTransfer(userId: number): void {
+    this.db.transaction(() => {
+      if (!this.hasPendingOwnerTransfer(userId)) throw new Error("No pending owner transfer exists.");
+      this.transferOwner(userId);
+      this.db.prepare("DELETE FROM owner_transfer_confirmations").run();
+    })();
+  }
+
+  saveOnboardingSession(userId: number, stage: string, state = "ACTIVE", candidateChatId?: number | null): void {
+    this.db.prepare(`INSERT INTO onboarding_sessions (user_telegram_id, stage, state, candidate_chat_id, updated_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(user_telegram_id) DO UPDATE SET stage = excluded.stage, state = excluded.state, candidate_chat_id = COALESCE(excluded.candidate_chat_id, onboarding_sessions.candidate_chat_id), updated_at = excluded.updated_at`)
+      .run(userId, stage, state, candidateChatId ?? null, now());
+  }
+
+  getOnboardingSession(userId: number): OnboardingSessionRecord | undefined {
+    return this.db.prepare("SELECT * FROM onboarding_sessions WHERE user_telegram_id = ?").get(userId) as OnboardingSessionRecord | undefined;
+  }
+
+  setOnboardingPrimaryMessage(userId: number, chatId: number, messageId: number): void {
+    this.db.prepare("UPDATE onboarding_sessions SET primary_message_chat_id = ?, primary_message_id = ?, updated_at = ? WHERE user_telegram_id = ?")
+      .run(chatId, messageId, now(), userId);
+  }
+
+  getInstallationOperationalCounts(): { publicChats: number; moderationEnabled: number; pendingCleanup: number; pendingArchives: number; pendingBatchStaffOperations: number } {
+    const scalar = (sql: string): number => (this.db.prepare(sql).get() as { count: number }).count;
+    const moderationEnabled = this.getSetting("language_moderation:enabled") === "true" ? 1 : 0;
+    return {
+      publicChats: scalar("SELECT COUNT(*) AS count FROM managed_public_chats WHERE active = 1"),
+      moderationEnabled,
+      pendingCleanup: scalar("SELECT COUNT(*) AS count FROM language_moderation_cleanup_jobs WHERE state != 'COMPLETED'"),
+      pendingArchives: scalar("SELECT COUNT(*) AS count FROM tickets WHERE status = 'CLOSED' AND archived_at IS NULL"),
+      pendingBatchStaffOperations: scalar("SELECT COUNT(*) AS count FROM ticket_batch_answer_packages WHERE final_summary_state IN ('PENDING','FAILED')")
+    };
+  }
+
   getBannedUser(userTelegramId: number): BannedUserRecord | undefined {
     return this.db
       .prepare("SELECT * FROM banned_users WHERE user_telegram_id = ?")
@@ -1976,6 +2160,85 @@ export class SupportDatabase {
             CREATE INDEX IF NOT EXISTS idx_language_moderation_violations_cycle
               ON language_moderation_violations(chat_id, user_telegram_id, moderation_cycle_id, cleanup_state, message_id);
           `);
+        }
+      },
+      {
+        id: 20,
+        name: "create_guided_installation_and_team_foundation",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS installation_state (
+              id INTEGER PRIMARY KEY CHECK(id = 1),
+              setup_state TEXT NOT NULL CHECK(setup_state IN ('SETUP_REQUIRED','READY')),
+              authorization_mode TEXT NOT NULL CHECK(authorization_mode IN ('LEGACY_TRUSTED_GROUP','RBAC_ACTIVE')),
+              active_workspace_id INTEGER,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(active_workspace_id) REFERENCES workspaces(id)
+            );
+            CREATE TABLE IF NOT EXISTS workspaces (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              telegram_chat_id INTEGER NOT NULL UNIQUE,
+              title TEXT,
+              username TEXT,
+              active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+              imported_from_legacy INTEGER NOT NULL DEFAULT 0 CHECK(imported_from_legacy IN (0,1)),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_members (
+              user_telegram_id INTEGER PRIMARY KEY,
+              username TEXT,
+              display_name TEXT,
+              role TEXT NOT NULL CHECK(role IN ('OWNER','ADMIN','SENIOR_AGENT','AGENT')),
+              active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+              added_by INTEGER,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_installation_owner
+              ON team_members(role) WHERE role = 'OWNER' AND active = 1;
+            CREATE TABLE IF NOT EXISTS secure_setup_tokens (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              token_hash TEXT NOT NULL UNIQUE,
+              kind TEXT NOT NULL CHECK(kind IN ('OWNER_PAIRING','OWNER_RECOVERY','TEAM_INVITE')),
+              role TEXT CHECK(role IN ('OWNER','ADMIN','SENIOR_AGENT','AGENT')),
+              created_by INTEGER,
+              claimed_by INTEGER,
+              expires_at TEXT NOT NULL,
+              consumed_at TEXT,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_secure_setup_tokens_active
+              ON secure_setup_tokens(kind, consumed_at, expires_at);
+            CREATE TABLE IF NOT EXISTS owner_transfer_confirmations (
+              claimant_telegram_id INTEGER PRIMARY KEY,
+              token_id INTEGER NOT NULL UNIQUE,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(token_id) REFERENCES secure_setup_tokens(id)
+            );
+            CREATE TABLE IF NOT EXISTS onboarding_sessions (
+              user_telegram_id INTEGER PRIMARY KEY,
+              stage TEXT NOT NULL,
+              state TEXT NOT NULL CHECK(state IN ('ACTIVE','EXITED','COMPLETED')),
+              candidate_chat_id INTEGER,
+              primary_message_chat_id INTEGER,
+              primary_message_id INTEGER,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS managed_public_chats (
+              chat_id INTEGER PRIMARY KEY,
+              workspace_id INTEGER,
+              title TEXT,
+              username TEXT,
+              active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+              imported_from_legacy INTEGER NOT NULL DEFAULT 0 CHECK(imported_from_legacy IN (0,1)),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+            );
+          `);
+          this.db.prepare(`INSERT OR IGNORE INTO installation_state (id, setup_state, authorization_mode, active_workspace_id, updated_at)
+            VALUES (1, 'SETUP_REQUIRED', 'LEGACY_TRUSTED_GROUP', NULL, ?)`).run(now());
         }
       }
     ];

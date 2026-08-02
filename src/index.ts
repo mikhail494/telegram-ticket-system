@@ -1,4 +1,4 @@
-import { config } from "./config.js";
+import { config, hostConfig, setRuntimeStaffChatId } from "./config.js";
 import { SupportDatabase } from "./db.js";
 import { createBot, sendStaffOnboardingIfNeeded, setBotCommands } from "./bot.js";
 import { logger } from "./logger.js";
@@ -6,6 +6,8 @@ import { archiveClosedTicketsPendingUpload, initializeSupportLogsTopic } from ".
 import { loadQuickRepliesRegistry } from "./quickReplies.js";
 import { processModerationRecovery } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
+import { InstallationService } from "./installation.js";
+import { runWorkspaceStartup } from "./startup.js";
 
 const quickRepliesRegistry = loadQuickRepliesRegistry();
 const quickReplyCategories = quickRepliesRegistry.listCategories();
@@ -19,17 +21,28 @@ logger.info(
 );
 
 const db = new SupportDatabase(config.databaseUrl);
+const installationService = new InstallationService(db);
+if (hostConfig.staffChatId !== null) installationService.adoptLegacyInstallation(hostConfig.staffChatId);
+setRuntimeStaffChatId(installationService.getStaffChatId());
 const entityNotificationProviders: EntityNotificationProviderRegistry = new Map();
-const bot = createBot(db, quickRepliesRegistry, { entityNotificationProviders });
+const bot = createBot(db, quickRepliesRegistry, { entityNotificationProviders, installationService });
 
 async function main(): Promise<void> {
   await bot.api.deleteWebhook({ drop_pending_updates: false });
-  await initializeSupportLogsTopic(bot.api, db);
-  await archiveClosedTicketsPendingUpload(bot.api, db);
-  await processModerationRecovery(bot.api, db);
-  await bot.recoverPendingTicketBatchStaffOperations();
-  await setBotCommands(bot);
-  await sendStaffOnboardingIfNeeded(bot.api, db);
+  const botInfo = await bot.api.getMe();
+  bot.botInfo = botInfo;
+  await runWorkspaceStartup(installationService, {
+    initializeSupportLogs: () => initializeSupportLogsTopic(bot.api, db).then(() => undefined),
+    recoverArchives: () => archiveClosedTicketsPendingUpload(bot.api, db).then(() => undefined),
+    recoverModeration: () => processModerationRecovery(bot.api, db),
+    recoverBatch: () => bot.recoverPendingTicketBatchStaffOperations(),
+    sendLegacyStaffOnboarding: () => sendStaffOnboardingIfNeeded(bot.api, db, installationService)
+  });
+  await setBotCommands(bot, installationService);
+  if (!installationService.getOwner()) {
+    const pairingToken = installationService.createOwnerPairingToken();
+    process.stdout.write(`Owner setup link (expires in 30 minutes): https://t.me/${botInfo.username}?start=setup_${pairingToken}\n`);
+  }
 
   const shutdown = (signal: NodeJS.Signals) => {
     logger.info({ signal }, "Stopping bot");

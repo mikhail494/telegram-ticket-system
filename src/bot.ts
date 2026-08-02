@@ -1,16 +1,17 @@
-import { Bot, GrammyError, HttpError, InlineKeyboard, InputFile } from "grammy";
+import { Bot, GrammyError, HttpError, InlineKeyboard, InputFile, Keyboard } from "grammy";
 import { randomUUID } from "node:crypto";
 import type { CommandContext, Context } from "grammy";
 import type { Message, ReactionTypeEmoji, User } from "grammy/types";
 import {
   archiveTicketIfPossible,
   getSupportLogsTopicInfo,
+  initializeSupportLogsTopic,
   logBanEvent,
   setSupportLogsTopicOverride,
   type SupportLogsTopicInfo,
   type ArchiveActor
 } from "./archive.js";
-import { config } from "./config.js";
+import { config, hostConfig, setRuntimeStaffChatId } from "./config.js";
 import {
   SupportDatabase,
   type TicketBatchAnswerItemRecord,
@@ -66,6 +67,8 @@ import {
   type NormalizedDeliveryError
 } from "./deliveryDiagnostics.js";
 import { StaffChatDeliveryCoordinator, type StaffChatDeliveryOptions } from "./staffChatDelivery.js";
+import { InstallationService, type Permission } from "./installation.js";
+import { formatWorkspaceChecklist, isPrivateInviteLink, parsePublicSupergroupReference, validateStaffWorkspace } from "./workspaceValidation.js";
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
@@ -79,6 +82,8 @@ const pendingWarningTimers = new Map<number, ReturnType<typeof setTimeout>>();
 type ModerationReactionEmoji = "\u{1F440}" | "\u{1F621}";
 const MODERATION_STRIKE_REACTION: ModerationReactionEmoji = "\u{1F440}";
 const MODERATION_SANCTION_REACTION: ModerationReactionEmoji = "\u{1F621}";
+const installationServicesByApi = new WeakMap<object, InstallationService>();
+const installationServicesByContext = new WeakMap<Context, InstallationService>();
 
 const USER_HELP_TEXT = [
   "Support help",
@@ -124,7 +129,9 @@ const STAFF_HELP_TEXT = [
   "/exporttickets - export active tickets for an answer package",
   "Upload a validated answer package in the staff group to preview and apply its replies.",
   "/moderation <subcommand> - configure public English-only moderation",
-  "/questnotify <subcommand> - configure new-entity notifications"
+  "/questnotify <subcommand> - configure new-entity notifications",
+  "",
+  "OWNER/ADMIN setup, team invitations, and role-based access are managed from the private staff dashboard."
 ].join("\n");
 
 const STAFF_ONBOARDING_TEXT = [
@@ -194,6 +201,7 @@ interface BotRuntimeDependencies {
   scheduleModerationCleanup?: ModerationCleanupScheduler;
   entityNotificationProviders?: EntityNotificationProviderRegistry;
   staffChatDelivery?: StaffChatDeliveryOptions;
+  installationService?: InstallationService;
 }
 
 export type SupportBot = Bot<Context> & { recoverPendingTicketBatchStaffOperations(): Promise<void> };
@@ -204,6 +212,15 @@ export function createBot(
   runtime: BotRuntimeDependencies = {}
 ): SupportBot {
   const bot = new Bot<Context>(config.botToken);
+  const installation = runtime.installationService ?? new InstallationService(db);
+  if (!runtime.installationService && !installation.getActiveWorkspace()) {
+    if (hostConfig.staffChatId !== null) { installation.adoptLegacyInstallation(hostConfig.staffChatId); setRuntimeStaffChatId(hostConfig.staffChatId); }
+  }
+  installationServicesByApi.set(bot.api, installation);
+  bot.use(async (ctx, next) => {
+    installationServicesByContext.set(ctx, installation);
+    await next();
+  });
   const fetchImpl = runtime.fetch ?? globalThis.fetch;
   const moderationNow = runtime.now ?? (() => new Date());
   const moderationCleanupScheduler = runtime.scheduleModerationCleanup ?? scheduleModerationCleanup;
@@ -213,6 +230,13 @@ export function createBot(
   let ticketBatchRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   let ticketBatchRecoveryTimerAt: number | undefined;
   let ticketBatchRecoveryQueue: Promise<void> = Promise.resolve();
+
+  const requirePermission = async (ctx: Context, permission: Permission): Promise<boolean> => {
+    if (!isStaffChat(ctx) || !ctx.from) return false;
+    if (installation.getState().authorizationMode === "LEGACY_TRUSTED_GROUP" || installation.can(ctx.from.id, permission)) return true;
+    await ctx.reply(`Your application role does not allow this action (${permission.toLowerCase().replaceAll("_", " ")}).`);
+    return false;
+  };
 
   class StaffOnlyDeliveryError extends Error {
     constructor(readonly diagnostic: NormalizedDeliveryError, readonly retryAt: string | null) {
@@ -629,20 +653,100 @@ export function createBot(
     });
   }
 
+  function dashboardText(userId: number): string {
+    const member = installation.getMember(userId);
+    const workspace = installation.getActiveWorkspace();
+    const counts = db.getInstallationOperationalCounts();
+    const roles = new Map<string, number>();
+    for (const entry of installation.listTeamMembers()) roles.set(entry.role, (roles.get(entry.role) ?? 0) + 1);
+    return [member?.role === "OWNER" ? "Owner dashboard" : `${member?.role.replace("_", " ") ?? "Staff"} dashboard`, "",
+      `Bot: @${bot.botInfo?.username ?? "loading"}`, "Version: 1.2.6", `Setup: ${installation.getState().setupState}`,
+      `Authorization: ${installation.getState().authorizationMode}`, `Owner: ${installation.getOwner()?.username ? `@${installation.getOwner()?.username}` : installation.getOwner()?.userTelegramId ?? "not paired"}`,
+      `Staff workspace: ${workspace?.title ?? workspace?.telegram_chat_id ?? "not configured"}`,
+      `Support Logs: ${workspace && db.getSetting(`support_logs_thread_id:${workspace.telegram_chat_id}`) ? "configured" : "not configured"}`,
+      `Public chats: ${counts.publicChats}`, `Team: OWNER ${roles.get("OWNER") ?? 0}, ADMIN ${roles.get("ADMIN") ?? 0}, SENIOR_AGENT ${roles.get("SENIOR_AGENT") ?? 0}, AGENT ${roles.get("AGENT") ?? 0}`,
+      `Moderation enabled: ${counts.moderationEnabled}`, `Pending moderation cleanup: ${counts.pendingCleanup}`, `Pending archives: ${counts.pendingArchives}`,
+      `Pending batch staff operations: ${counts.pendingBatchStaffOperations}`, "Database: available"].join("\n");
+  }
+
+  function dashboardKeyboard(role: string): InlineKeyboard {
+    const keyboard = new InlineKeyboard();
+    if (role === "OWNER" || role === "ADMIN") keyboard.text("Setup", "setup:resume").text("Staff workspace", "setup:workspace").row().text("Public chats", "dashboard:public").text("Team", "dashboard:team").row().text("Moderation", "dashboard:moderation").text("Batch operations", "dashboard:batch").row().text("System status", "dashboard:status").row();
+    return keyboard.text("Open test ticket as user", "dashboard:test-ticket");
+  }
+
+  async function showDashboard(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+    const member = installation.getMember(ctx.from.id);
+    if (member) await ctx.reply(dashboardText(ctx.from.id), { reply_markup: dashboardKeyboard(member.role) });
+  }
+
+  const onboardingStages = ["WELCOME", "BOT_IDENTITY", "STAFF_WORKSPACE", "WORKSPACE_PERMISSIONS", "SUPPORT_LOGS", "PUBLIC_CHAT", "TEAM_ROLES", "SUMMARY", "ACTIVATE_SUPPORT"] as const;
+  async function showOnboarding(ctx: Context, stage: (typeof onboardingStages)[number]): Promise<void> {
+    if (!ctx.from) return;
+    installation.saveOnboardingStage(ctx.from.id, stage);
+    const copy: Record<(typeof onboardingStages)[number], string> = {
+      WELCOME: "Welcome. Host secrets stay local; product configuration is stored in SQLite.", BOT_IDENTITY: `Bot identity verified: @${bot.botInfo?.username ?? "bot"}.`,
+      STAFF_WORKSPACE: "Select the Telegram forum supergroup that staff will use.", WORKSPACE_PERMISSIONS: "The selected workspace must pass every permissions check.",
+      SUPPORT_LOGS: "Support Logs will be validated or initialized after the workspace is accepted.", PUBLIC_CHAT: "Public-chat moderation is optional and can be configured later.",
+      TEAM_ROLES: "Invite team roles before activating role-based access.", SUMMARY: "Review the workspace and team. Legacy trusted-group access remains active until explicit activation.",
+      ACTIVATE_SUPPORT: "Activate support when the mandatory workspace is ready."
+    };
+    const index = onboardingStages.indexOf(stage); const keyboard = new InlineKeyboard();
+    if (index > 0) keyboard.text("Back", `setup:stage:${onboardingStages[index - 1]}`).row();
+    if (stage === "STAFF_WORKSPACE") {
+      if (installation.getActiveWorkspace()?.imported_from_legacy) keyboard.text("Use existing staff workspace", "setup:use-existing").row();
+      keyboard.text("Choose staff workspace", "setup:workspace").row();
+    }
+    else if (stage === "ACTIVATE_SUPPORT") keyboard.text("Activate support", "setup:activate").row();
+    else keyboard.text("Continue", `setup:stage:${onboardingStages[Math.min(index + 1, onboardingStages.length - 1)]}`).row();
+    if (stage === "PUBLIC_CHAT") keyboard.text("Skip optional step", "setup:stage:TEAM_ROLES").row();
+    keyboard.text("Retry", `setup:stage:${stage}`).text("Exit setup", "setup:exit");
+    const text = `Setup ${index + 1}/9\n\n${copy[stage]}`;
+    const callbackMessage = ctx.callbackQuery?.message;
+    if (callbackMessage) {
+      try { await ctx.api.editMessageText(callbackMessage.chat.id, callbackMessage.message_id, text, { reply_markup: keyboard }); installation.setOnboardingPrimaryMessage(ctx.from.id, callbackMessage.chat.id, callbackMessage.message_id); return; }
+      catch (error) { if (!(error instanceof GrammyError && error.description.includes("message is not modified"))) logger.warn({ userId: ctx.from.id }, "Could not reuse onboarding message"); }
+    }
+    const sent = await ctx.reply(text, { reply_markup: keyboard });
+    installation.setOnboardingPrimaryMessage(ctx.from.id, sent.chat.id, sent.message_id);
+  }
+
+  async function sendWorkspacePicker(ctx: Context): Promise<void> {
+    const rights = { is_anonymous: false, can_manage_chat: true, can_delete_messages: true, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: false, can_change_info: false, can_invite_users: true, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_post_messages: false, can_edit_messages: false, can_pin_messages: true, can_manage_topics: true };
+    const keyboard = new Keyboard().requestChat("Select forum staff group", 1300, { chat_is_channel: false, chat_is_forum: true, bot_is_member: true, request_title: true, request_username: true, bot_administrator_rights: rights, user_administrator_rights: rights }).resized().oneTime();
+    await ctx.reply("Choose the staff forum group by title. You can also paste a public @username or t.me link.", { reply_markup: keyboard });
+  }
+
   bot.command("start", async (ctx) => {
     if (!isPrivateChat(ctx)) { await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler); return; }
 
     persistUserFromContext(db, ctx);
+    const startParameter = ctx.match.trim();
+    if (startParameter.startsWith("setup_") && ctx.from) {
+      const result = installation.consumeOwnerPairingToken(startParameter.slice(6), { telegramId: ctx.from.id, username: ctx.from.username, firstName: ctx.from.first_name, lastName: ctx.from.last_name });
+      if (result.kind === "PAIRED") { await showOnboarding(ctx, "WELCOME"); return; }
+      if (result.kind === "TRANSFER_CONFIRMATION_REQUIRED") { await ctx.reply("Confirm ownership transfer. The current OWNER remains active until confirmation.", { reply_markup: new InlineKeyboard().text("Confirm ownership transfer", "owner:confirm-transfer") }); return; }
+      await ctx.reply(result.kind === "EXPIRED" ? "This setup link has expired. Generate a new link locally." : "This setup link is invalid or already used."); return;
+    }
+    if (startParameter.startsWith("team_") && ctx.from) {
+      const result = installation.consumeTeamInvitation(startParameter.slice(5), { telegramId: ctx.from.id, username: ctx.from.username, firstName: ctx.from.first_name, lastName: ctx.from.last_name });
+      if (result.kind === "JOINED") { let joined = false; const chatId = installation.getStaffChatId(); if (chatId !== null) { try { const member = await ctx.api.getChatMember(chatId, ctx.from.id); joined = member.status !== "left" && member.status !== "kicked"; } catch {} } await ctx.reply(`Team invitation accepted. Role: ${result.role}.${joined ? "" : " Join the configured staff workspace before using staff commands."}`); await showDashboard(ctx); return; }
+      await ctx.reply(result.kind === "EXPIRED" ? "This team invitation has expired." : "This team invitation is invalid or already used."); return;
+    }
     if (await replyIfBanned(db, ctx)) {
       return;
     }
 
+    if (ctx.from && installation.getMember(ctx.from.id)) { await showDashboard(ctx); return; }
+    if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet. Please try again later."); return; }
     await ctx.reply(START_TEXT);
   });
 
   bot.command("help", async (ctx) => {
     if (isPrivateChat(ctx)) {
-      await ctx.reply(USER_HELP_TEXT);
+      if (ctx.from && installation.getMember(ctx.from.id)) await showDashboard(ctx);
+      else await ctx.reply(installation.getState().setupState === "READY" ? USER_HELP_TEXT : "Support has not been configured yet.");
       return;
     }
 
@@ -680,6 +784,7 @@ export function createBot(
       return;
     }
 
+    if (!await requirePermission(ctx, "SUPPORT_LOGS")) return;
     const messageThreadId = ctx.message?.message_thread_id;
     if (typeof messageThreadId !== "number") {
       await ctx.reply("Please run /setlogs inside the forum topic you want to use as Support Logs.");
@@ -707,6 +812,7 @@ export function createBot(
       return;
     }
 
+    if (!await requirePermission(ctx, "SUPPORT_LOGS")) return;
     const topic = await getSupportLogsTopicInfo(ctx.api, db);
     await ctx.reply(formatSupportLogsTopicInfo(topic), {
       message_thread_id: ctx.message?.message_thread_id
@@ -721,6 +827,7 @@ export function createBot(
       return;
     }
 
+    if (!await requirePermission(ctx, "BATCH_OPERATIONS")) return;
     if (typeof ctx.message?.message_thread_id === "number") {
       await ctx.reply("Please run /exporttickets outside ticket topics.");
       return;
@@ -812,6 +919,7 @@ export function createBot(
 
   bot.command("moderation", async (ctx) => {
     if (!isStaffChat(ctx)) { if (isPrivateChat(ctx)) await ctx.reply(STAFF_ONLY_TEXT); return; }
+    if (!await requirePermission(ctx, "MODERATION_SETTINGS")) return;
     const [, action = "status", ...args] = (ctx.message?.text ?? "").trim().split(/\s+/);
     const current = moderationConfig(db);
     if (action === "status") { await ctx.reply(await formatModerationStatus(db, current, ctx.api, bot.botInfo?.id)); return; }
@@ -853,6 +961,7 @@ export function createBot(
       return;
     }
 
+    if (!await requirePermission(ctx, "CONFIGURE_INSTALLATION")) return;
     const [, action = "status", ...args] = (ctx.message?.text ?? "").trim().split(/\s+/);
     if (action === "help") {
       await ctx.reply("Usage: /questnotify status | target <chat_id> | provider <provider_key> | enable | disable | help");
@@ -940,6 +1049,7 @@ export function createBot(
       return;
     }
 
+    if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet."); return; }
     persistUserFromContext(db, ctx);
     if (await replyIfBanned(db, ctx)) {
       return;
@@ -959,6 +1069,7 @@ export function createBot(
       return;
     }
 
+    if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet."); return; }
     persistUserFromContext(db, ctx);
     if (await replyIfBanned(db, ctx)) {
       return;
@@ -1022,6 +1133,7 @@ export function createBot(
       return;
     }
 
+    if (!await requirePermission(ctx, "BAN_USERS")) return;
     const command = parseBanCommand(ctx);
     if (!command) {
       await ctx.reply("Usage: /ban USER_ID reason");
@@ -1040,6 +1152,7 @@ export function createBot(
       return;
     }
 
+    if (!await requirePermission(ctx, "BAN_USERS")) return;
     const userId = parseUserId(ctx.match.trim());
     if (!userId) {
       await ctx.reply("Usage: /unban USER_ID");
@@ -1069,6 +1182,7 @@ export function createBot(
       return;
     }
 
+    if (!await requirePermission(ctx, "BAN_USERS")) return;
     const bans = db.listBannedUsers();
     if (!bans.length) {
       await ctx.reply("There are no banned users.");
@@ -1115,6 +1229,76 @@ export function createBot(
     const data = ctx.callbackQuery.data;
     const [namespace] = data.split(":");
 
+    if (namespace === "owner" && data === "owner:confirm-transfer") {
+      if (!isPrivateChat(ctx) || !ctx.from || !db.hasPendingOwnerTransfer(ctx.from.id)) { await ctx.answerCallbackQuery({ text: "No pending owner transfer.", show_alert: true }); return; }
+      installation.confirmOwnerTransfer(ctx.from.id); await ctx.answerCallbackQuery({ text: "Ownership transferred." }); await showOnboarding(ctx, "WELCOME"); return;
+    }
+
+    if (namespace === "setup") {
+      if (!isPrivateChat(ctx) || !ctx.from || !installation.can(ctx.from.id, "CONFIGURE_INSTALLATION")) { await ctx.answerCallbackQuery({ text: "Owner or administrator access required.", show_alert: true }); return; }
+      const [, action, value] = data.split(":");
+      await ctx.answerCallbackQuery();
+      if (action === "workspace") { await sendWorkspacePicker(ctx); return; }
+      if (action === "use-existing") {
+        const workspace = installation.getActiveWorkspace();
+        if (!workspace) { await ctx.reply("No existing staff workspace is available."); return; }
+        const result = await validateStaffWorkspace(ctx.api, workspace.telegram_chat_id, ctx.from.id);
+        if (!result.valid) { await ctx.reply(formatWorkspaceChecklist(result)); return; }
+        setRuntimeStaffChatId(workspace.telegram_chat_id); await initializeSupportLogsTopic(ctx.api, db); await ctx.reply(formatWorkspaceChecklist(result)); await showOnboarding(ctx, "SUPPORT_LOGS"); return;
+      }
+      if (action === "exit") { const stage = installation.getOnboardingSession(ctx.from.id)?.stage as (typeof onboardingStages)[number] | undefined; installation.saveOnboardingStage(ctx.from.id, stage ?? "WELCOME", "EXITED"); await ctx.reply("Setup paused. Use Setup or /start to resume."); return; }
+      if (action === "resume") { const stage = installation.getOnboardingSession(ctx.from.id)?.stage as (typeof onboardingStages)[number] | undefined; await showOnboarding(ctx, stage ?? "WELCOME"); return; }
+      if (action === "stage" && onboardingStages.includes(value as (typeof onboardingStages)[number])) { await showOnboarding(ctx, value as (typeof onboardingStages)[number]); return; }
+      if (action === "activate") {
+        try { const chatId = installation.getStaffChatId(); if (chatId === null) throw new Error("A validated staff workspace is required before activation."); setRuntimeStaffChatId(chatId); await initializeSupportLogsTopic(ctx.api, db); installation.markReady(); installation.saveOnboardingStage(ctx.from.id, "ACTIVATE_SUPPORT", "COMPLETED"); await ctx.reply("Support is active. Role-based access remains unchanged until the OWNER explicitly activates it."); }
+        catch (error) { await ctx.reply(error instanceof Error ? error.message : "Support could not be activated."); }
+        return;
+      }
+      return;
+    }
+
+    if (namespace === "dashboard") {
+      if (!isPrivateChat(ctx) || !ctx.from || !installation.getMember(ctx.from.id)) { await ctx.answerCallbackQuery({ text: "Staff access required.", show_alert: true }); return; }
+      const action = data.split(":")[1]; await ctx.answerCallbackQuery();
+      if (action === "test-ticket") { db.setSetting(`staff_test_ticket_mode:${ctx.from.id}`, "true"); await ctx.reply("Test-ticket mode enabled for your next message. Send harmless test content now."); return; }
+      if (action === "team") {
+        const actorRole = installation.getMember(ctx.from.id)?.role; const keyboard = new InlineKeyboard();
+        if (actorRole === "OWNER") keyboard.text("Invite admin", "team:invite:ADMIN").row();
+        keyboard.text("Invite senior agent", "team:invite:SENIOR_AGENT").text("Invite agent", "team:invite:AGENT").row();
+        for (const member of installation.listTeamMembers().filter((entry) => entry.role !== "OWNER")) {
+          if (actorRole === "OWNER") keyboard.text(`Admin ${member.user_telegram_id}`, `team:set:${member.user_telegram_id}:ADMIN`);
+          keyboard.text(`Senior ${member.user_telegram_id}`, `team:set:${member.user_telegram_id}:SENIOR_AGENT`).text(`Agent ${member.user_telegram_id}`, `team:set:${member.user_telegram_id}:AGENT`).text("Revoke", `team:revoke:${member.user_telegram_id}`).row();
+        }
+        if (actorRole === "OWNER") keyboard.text("Transfer ownership", "team:transfer").row().text("Review RBAC activation", "rbac:preview");
+        await ctx.reply(["Team", ...installation.listTeamMembers().map((entry) => `${entry.role}: ${entry.username ? `@${entry.username}` : entry.user_telegram_id}`)].join("\n"), { reply_markup: keyboard }); return;
+      }
+      if (action === "public") { await ctx.reply("Public chats are available in the next implementation phase. Existing moderation configuration remains active."); return; }
+      if (action === "batch") { await ctx.reply("Batch operations remain available through /exporttickets in the staff workspace."); return; }
+      await showDashboard(ctx); return;
+    }
+
+    if (namespace === "team") {
+      if (!isPrivateChat(ctx) || !ctx.from) { await ctx.answerCallbackQuery({ text: "Private staff dashboard only.", show_alert: true }); return; }
+      const [, action, value, roleValue] = data.split(":");
+      try {
+        if (action === "transfer") { if (installation.getMember(ctx.from.id)?.role !== "OWNER") throw new Error("Only the OWNER can transfer ownership."); const token = installation.createOwnerRecoveryToken(); await ctx.answerCallbackQuery({ text: "Transfer link created." }); await ctx.reply(`One-use ownership transfer link (30 minutes):\nhttps://t.me/${bot.botInfo.username}?start=setup_${token}\n\nThe current OWNER remains active until the recipient confirms.`); return; }
+        if (action === "set") { installation.assignRole(ctx.from.id, Number(value), roleValue as "ADMIN" | "SENIOR_AGENT" | "AGENT"); await ctx.answerCallbackQuery({ text: "Role updated." }); return; }
+        if (action === "revoke") { installation.revokeMember(ctx.from.id, Number(value)); await ctx.answerCallbackQuery({ text: "Member revoked." }); return; }
+        const role = value as "ADMIN" | "SENIOR_AGENT" | "AGENT";
+        const token = installation.createTeamInvitation(ctx.from.id, role); await ctx.answerCallbackQuery({ text: "Invitation created." }); await ctx.reply(`One-use ${role} invitation (30 minutes):\nhttps://t.me/${bot.botInfo.username}?start=team_${token}`);
+      }
+      catch (error) { await ctx.answerCallbackQuery({ text: error instanceof Error ? error.message : "Invitation denied.", show_alert: true }); }
+      return;
+    }
+
+    if (namespace === "rbac") {
+      if (!isPrivateChat(ctx) || !ctx.from || installation.getMember(ctx.from.id)?.role !== "OWNER") { await ctx.answerCallbackQuery({ text: "OWNER access required.", show_alert: true }); return; }
+      const action = data.split(":")[1];
+      if (action === "preview") { const preview = installation.previewRoleBasedAccessActivation(); await ctx.answerCallbackQuery(); await ctx.reply(`Role-based access cutover preview\n\nActive role holders retained: ${preview.activeRoleCount}\nUnassigned staff-group participants will lose staff access.\n\nPairing did not activate this mode. Confirm only after assigning the team.`, { reply_markup: new InlineKeyboard().text("Activate role-based access", `rbac:activate:${preview.confirmationToken}`).row().text("Cancel", "rbac:cancel") }); return; }
+      if (action === "activate") { try { installation.activateRoleBasedAccess(ctx.from.id, data.split(":")[2] ?? ""); await ctx.answerCallbackQuery({ text: "Role-based access activated." }); await showDashboard(ctx); } catch (error) { await ctx.answerCallbackQuery({ text: error instanceof Error ? error.message : "Activation failed.", show_alert: true }); } return; }
+      await ctx.answerCallbackQuery({ text: "Activation cancelled." }); return;
+    }
+
     if (namespace === "user") {
       await handleUserCallback(db, ctx, data);
       return;
@@ -1131,11 +1315,26 @@ export function createBot(
     }
 
     if (namespace === "batch") {
+      if (!ctx.from || !hasApplicationPermission(ctx, "BATCH_OPERATIONS")) { await ctx.answerCallbackQuery({ text: "Batch operations require OWNER or ADMIN.", show_alert: true }); return; }
       await handleTicketBatchCallback(ctx, data);
       return;
     }
 
     await ctx.answerCallbackQuery({ text: "Unknown action." });
+  });
+
+  bot.on("message:chat_shared", async (ctx) => {
+    if (!ctx.from || !isPrivateChat(ctx) || !installation.can(ctx.from.id, "CONFIGURE_INSTALLATION")) return;
+    const shared = ctx.message.chat_shared;
+    if (shared.request_id !== 1300) return;
+    try {
+      const result = await validateStaffWorkspace(ctx.api, shared.chat_id, ctx.from.id);
+      if (!result.valid) { await ctx.reply(`Staff workspace is not ready:\n${formatWorkspaceChecklist(result)}`, { reply_markup: new InlineKeyboard().text("Retry", "setup:workspace") }); return; }
+      installation.activateWorkspace({ chatId: result.chatId, title: result.title ?? shared.title, username: result.username ?? shared.username }); setRuntimeStaffChatId(result.chatId);
+      installation.saveOnboardingStage(ctx.from.id, "WORKSPACE_PERMISSIONS");
+      await initializeSupportLogsTopic(ctx.api, db);
+      await ctx.reply(`Staff workspace validated:\n${formatWorkspaceChecklist(result)}`); await showOnboarding(ctx, "SUPPORT_LOGS");
+    } catch { await ctx.reply("The selected group could not be inspected. Add the bot as administrator, enable Topics, then retry.", { reply_markup: new InlineKeyboard().text("Retry", "setup:workspace") }); }
   });
 
   bot.on("message", async (ctx) => {
@@ -1145,6 +1344,7 @@ export function createBot(
           await ctx.reply("Upload ticket answer packages outside ticket topics.");
           return;
         }
+        if (!await requirePermission(ctx, "BATCH_OPERATIONS")) return;
         await handleTicketAnswerPackageUpload(ctx);
         return;
       }
@@ -1157,6 +1357,18 @@ export function createBot(
       return;
     }
 
+    if (ctx.from && installation.getMember(ctx.from.id) && db.getSetting(`staff_test_ticket_mode:${ctx.from.id}`) !== "true") {
+      const text = ctx.message && "text" in ctx.message ? ctx.message.text : "";
+      const session = installation.getOnboardingSession(ctx.from.id);
+      if (session?.state === "ACTIVE" && session.stage === "STAFF_WORKSPACE" && text) {
+        if (isPrivateInviteLink(text)) { await ctx.reply("The bot cannot inspect an inaccessible private invite link. Add the bot to that group, then use the Telegram group picker.", { reply_markup: new InlineKeyboard().text("Choose group", "setup:workspace") }); return; }
+        const reference = parsePublicSupergroupReference(text);
+        if (reference) { try { const chat = await ctx.api.getChat(reference); const result = await validateStaffWorkspace(ctx.api, chat.id, ctx.from.id); if (!result.valid) { await ctx.reply(formatWorkspaceChecklist(result)); return; } installation.activateWorkspace({ chatId: result.chatId, title: result.title, username: result.username }); setRuntimeStaffChatId(result.chatId); installation.saveOnboardingStage(ctx.from.id, "WORKSPACE_PERMISSIONS"); await initializeSupportLogsTopic(ctx.api, db); await ctx.reply(formatWorkspaceChecklist(result)); await showOnboarding(ctx, "SUPPORT_LOGS"); } catch { await ctx.reply("That public supergroup could not be validated. Check the username and bot permissions."); } return; }
+      }
+      await showDashboard(ctx); return;
+    }
+    if (ctx.from && db.getSetting(`staff_test_ticket_mode:${ctx.from.id}`) === "true") db.setSetting(`staff_test_ticket_mode:${ctx.from.id}`, "false");
+    if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet. Please try again later."); return; }
     if (await replyIfBanned(db, ctx)) {
       return;
     }
@@ -1920,7 +2132,8 @@ export function createBot(
       "Bot failed while processing an update"
     );
 
-    if (ctx.chat?.id === config.staffChatId) {
+    const staffChatId = installationServicesByApi.get(ctx.api)?.getStaffChatId();
+    if (staffChatId !== null && staffChatId !== undefined && ctx.chat?.id === staffChatId) {
       await notifyStaff(
         ctx.api,
         `Bot error while processing update ${ctx.update.update_id}: ${describeError(error.error)}`,
@@ -1934,7 +2147,7 @@ export function createBot(
   return supportBot;
 }
 
-export async function setBotCommands(bot: Bot<Context>): Promise<void> {
+export async function setBotCommands(bot: Bot<Context>, installation?: InstallationService): Promise<void> {
   await bot.api.setMyCommands([
     { command: "start", description: "Start support" },
     { command: "status", description: "Show your latest ticket status" },
@@ -1942,6 +2155,8 @@ export async function setBotCommands(bot: Bot<Context>): Promise<void> {
     { command: "help", description: "Show help" }
   ]);
 
+  const staffChatId = installation?.getStaffChatId() ?? installationServicesByApi.get(bot.api)?.getStaffChatId();
+  if (staffChatId === null || staffChatId === undefined) return;
   await bot.api.setMyCommands(
     [
       { command: "help", description: "Show staff help" },
@@ -1958,22 +2173,24 @@ export async function setBotCommands(bot: Bot<Context>): Promise<void> {
       { command: "logs", description: "Show Support Logs topic status" },
       { command: "setlogs", description: "Use this topic as Support Logs" }
     ],
-    { scope: { type: "chat", chat_id: config.staffChatId } }
+    { scope: { type: "chat", chat_id: staffChatId } }
   );
 }
 
-export async function sendStaffOnboardingIfNeeded(api: BotApi, db: SupportDatabase): Promise<void> {
+export async function sendStaffOnboardingIfNeeded(api: BotApi, db: SupportDatabase, installation?: InstallationService): Promise<void> {
+  const staffChatId = installation?.getStaffChatId() ?? installationServicesByApi.get(api)?.getStaffChatId();
+  if (staffChatId === null || staffChatId === undefined) return;
   const settingKey = staffHelpSentSettingKey();
   if (db.getSetting(settingKey) === "true") {
     return;
   }
 
   try {
-    await api.sendMessage(config.staffChatId, STAFF_ONBOARDING_TEXT);
+    await api.sendMessage(staffChatId, STAFF_ONBOARDING_TEXT);
     db.setSetting(settingKey, "true");
   } catch (error) {
     logger.warn(
-      { err: error, staffChatId: config.staffChatId },
+      { err: error, staffChatId },
       "Could not send staff onboarding message"
     );
   }
@@ -2343,6 +2560,10 @@ async function handleStaffCallback(db: SupportDatabase, ctx: Context, data: stri
   }
 
   if (action === "ban") {
+    if (!ctx.from || !hasApplicationPermission(ctx, "BAN_USERS")) {
+      await ctx.answerCallbackQuery({ text: "Your role cannot ban users.", show_alert: true });
+      return;
+    }
     await banUserForTicket(db, ctx.api, ticket, staffActor(ctx.from), `Banned from ticket #${ticket.id}`);
     await ctx.answerCallbackQuery({ text: `User ${ticket.user_telegram_id} banned.` });
     return;
@@ -3084,7 +3305,18 @@ function isPrivateChat(ctx: Context): boolean {
 }
 
 function isStaffChat(ctx: Context): boolean {
-  return ctx.chat?.id === config.staffChatId;
+  const installation = installationServicesByContext.get(ctx);
+  const staffChatId = installation?.getStaffChatId();
+  if (staffChatId === null || staffChatId === undefined || ctx.chat?.id !== staffChatId) return false;
+  if (!ctx.from) return false;
+  return installation?.isStaffAuthorized(ctx.from.id, staffChatId) ?? false;
+}
+
+function hasApplicationPermission(ctx: Context, permission: Permission): boolean {
+  if (!ctx.from) return false;
+  const installation = installationServicesByContext.get(ctx);
+  if (!installation) return false;
+  return installation.getState().authorizationMode === "LEGACY_TRUSTED_GROUP" || installation.can(ctx.from.id, permission);
 }
 
 function isTicketStatus(value: string | undefined): value is TicketStatus {
