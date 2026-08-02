@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+## [1.2.6] - 2026-08-02
+
+### Fixed
+
+- Replaced unsupported moderation reactions with Telegram-compatible reactions.
+- Added durable per-message cleanup state for moderated messages.
+- Prevented failed deletions from being marked as completed.
+- Added restart-safe recovery for pending moderation cleanup.
+- Bound cleanup jobs to exact moderation cycles.
+- Fixed repeated permanent-ban cleanup after a manual Telegram unban.
+- Prevented duplicate Support Logs events during cleanup retries.
+
+### Database
+
+- Added migrations 18 and 19 for durable cleanup state and exact moderation-cycle binding.
+
 ## [1.2.5] - 2026-08-02
 
 ### Fixed

@@ -1,3 +1,7 @@
+
+import { normalizeTelegramDeliveryError } from "./deliveryDiagnostics.js";
+import { logger } from "./logger.js";
+
 export const DEFAULT_MODERATION_WARNING = "Please use English in the main chat. Further violations may be reviewed by an authorized moderator under the current community policy.";
 
 export interface LanguageModerationConfig {
@@ -113,19 +117,57 @@ export async function processModerationCleanupJob(
   const job = db.getLanguageModerationCleanupJob(jobId);
   if (!job || job.staff_chat_id !== config.staffChatId || job.state === "COMPLETED" || Date.parse(job.cleanup_due_at) > currentTime.getTime()) return;
 
+  if (!job.violation_cycle_id) {
+    logger.warn({ jobId: job.id, chatId: job.chat_id }, "Moderation cleanup job has no immutable violation cycle reference");
+    return;
+  }
+
+  let state = job.state;
+  const cycleId = job.violation_cycle_id;
+
   try {
-    if (job.state === "PENDING" || job.state === "CLEANING") {
+    if (state === "PENDING" || state === "CLEANING" || db.listPendingLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId).length > 0) {
       db.updateLanguageModerationCleanupJob(job.id, "CLEANING");
-      for (const violation of db.listLanguageModerationCycleViolations(job.chat_id, job.user_telegram_id, job.sanction_tier - 1)) {
+      const summary = { attempted: 0, deleted: 0, alreadyAbsent: 0, retryableFailures: 0, terminalFailures: 0 };
+      for (const violation of db.listPendingLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId)) {
+        summary.attempted += 1;
         try {
           await api.deleteMessage(job.chat_id, violation.message_id);
-        } catch {
-          // Cleanup is deliberately best effort; the sanction has already succeeded.
+          db.recordLanguageModerationViolationCleanupResult({ chatId: job.chat_id, userId: job.user_telegram_id, messageId: violation.message_id, state: "DELETED" });
+          summary.deleted += 1;
+        } catch (error) {
+          const diagnostic = normalizeTelegramDeliveryError(error);
+          if (isAlreadyAbsentModerationMessage(diagnostic)) {
+            db.recordLanguageModerationViolationCleanupResult({ chatId: job.chat_id, userId: job.user_telegram_id, messageId: violation.message_id, state: "ALREADY_ABSENT" });
+            summary.alreadyAbsent += 1;
+            continue;
+          }
+
+          const retryable = isRetryableModerationDeletionFailure(diagnostic);
+          db.recordLanguageModerationViolationCleanupResult({
+            chatId: job.chat_id,
+            userId: job.user_telegram_id,
+            messageId: violation.message_id,
+            state: retryable ? "PENDING" : "TERMINAL_FAILED",
+            errorCategory: diagnostic.category,
+            errorCode: diagnostic.telegramErrorCode,
+            errorDescription: diagnostic.description
+          });
+          if (retryable) summary.retryableFailures += 1;
+          else summary.terminalFailures += 1;
+          logger.warn({ jobId: job.id, chatId: job.chat_id, messageId: violation.message_id, telegramErrorCode: diagnostic.telegramErrorCode, description: diagnostic.description, retryable }, "Could not delete moderation violation message");
         }
       }
+      logger.info({ jobId: job.id, chatId: job.chat_id, attemptedCount: summary.attempted, deletedCount: summary.deleted, alreadyAbsentCount: summary.alreadyAbsent, retryableFailureCount: summary.retryableFailures, terminalFailureCount: summary.terminalFailures }, "Moderation cleanup deletion summary");
+
+      const unresolved = db.listLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId)
+        .some((violation) => violation.cleanup_state === "PENDING" || violation.cleanup_state === "TERMINAL_FAILED");
+      if (unresolved) return;
       db.updateLanguageModerationCleanupJob(job.id, "LOG_PENDING");
+      state = "LOG_PENDING";
     }
 
+    if (state !== "LOG_PENDING") return;
     const { logModerationSanction } = await import("./archive.js");
     await logModerationSanction(api, db, {
       userTelegramId: job.user_telegram_id,
@@ -136,13 +178,22 @@ export async function processModerationCleanupJob(
       sanctionKind: job.sanction_kind,
       timestamp: job.updated_at
     });
-    db.clearLanguageModerationCycleViolations(job.chat_id, job.user_telegram_id, job.sanction_tier - 1);
+    db.clearLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId);
     db.updateLanguageModerationCleanupJob(job.id, "COMPLETED");
   } catch (error) {
-    db.updateLanguageModerationCleanupJob(jobId, "LOG_PENDING");
-    const { logger } = await import("./logger.js");
-    logger.warn({ jobId, chatId: job.chat_id, userId: job.user_telegram_id, err: error }, "Moderation cleanup/log recovery pending");
+    db.updateLanguageModerationCleanupJob(jobId, state === "LOG_PENDING" ? "LOG_PENDING" : "CLEANING");
+    const diagnostic = normalizeTelegramDeliveryError(error);
+    logger.warn({ jobId, chatId: job.chat_id, category: diagnostic.category, telegramErrorCode: diagnostic.telegramErrorCode, description: diagnostic.description }, "Moderation cleanup/log recovery pending");
   }
+}
+
+function isAlreadyAbsentModerationMessage(diagnostic: ReturnType<typeof normalizeTelegramDeliveryError>): boolean {
+  const description = diagnostic.description?.toLowerCase() ?? "";
+  return diagnostic.telegramErrorCode === 400 && description.includes("message to delete not found");
+}
+
+function isRetryableModerationDeletionFailure(diagnostic: ReturnType<typeof normalizeTelegramDeliveryError>): boolean {
+  return diagnostic.permanence !== "PERMANENT" || diagnostic.category === "FORBIDDEN";
 }
 
 function parseInteger(value: string | undefined): number | null {

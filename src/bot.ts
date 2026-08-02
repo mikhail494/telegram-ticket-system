@@ -1,7 +1,7 @@
 import { Bot, GrammyError, HttpError, InlineKeyboard, InputFile } from "grammy";
 import { randomUUID } from "node:crypto";
 import type { CommandContext, Context } from "grammy";
-import type { Message, User } from "grammy/types";
+import type { Message, ReactionTypeEmoji, User } from "grammy/types";
 import {
   archiveTicketIfPossible,
   getSupportLogsTopicInfo,
@@ -70,6 +70,9 @@ const MODERATION_SETTING_PREFIX = "language_moderation";
 const ENTITY_NOTIFICATION_SETTING_PREFIX = "entity_notifications";
 const STAFF_OPERATION_NO_RETRY_AT = "9999-12-31T23:59:59.999Z";
 const pendingWarningTimers = new Map<number, ReturnType<typeof setTimeout>>();
+type ModerationReactionEmoji = "\u{1F440}" | "\u{1F621}";
+const MODERATION_STRIKE_REACTION: ModerationReactionEmoji = "\u{1F440}";
+const MODERATION_SANCTION_REACTION: ModerationReactionEmoji = "\u{1F621}";
 
 const USER_HELP_TEXT = [
   "Support help",
@@ -2793,23 +2796,40 @@ async function handlePublicLanguageModeration(
       }
     } else {
       db.upsertLanguageModerationUserState({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from), current_strikes: 1, sanction_tier: state.sanction_tier, first_strike_at: currentTime.toISOString() });
-      await setModerationReaction(ctx, "⚠️");
+      await setModerationReaction(
+        ctx.api,
+        ctx.chat.id,
+        ctx.message.message_id,
+        MODERATION_STRIKE_REACTION
+      );
     }
     return;
   }
   if (state.current_strikes === 1) {
     db.upsertLanguageModerationUserState({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from), current_strikes: 2, sanction_tier: state.sanction_tier, first_strike_at: state.first_strike_at });
-    await setModerationReaction(ctx, "⚠️");
+    await setModerationReaction(
+      ctx.api,
+      ctx.chat.id,
+      ctx.message.message_id,
+      MODERATION_STRIKE_REACTION
+    );
     return;
   }
   const tier = Math.min(state.sanction_tier, 2);
   try {
-    await setModerationReaction(ctx, "🚫");
+    await setModerationReaction(
+      ctx.api,
+      ctx.chat.id,
+      ctx.message.message_id,
+      MODERATION_SANCTION_REACTION
+    );
     if (tier === 2) await ctx.api.banChatMember(ctx.chat.id, ctx.from.id);
     else await ctx.api.restrictChatMember(ctx.chat.id, ctx.from.id, { can_send_messages: false }, { until_date: Math.floor(now().getTime() / 1000) + (tier === 0 ? 86_400 : 604_800) });
     const nextTier = Math.min(3, state.sanction_tier + 1);
+    const violationCycleId = randomUUID();
+    db.assignLanguageModerationViolationCycle(ctx.chat.id, ctx.from.id, state.sanction_tier, violationCycleId);
     db.upsertLanguageModerationUserState({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from), current_strikes: 0, sanction_tier: nextTier, first_strike_at: null });
-    const cleanupJobId = db.createLanguageModerationCleanupJob({ staff_chat_id: config.staffChatId, chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from) ?? null, chat_title: ("title" in ctx.chat ? ctx.chat.title : null) ?? null, sanction_tier: nextTier, sanction_kind: tier === 0 ? "24-hour mute" : tier === 1 ? "7-day mute" : "permanent ban", cleanup_due_at: new Date(now().getTime() + 10_000).toISOString() });
+    const cleanupJobId = db.createLanguageModerationCleanupJob({ staff_chat_id: config.staffChatId, chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from) ?? null, chat_title: ("title" in ctx.chat ? ctx.chat.title : null) ?? null, sanction_tier: nextTier, sanction_kind: tier === 0 ? "24-hour mute" : tier === 1 ? "7-day mute" : "permanent ban", violation_cycle_id: violationCycleId, cleanup_due_at: new Date(now().getTime() + 10_000).toISOString() });
     cleanupScheduler(ctx.api, db, cleanupJobId);
   } catch (error) {
     db.setSetting(moderationSettingKey("enabled"), "false");
@@ -2817,12 +2837,28 @@ async function handlePublicLanguageModeration(
   }
 }
 
-async function setModerationReaction(ctx: Context, emoji: "⚠️" | "🚫"): Promise<void> {
-  if (!ctx.chat || !ctx.message) return;
+async function setModerationReaction(
+  api: BotApi,
+  chatId: number,
+  messageId: number,
+  emoji: ModerationReactionEmoji
+): Promise<void> {
   try {
-    // Telegram supports these reactions, while the installed grammY type union lags them.
-    await ctx.api.setMessageReaction(ctx.chat.id, ctx.message.message_id, [{ type: "emoji", emoji: emoji as never }]);
-  } catch (error) { logger.warn({ chatId: ctx.chat.id, messageId: ctx.message.message_id, err: error }, "Could not set moderation reaction"); }
+    const reaction: ReactionTypeEmoji = { type: "emoji", emoji };
+    await api.setMessageReaction(chatId, messageId, [reaction]);
+  } catch (error) {
+    const diagnostic = normalizeTelegramDeliveryError(error);
+    logger.warn(
+      {
+        chatId,
+        messageId,
+        emoji,
+        telegramErrorCode: diagnostic.telegramErrorCode,
+        description: diagnostic.description
+      },
+      "Could not set moderation reaction"
+    );
+  }
 }
 
 function schedulePendingWarning(api: BotApi, db: SupportDatabase, chatId: number, delayMs: number): void {
@@ -2843,7 +2879,7 @@ export async function processPendingWarning(api: BotApi, db: SupportDatabase, ch
   const grouped = db.claimLanguageModerationFirstStrikes(chatId, new Date(Date.now() - moderation.lookbackMinutes * 60_000).toISOString());
   if (!grouped.length) return;
   for (const user of grouped) {
-    try { await api.setMessageReaction(chatId, user.messageId, [{ type: "emoji", emoji: "⚠️" as never }]); } catch {}
+    await setModerationReaction(api, chatId, user.messageId, MODERATION_STRIKE_REACTION);
   }
   if (state.last_warning_message_id) { try { await api.deleteMessage(chatId, state.last_warning_message_id); } catch {} }
   try {
