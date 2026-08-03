@@ -663,7 +663,7 @@ export function createBot(
       `Bot: @${bot.botInfo?.username ?? "loading"}`, "Version: 1.2.6", `Setup: ${installation.getState().setupState}`,
       `Authorization: ${installation.getState().authorizationMode}`, `Owner: ${installation.getOwner()?.username ? `@${installation.getOwner()?.username}` : installation.getOwner()?.userTelegramId ?? "not paired"}`,
       `Staff workspace: ${workspace?.title ?? workspace?.telegram_chat_id ?? "not configured"}`,
-      `Support Logs: ${workspace && db.getSetting(`support_logs_thread_id:${workspace.telegram_chat_id}`) ? "configured" : "not configured"}`,
+      `Support Logs: ${workspace && db.getSetting(`support_logs_message_thread_id:${workspace.telegram_chat_id}`) ? "configured" : "not configured"}`,
       `Public chats: ${counts.publicChats}`, `Team: OWNER ${roles.get("OWNER") ?? 0}, ADMIN ${roles.get("ADMIN") ?? 0}, SENIOR_AGENT ${roles.get("SENIOR_AGENT") ?? 0}, AGENT ${roles.get("AGENT") ?? 0}`,
       `Moderation enabled: ${counts.moderationEnabled}`, `Pending moderation cleanup: ${counts.pendingCleanup}`, `Pending archives: ${counts.pendingArchives}`,
       `Pending batch staff operations: ${counts.pendingBatchStaffOperations}`, "Database: available"].join("\n");
@@ -1294,8 +1294,36 @@ export function createBot(
     if (namespace === "rbac") {
       if (!isPrivateChat(ctx) || !ctx.from || installation.getMember(ctx.from.id)?.role !== "OWNER") { await ctx.answerCallbackQuery({ text: "OWNER access required.", show_alert: true }); return; }
       const action = data.split(":")[1];
-      if (action === "preview") { const preview = installation.previewRoleBasedAccessActivation(); await ctx.answerCallbackQuery(); await ctx.reply(`Role-based access cutover preview\n\nActive role holders retained: ${preview.activeRoleCount}\nUnassigned staff-group participants will lose staff access.\n\nPairing did not activate this mode. Confirm only after assigning the team.`, { reply_markup: new InlineKeyboard().text("Activate role-based access", `rbac:activate:${preview.confirmationToken}`).row().text("Cancel", "rbac:cancel") }); return; }
+      if (action === "preview") {
+        const preview = installation.previewRoleBasedAccessActivation();
+        const retainedRoleLines = installation.listTeamMembers()
+          .map((member) => `- ${member.role}: ${member.username ? `@${member.username}` : `user_${member.user_telegram_id}`}`);
+        const retainedRoles = retainedRoleLines.join("\n");
+        const keyboard = new InlineKeyboard()
+          .text("Activate role-based access", `rbac:activate:${preview.confirmationToken}`)
+          .row()
+          .text("Cancel", "rbac:cancel");
+        const warning = "Unassigned staff-group participants will lose staff access.\nTelegram staff-workspace membership remains required after activation.\n\nPairing did not activate this mode. Confirm only after assigning the team.";
+        const message = `Role-based access cutover preview\n\nCurrent authorization: ${installation.getState().authorizationMode}\nAssigned application roles retained (${preview.activeRoleCount}):\n${retainedRoles}\n\n${warning}`;
+        await ctx.answerCallbackQuery();
+        if (message.length <= 4096) {
+          await ctx.reply(message, { reply_markup: keyboard });
+          return;
+        }
+        let roleChunk = "Assigned application roles retained:";
+        for (const line of retainedRoleLines) {
+          if (`${roleChunk}\n${line}`.length > 4096) {
+            await ctx.reply(roleChunk);
+            roleChunk = "Assigned application roles retained:";
+          }
+          roleChunk += `\n${line}`;
+        }
+        await ctx.reply(roleChunk);
+        await ctx.reply(`Role-based access cutover preview\n\nCurrent authorization: ${installation.getState().authorizationMode}\nAssigned application roles retained (${preview.activeRoleCount}): listed above.\n\n${warning}`, { reply_markup: keyboard });
+        return;
+      }
       if (action === "activate") { try { installation.activateRoleBasedAccess(ctx.from.id, data.split(":")[2] ?? ""); await ctx.answerCallbackQuery({ text: "Role-based access activated." }); await showDashboard(ctx); } catch (error) { await ctx.answerCallbackQuery({ text: error instanceof Error ? error.message : "Activation failed.", show_alert: true }); } return; }
+      if (action === "cancel") installation.previewRoleBasedAccessActivation();
       await ctx.answerCallbackQuery({ text: "Activation cancelled." }); return;
     }
 

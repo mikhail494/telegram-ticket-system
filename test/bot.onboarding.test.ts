@@ -58,6 +58,22 @@ test("owner receives dashboard instead of accidentally creating a ticket", async
   } finally { harness.cleanup(); }
 });
 
+test("owner dashboard recognizes the scoped Support Logs topic", async () => {
+  let service!: InstallationService;
+  const harness = createBotHarness({ installationServiceFactory: (db) => {
+    service = new InstallationService(db);
+    service.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
+    db.setSetting(`support_logs_message_thread_id:${TEST_STAFF_CHAT_ID}`, "153");
+    return service;
+  } });
+  try {
+    await harness.bot.handleUpdate(privateMessage(1, "ordinary owner text"));
+    const dashboard = String(harness.findApiCalls("sendMessage")[0]?.payload.text);
+    assert.match(dashboard, /Support Logs: configured/);
+  } finally { harness.cleanup(); }
+});
+
 test("staff explicitly enables one-message test-ticket mode", async () => {
   let service!: InstallationService;
   const harness = createBotHarness({ installationServiceFactory: (db) => {
@@ -114,6 +130,61 @@ test("RBAC keeps group membership boundary and denies AGENT bans", async () => {
     await harness.bot.handleUpdate(update);
     assert.equal(harness.db.getBannedUser(99), undefined);
     assert.match(String(harness.findApiCalls("sendMessage")[0]?.payload.text), /does not allow/i);
+  } finally { harness.cleanup(); }
+});
+
+test("RBAC activation preview explains the legacy cutover and retained roles", async () => {
+  let service!: InstallationService;
+  const harness = createBotHarness({ installationServiceFactory: (db) => {
+    service = new InstallationService(db);
+    service.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
+    service.assignRole(1, 2, "ADMIN");
+    return service;
+  } });
+  try {
+    await harness.bot.handleUpdate(privateCallback(1, "rbac:preview"));
+    const preview = String(harness.findApiCalls("sendMessage")[0]?.payload.text);
+    assert.match(preview, /Current authorization: LEGACY_TRUSTED_GROUP/);
+    assert.match(preview, /OWNER: @owner/);
+    assert.match(preview, /ADMIN: user_2/);
+    assert.match(preview, /Unassigned staff-group participants will lose staff access/);
+    assert.match(preview, /Telegram staff-workspace membership remains required/);
+    const markup = harness.findApiCalls("sendMessage")[0]?.payload.reply_markup as {
+      inline_keyboard?: Array<Array<{ text?: string; callback_data?: string }>>;
+    };
+    const buttons = markup.inline_keyboard?.flat() ?? [];
+    const activationData = buttons.find((button) => button.text === "Activate role-based access")?.callback_data ?? "";
+    assert.match(activationData, /^rbac:activate:/);
+    assert.equal(buttons.find((button) => button.text === "Cancel")?.callback_data, "rbac:cancel");
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(1, "rbac:cancel", 11));
+    assert.equal(harness.countApiCalls("answerCallbackQuery"), 1);
+    assert.equal(service.getState().authorizationMode, "LEGACY_TRUSTED_GROUP");
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(1, activationData, 12));
+    assert.equal(service.getState().authorizationMode, "LEGACY_TRUSTED_GROUP");
+  } finally { harness.cleanup(); }
+});
+
+test("RBAC activation preview stays within Telegram message limits for a large team", async () => {
+  let service!: InstallationService;
+  const harness = createBotHarness({ installationServiceFactory: (db) => {
+    service = new InstallationService(db);
+    service.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
+    for (let userId = 2; userId <= 300; userId += 1) service.assignRole(1, userId, "AGENT");
+    return service;
+  } });
+  try {
+    await harness.bot.handleUpdate(privateCallback(1, "rbac:preview"));
+    const previewMessages = harness.findApiCalls("sendMessage");
+    assert.ok(previewMessages.length > 1);
+    assert.ok(previewMessages.every((call) => String(call.payload.text).length <= 4096));
+    assert.match(previewMessages.map((call) => String(call.payload.text)).join("\n"), /AGENT: user_300/);
+    assert.equal(service.getState().authorizationMode, "LEGACY_TRUSTED_GROUP");
   } finally { harness.cleanup(); }
 });
 
