@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+## [1.2.7] - 2026-08-09
+
+### Fixed
+
+- Made `reply_and_close` recovery resume close and archive work after transient staff-topic delivery failures.
+- Prevented post-delivery recovery from resending already delivered user replies.
+- Reconciled stale batch-item states after post-reply work completes.
+- Separated reply delivery from close/archive completion in batch summaries.
+- Improved forum-topic cleanup diagnostics without claiming unverified Telegram topic state.
+
 ## [1.2.6] - 2026-08-02
 
 ### Fixed
