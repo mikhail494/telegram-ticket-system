@@ -15,6 +15,35 @@ interface SetupOptions {
   writeOutput?: (line: string) => void;
 }
 
+function updateEnvContents(contents: string, existing: Record<string, string>, values: Record<string, string | undefined>): string {
+  const newline = contents.includes("\r\n") ? "\r\n" : "\n";
+  const lines = contents.length === 0 ? [] : contents.split(/\r?\n/);
+  if (contents.endsWith("\n")) lines.pop();
+
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) continue;
+    const serialized = /^[A-Za-z0-9_./:@+-]+$/.test(value) ? value : JSON.stringify(value);
+    const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const assignment = new RegExp(`^\\s*(?:export\\s+)?${escapedKey}\\s*=`);
+    const assignmentCount = lines.filter((line) => assignment.test(line)).length;
+    if (existing[key] === value && assignmentCount <= 1) continue;
+    let replaced = false;
+    for (let index = 0; index < lines.length;) {
+      if (!assignment.test(lines[index]!)) { index += 1; continue; }
+      if (!replaced) {
+        lines[index] = `${key}=${serialized}`;
+        replaced = true;
+        index += 1;
+      } else {
+        lines.splice(index, 1);
+      }
+    }
+    if (!replaced) lines.push(`${key}=${serialized}`);
+  }
+
+  return `${lines.join(newline)}${newline}`;
+}
+
 async function exists(file: string): Promise<boolean> { try { await access(file, constants.F_OK); return true; } catch { return false; } }
 
 async function hiddenPrompt(): Promise<string> {
@@ -47,8 +76,12 @@ async function verifyWithTelegram(token: string): Promise<{ id: number; username
 export async function runSetup(options: SetupOptions = {}): Promise<{ botId: number; botUsername: string; envPath: string | null }> {
   const env = options.env ?? process.env;
   const envPath = options.envPath === undefined ? path.resolve(process.cwd(), ".env") : options.envPath;
+  let existingContents = "";
   let existing: Record<string, string> = {};
-  if (envPath && await exists(envPath)) existing = dotenv.parse(await readFile(envPath));
+  if (envPath && await exists(envPath)) {
+    existingContents = await readFile(envPath, "utf8");
+    existing = dotenv.parse(existingContents);
+  }
   let token = env.BOT_TOKEN?.trim() || existing.BOT_TOKEN?.trim();
   let tokenToPersist = token;
   if (!token) {
@@ -64,9 +97,9 @@ export async function runSetup(options: SetupOptions = {}): Promise<{ botId: num
   output(`Verified bot: @${identity.username} (${identity.id})`);
   if (envPath) {
     const values = { ...existing, BOT_TOKEN: tokenToPersist ?? token, DATABASE_URL: env.DATABASE_URL ?? existing.DATABASE_URL ?? "file:./data/support.db", LOG_LEVEL: env.LOG_LEVEL ?? existing.LOG_LEVEL ?? "info" };
-    const lines = Object.entries(values).filter(([, value]) => value !== undefined).map(([key, value]) => `${key}=${value}`).join("\n") + "\n";
+    const contents = updateEnvContents(existingContents, existing, values);
     const temporary = `${envPath}.${process.pid}.tmp`;
-    await writeFile(temporary, lines, { mode: 0o600 });
+    await writeFile(temporary, contents, { mode: 0o600 });
     await rename(temporary, envPath);
     try { await chmod(envPath, 0o600); } catch { /* Windows may not implement POSIX modes. */ }
   }

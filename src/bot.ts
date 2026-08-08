@@ -238,6 +238,19 @@ export function createBot(
     return false;
   };
 
+  const hasRequiredPrivateWorkspaceMembership = async (ctx: Context): Promise<boolean> => {
+    if (installation.getState().authorizationMode !== "RBAC_ACTIVE") return true;
+    if (!ctx.from) return false;
+    const staffChatId = installation.getStaffChatId();
+    if (staffChatId === null) return false;
+    try {
+      const member = await ctx.api.getChatMember(staffChatId, ctx.from.id);
+      return member.status !== "left" && member.status !== "kicked";
+    } catch {
+      return false;
+    }
+  };
+
   class StaffOnlyDeliveryError extends Error {
     constructor(readonly diagnostic: NormalizedDeliveryError, readonly retryAt: string | null) {
       super(diagnostic.category);
@@ -678,7 +691,12 @@ export function createBot(
   async function showDashboard(ctx: Context): Promise<void> {
     if (!ctx.from) return;
     const member = installation.getMember(ctx.from.id);
-    if (member) await ctx.reply(dashboardText(ctx.from.id), { reply_markup: dashboardKeyboard(member.role) });
+    if (!member) return;
+    if (!await hasRequiredPrivateWorkspaceMembership(ctx)) {
+      await ctx.reply("Staff workspace membership required for role-based access.");
+      return;
+    }
+    await ctx.reply(dashboardText(ctx.from.id), { reply_markup: dashboardKeyboard(member.role) });
   }
 
   const onboardingStages = ["WELCOME", "BOT_IDENTITY", "STAFF_WORKSPACE", "WORKSPACE_PERMISSIONS", "SUPPORT_LOGS", "PUBLIC_CHAT", "TEAM_ROLES", "SUMMARY", "ACTIVATE_SUPPORT"] as const;
@@ -731,7 +749,7 @@ export function createBot(
     }
     if (startParameter.startsWith("team_") && ctx.from) {
       const result = installation.consumeTeamInvitation(startParameter.slice(5), { telegramId: ctx.from.id, username: ctx.from.username, firstName: ctx.from.first_name, lastName: ctx.from.last_name });
-      if (result.kind === "JOINED") { let joined = false; const chatId = installation.getStaffChatId(); if (chatId !== null) { try { const member = await ctx.api.getChatMember(chatId, ctx.from.id); joined = member.status !== "left" && member.status !== "kicked"; } catch {} } await ctx.reply(`Team invitation accepted. Role: ${result.role}.${joined ? "" : " Join the configured staff workspace before using staff commands."}`); await showDashboard(ctx); return; }
+      if (result.kind === "JOINED") { let joined = false; const chatId = installation.getStaffChatId(); if (chatId !== null) { try { const member = await ctx.api.getChatMember(chatId, ctx.from.id); joined = member.status !== "left" && member.status !== "kicked"; } catch {} } await ctx.reply(`Team invitation accepted. Role: ${result.role}.${joined ? "" : " Join the configured staff workspace before using staff commands."}`); if (joined || installation.getState().authorizationMode !== "RBAC_ACTIVE") await showDashboard(ctx); return; }
       await ctx.reply(result.kind === "EXPIRED" ? "This team invitation has expired." : "This team invitation is invalid or already used."); return;
     }
     if (await replyIfBanned(db, ctx)) {
@@ -1231,11 +1249,13 @@ export function createBot(
 
     if (namespace === "owner" && data === "owner:confirm-transfer") {
       if (!isPrivateChat(ctx) || !ctx.from || !db.hasPendingOwnerTransfer(ctx.from.id)) { await ctx.answerCallbackQuery({ text: "No pending owner transfer.", show_alert: true }); return; }
+      if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
       installation.confirmOwnerTransfer(ctx.from.id); await ctx.answerCallbackQuery({ text: "Ownership transferred." }); await showOnboarding(ctx, "WELCOME"); return;
     }
 
     if (namespace === "setup") {
       if (!isPrivateChat(ctx) || !ctx.from || !installation.can(ctx.from.id, "CONFIGURE_INSTALLATION")) { await ctx.answerCallbackQuery({ text: "Owner or administrator access required.", show_alert: true }); return; }
+      if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
       const [, action, value] = data.split(":");
       await ctx.answerCallbackQuery();
       if (action === "workspace") { await sendWorkspacePicker(ctx); return; }
@@ -1259,6 +1279,7 @@ export function createBot(
 
     if (namespace === "dashboard") {
       if (!isPrivateChat(ctx) || !ctx.from || !installation.getMember(ctx.from.id)) { await ctx.answerCallbackQuery({ text: "Staff access required.", show_alert: true }); return; }
+      if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
       const action = data.split(":")[1]; await ctx.answerCallbackQuery();
       if (action === "test-ticket") { db.setSetting(`staff_test_ticket_mode:${ctx.from.id}`, "true"); await ctx.reply("Test-ticket mode enabled for your next message. Send harmless test content now."); return; }
       if (action === "team") {
@@ -1279,6 +1300,8 @@ export function createBot(
 
     if (namespace === "team") {
       if (!isPrivateChat(ctx) || !ctx.from) { await ctx.answerCallbackQuery({ text: "Private staff dashboard only.", show_alert: true }); return; }
+      if (!installation.getMember(ctx.from.id)) { await ctx.answerCallbackQuery({ text: "Staff access required.", show_alert: true }); return; }
+      if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
       const [, action, value, roleValue] = data.split(":");
       try {
         if (action === "transfer") { if (installation.getMember(ctx.from.id)?.role !== "OWNER") throw new Error("Only the OWNER can transfer ownership."); const token = installation.createOwnerRecoveryToken(); await ctx.answerCallbackQuery({ text: "Transfer link created." }); await ctx.reply(`One-use ownership transfer link (30 minutes):\nhttps://t.me/${bot.botInfo.username}?start=setup_${token}\n\nThe current OWNER remains active until the recipient confirms.`); return; }
@@ -1293,6 +1316,7 @@ export function createBot(
 
     if (namespace === "rbac") {
       if (!isPrivateChat(ctx) || !ctx.from || installation.getMember(ctx.from.id)?.role !== "OWNER") { await ctx.answerCallbackQuery({ text: "OWNER access required.", show_alert: true }); return; }
+      if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
       const action = data.split(":")[1];
       if (action === "preview") {
         const preview = installation.previewRoleBasedAccessActivation();
@@ -1323,7 +1347,7 @@ export function createBot(
         return;
       }
       if (action === "activate") { try { installation.activateRoleBasedAccess(ctx.from.id, data.split(":")[2] ?? ""); await ctx.answerCallbackQuery({ text: "Role-based access activated." }); await showDashboard(ctx); } catch (error) { await ctx.answerCallbackQuery({ text: error instanceof Error ? error.message : "Activation failed.", show_alert: true }); } return; }
-      if (action === "cancel") installation.previewRoleBasedAccessActivation();
+      if (action === "cancel") installation.cancelRoleBasedAccessActivation();
       await ctx.answerCallbackQuery({ text: "Activation cancelled." }); return;
     }
 
@@ -1353,6 +1377,7 @@ export function createBot(
 
   bot.on("message:chat_shared", async (ctx) => {
     if (!ctx.from || !isPrivateChat(ctx) || !installation.can(ctx.from.id, "CONFIGURE_INSTALLATION")) return;
+    if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.reply("Staff workspace membership required for role-based access."); return; }
     const shared = ctx.message.chat_shared;
     if (shared.request_id !== 1300) return;
     try {

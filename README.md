@@ -278,7 +278,7 @@ npm test
 npm run build
 ```
 
-The current suite contains 203 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, entity notifications, bootstrap configuration, owner pairing, onboarding, workspace validation, and role authorization.
+The current suite contains 212 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, entity notifications, bootstrap configuration, owner pairing, onboarding, workspace validation, and role authorization.
 
 ## Project Structure
 

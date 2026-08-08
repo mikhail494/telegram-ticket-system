@@ -133,6 +133,33 @@ test("RBAC keeps group membership boundary and denies AGENT bans", async () => {
   } finally { harness.cleanup(); }
 });
 
+test("RBAC denies private staff controls without current workspace membership", async () => {
+  let service!: InstallationService;
+  const harness = createBotHarness({ installationServiceFactory: (db) => {
+    service = new InstallationService(db);
+    service.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1 });
+    service.assignRole(1, 2, "ADMIN");
+    const preview = service.previewRoleBasedAccessActivation();
+    service.activateRoleBasedAccess(1, preview.confirmationToken);
+    return service;
+  } });
+  harness.setApiResponseOverride("getChatMember", (call, response) => Number(call.payload.user_id) === 2
+    ? { ok: true, result: { status: "left", user: { id: 2, is_bot: false, first_name: "Admin" } } }
+    : response);
+  try {
+    await harness.bot.handleUpdate(privateCallback(2, "dashboard:team"));
+    assert.equal(harness.countApiCalls("answerCallbackQuery"), 1);
+    assert.match(String(harness.findApiCalls("answerCallbackQuery")[0]?.payload.text), /workspace membership required/i);
+    assert.equal(harness.countApiCalls("sendMessage"), 0);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateMessage(2, "ordinary admin text", 11));
+    assert.equal(harness.db.listTicketsForUser(2, TEST_STAFF_CHAT_ID).length, 0);
+    assert.match(String(harness.findApiCalls("sendMessage")[0]?.payload.text), /workspace membership required/i);
+  } finally { harness.cleanup(); }
+});
+
 test("RBAC activation preview explains the legacy cutover and retained roles", async () => {
   let service!: InstallationService;
   const harness = createBotHarness({ installationServiceFactory: (db) => {

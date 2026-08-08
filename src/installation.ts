@@ -64,6 +64,8 @@ export class InstallationService {
   }
 
   adoptLegacyInstallation(staffChatId: number): WorkspaceRecord {
+    const activeWorkspace = this.getActiveWorkspace();
+    if (activeWorkspace) return activeWorkspace;
     const workspace = this.db.upsertWorkspace({ telegramChatId: staffChatId, importedFromLegacy: true });
     this.db.setInstallationState({ setup_state: "READY", active_workspace_id: workspace.id });
     const moderationTarget = Number(this.db.getSetting("language_moderation:target"));
@@ -82,7 +84,10 @@ export class InstallationService {
     this.db.setInstallationState({ setup_state: "READY" });
   }
 
-  createOwnerPairingToken(): string { return this.createToken("OWNER_PAIRING"); }
+  createOwnerPairingToken(): string {
+    this.db.invalidateUnconsumedTokens("OWNER_PAIRING");
+    return this.createToken("OWNER_PAIRING");
+  }
   createOwnerRecoveryToken(): string {
     this.db.invalidateUnconsumedTokens("OWNER_PAIRING");
     this.db.invalidateUnconsumedTokens("OWNER_RECOVERY");
@@ -93,6 +98,7 @@ export class InstallationService {
     const matched = this.findToken(token, ["OWNER_PAIRING", "OWNER_RECOVERY"]);
     if (!matched) return { kind: "INVALID" };
     if (Date.parse(matched.expires_at) <= this.now().getTime()) return { kind: "EXPIRED" };
+    if (matched.kind === "OWNER_PAIRING" && this.getOwner()) return { kind: "INVALID" };
     const result = this.db.consumeOwnerTokenAndCreateOwner(matched.id, user, this.now().toISOString());
     if (result === "INVALID") return { kind: "INVALID" };
     if (result === "TRANSFER_PENDING") return { kind: "TRANSFER_CONFIRMATION_REQUIRED" };
@@ -139,6 +145,8 @@ export class InstallationService {
     const members = this.listTeamMembers();
     return { ownerCount: members.filter((member) => member.role === "OWNER").length, activeRoleCount: members.length, confirmationToken: this.activationNonce };
   }
+
+  cancelRoleBasedAccessActivation(): void { this.activationNonce = null; }
 
   activateRoleBasedAccess(ownerId: number, confirmationToken: string): void {
     if (!this.can(ownerId, "MANAGE_ADMINS") || !this.activationNonce || confirmationToken !== this.activationNonce) throw new Error("Role-based access activation was not confirmed.");

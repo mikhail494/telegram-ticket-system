@@ -60,3 +60,73 @@ test("explicit environment does not overwrite a different saved token without co
     assert.match(await readFile(envPath, "utf8"), /^BOT_TOKEN=123456:SAVED_TOKEN_VALUE$/m);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test("confirmed token replacement removes the superseded secret", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ticket-setup-replace-"));
+  const envPath = path.join(directory, ".env");
+  try {
+    await writeFile(envPath, "# keep this comment\nBOT_TOKEN=123456:OLD_TOKEN_VALUE\nCUSTOM_VALUE=preserved\n");
+    await runSetup({
+      env: { BOT_TOKEN: "654321:NEW_TOKEN_VALUE" },
+      envPath,
+      confirmOverwrite: async () => true,
+      verifyToken: async () => ({ id: 1, username: "bot" }),
+      writeOutput: () => undefined
+    });
+    const saved = await readFile(envPath, "utf8");
+    assert.doesNotMatch(saved, /OLD_TOKEN_VALUE/);
+    assert.equal(saved.match(/^BOT_TOKEN=/gm)?.length, 1);
+    assert.match(saved, /^BOT_TOKEN=654321:NEW_TOKEN_VALUE$/m);
+    assert.match(saved, /^# keep this comment$/m);
+    assert.match(saved, /^CUSTOM_VALUE=preserved$/m);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("setup removes superseded duplicate assignments even when the effective token is unchanged", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ticket-setup-deduplicate-"));
+  const envPath = path.join(directory, ".env");
+  try {
+    await writeFile(envPath, "BOT_TOKEN=123456:OLD_TOKEN_VALUE\nBOT_TOKEN=654321:CURRENT_TOKEN_VALUE\n");
+    await runSetup({
+      env: {},
+      envPath,
+      verifyToken: async () => ({ id: 1, username: "bot" }),
+      writeOutput: () => undefined
+    });
+    const saved = await readFile(envPath, "utf8");
+    assert.doesNotMatch(saved, /OLD_TOKEN_VALUE/);
+    assert.equal(saved.match(/^BOT_TOKEN=/gm)?.length, 1);
+    assert.match(saved, /^BOT_TOKEN=654321:CURRENT_TOKEN_VALUE$/m);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("setup preserves existing env comments, quoting, and unrelated values", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ticket-setup-compatible-"));
+  const envPath = path.join(directory, ".env");
+  const original = [
+    "# deployment note",
+    'BOT_TOKEN="123456:SAVED_TOKEN_VALUE"',
+    'CUSTOM_VALUE="contains # and spaces"',
+    "A.B=one",
+    "AXB=two",
+    "DATABASE_URL=file:old.db",
+    ""
+  ].join("\n");
+  try {
+    await writeFile(envPath, original);
+    await runSetup({
+      env: {},
+      envPath,
+      verifyToken: async () => ({ id: 1, username: "bot" }),
+      writeOutput: () => undefined
+    });
+    const saved = await readFile(envPath, "utf8");
+    assert.match(saved, /^# deployment note$/m);
+    assert.match(saved, /^BOT_TOKEN="123456:SAVED_TOKEN_VALUE"$/m);
+    assert.match(saved, /^CUSTOM_VALUE="contains # and spaces"$/m);
+    assert.match(saved, /^A\.B=one$/m);
+    assert.match(saved, /^AXB=two$/m);
+    assert.match(saved, /^DATABASE_URL=file:old\.db$/m);
+    assert.match(saved, /^LOG_LEVEL=info$/m);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

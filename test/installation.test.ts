@@ -33,6 +33,21 @@ test("legacy workspace adoption is ready, idempotent, and does not activate RBAC
   } finally { db.close(); }
 });
 
+test("legacy adoption does not replace a workspace selected after initial import", () => {
+  const db = new SupportDatabase(":memory:");
+  try {
+    const service = new InstallationService(db);
+    service.adoptLegacyInstallation(-10042);
+    service.activateWorkspace({ chatId: -10077, title: "Selected workspace" });
+
+    const active = service.adoptLegacyInstallation(-10042);
+
+    assert.equal(active.telegram_chat_id, -10077);
+    assert.equal(service.getStaffChatId(), -10077);
+    assert.equal(service.getState().setupState, "READY");
+  } finally { db.close(); }
+});
+
 test("legacy adoption preserves operational settings and imports the moderation target", () => {
   const db = new SupportDatabase(":memory:");
   try {
@@ -61,6 +76,21 @@ test("owner pairing is single-use and creates exactly one active owner", () => {
     assert.equal(service.consumeOwnerPairingToken(token, { telegramId: 11 }).kind, "INVALID");
     assert.equal(service.getOwner()?.userTelegramId, 10);
     assert.equal(service.listTeamMembers().filter((member) => member.role === "OWNER").length, 1);
+  } finally { db.close(); }
+});
+
+test("owner pairing tokens cannot be reused as owner recovery tokens", () => {
+  const db = new SupportDatabase(":memory:");
+  try {
+    const service = new InstallationService(db);
+    const stale = service.createOwnerPairingToken();
+    const current = service.createOwnerPairingToken();
+    assert.equal(service.consumeOwnerPairingToken(stale, { telegramId: 9 }).kind, "INVALID");
+    assert.equal(service.consumeOwnerPairingToken(current, { telegramId: 10 }).kind, "PAIRED");
+
+    const pairingAfterOwner = service.createOwnerPairingToken();
+    assert.equal(service.consumeOwnerPairingToken(pairingAfterOwner, { telegramId: 11 }).kind, "INVALID");
+    assert.equal(service.getOwner()?.userTelegramId, 10);
   } finally { db.close(); }
 });
 
