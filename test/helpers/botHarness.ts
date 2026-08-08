@@ -119,6 +119,7 @@ export interface StaffDocumentUpdateOptions extends Omit<StaffTopicUpdateOptions
 }
 
 export interface BotHarnessOptions {
+  databasePath?: string;
   quickRepliesRegistry?: QuickRepliesRegistry;
   moderationNow?: () => Date;
   scheduleModerationCleanup?: ModerationCleanupScheduler;
@@ -145,7 +146,7 @@ export interface BotHarness {
 }
 
 export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
-  const db = new SupportDatabase(":memory:");
+  const db = new SupportDatabase(options.databasePath ?? ":memory:");
   const registry = options.quickRepliesRegistry ?? loadQuickRepliesRegistry();
   let downloadResponse: { body: string | Uint8Array; status: number } = { body: "{}", status: 200 };
   const fileDownloads = new Map<string, { body: string | Uint8Array; status: number; filePath: string }>();

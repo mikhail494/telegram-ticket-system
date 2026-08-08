@@ -1028,6 +1028,19 @@ export class SupportDatabase {
       .run(input.text, input.chatId, input.originChatId ?? null, input.originMessageId ?? null, now(), now(), answerPackageId, staffChatId);
   }
 
+  queueTicketBatchFinalSummaryRefresh(answerPackageId: string, staffChatId: number, text: string): boolean {
+    const timestamp = now();
+    const result = this.db.prepare(`UPDATE ticket_batch_answer_packages
+      SET final_summary_state = 'PENDING', final_summary_text = ?,
+          final_summary_origin_chat_id = final_summary_chat_id,
+          final_summary_origin_message_id = final_summary_message_id,
+          final_summary_next_retry_at = ?, final_summary_last_error = NULL, updated_at = ?
+      WHERE answer_package_id = ? AND staff_chat_id = ? AND final_summary_state = 'SENT'
+        AND final_summary_chat_id IS NOT NULL AND final_summary_message_id IS NOT NULL`)
+      .run(text, timestamp, timestamp, answerPackageId, staffChatId);
+    return result.changes === 1;
+  }
+
   listPendingTicketBatchFinalSummaries(staffChatId: number, at: string, limit = 20): TicketBatchAnswerPackageRecord[] {
     return this.db.prepare(`SELECT * FROM ticket_batch_answer_packages
       WHERE staff_chat_id = ? AND final_summary_state IN ('PENDING', 'FAILED')
@@ -1078,6 +1091,21 @@ export class SupportDatabase {
             AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING', 'COMPLETED'))
         )
       ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
+  }
+
+  listPendingTicketBatchReplyAndCloseContinuations(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {
+    return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
+      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
+      JOIN tickets t ON t.id = i.ticket_id
+      WHERE p.staff_chat_id = ? AND p.status IN ('APPLYING', 'PARTIAL')
+        AND i.action = 'reply_and_close'
+        AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING')
+        AND i.delivery_message_id IS NOT NULL
+        AND i.delivery_error_category IS NULL
+        AND i.delivery_error_permanence IS NULL
+        AND i.delivery_failure_event_state != 'SENT'
+        AND i.topic_echo_state = 'SENT'
+      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, limit) as TicketBatchAnswerItemRecord[];
   }
 
   listInvalidTicketBatchSuccessEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {

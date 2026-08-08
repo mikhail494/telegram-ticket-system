@@ -180,7 +180,7 @@ describe("ticket batch staff-recovery candidates", () => {
       && String(call.payload.text).includes("Ticket batch applied with issues.")
     );
     assert.ok(summary);
-    assert.match(String(summary.payload.text), /Staff sync pending: 0/);
+    assert.match(String(summary.payload.text), /Staff echoes pending\/failed: 0/);
     assert.match(String(summary.payload.text), new RegExp(`#${failedTicket.id} .* USER_BLOCKED_BOT`));
   });
 
@@ -207,7 +207,7 @@ describe("ticket batch staff-recovery candidates", () => {
       call.payload.message_thread_id === ticket.message_thread_id
     ), false);
     const summary = harness.findApiCalls("sendMessage").find((call) =>
-      call.payload.chat_id === TEST_STAFF_CHAT_ID && String(call.payload.text).includes("Staff sync terminal failures: 1")
+      call.payload.chat_id === TEST_STAFF_CHAT_ID && String(call.payload.text).includes("Staff echoes terminal failures: 1")
     );
     assert.ok(summary);
     assert.match(String(summary.payload.text), /No action: 1/);

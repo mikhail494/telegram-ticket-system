@@ -270,6 +270,67 @@ describe("ticket batch Telegram workflow", () => {
     assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_thread_id === ticket.message_thread_id && String(call.payload.text).includes("Batch reply sent to user")).length, 3);
   });
 
+  it("resumes reply_and_close after staff echo recovery without repeating post-delivery work", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const token = getTicketSnapshotToken(ticket, []);
+    harness.db.createTicketBatchExport({
+      exportId: "export_close_recovery",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      selectionMode: "all_active",
+      ticketCount: 1,
+      items: [{ ticketId: ticket.id, snapshotToken: token }]
+    });
+    harness.setDownloadResponse(answerPackage("export_close_recovery", ticket.id, token, "reply_and_close"));
+    await harness.bot.handleUpdate(buildStaffDocumentUpdate({ fileName: "ticket-answers_export_close_recovery.json" }));
+    const preview = harness.findApiCalls("sendMessage").find((call) => String(call.payload.text).includes("Ticket answer package preview"));
+    assert.ok(preview);
+    harness.setApiResponseOverride("sendMessage", (call, success) =>
+      call.payload.chat_id === TEST_STAFF_CHAT_ID
+        && call.payload.message_thread_id === ticket.message_thread_id
+        && String(call.payload.text).includes("Batch reply sent to user")
+        ? { ok: false, error_code: 429, description: "Too Many Requests: retry after 1", parameters: { retry_after: 1 } }
+        : success
+    );
+
+    await harness.bot.handleUpdate(batchCallback(callbackData(preview, "Apply"), 122, preview));
+
+    const deliveredItem = harness.db.listTicketBatchAnswerItems("answers_1")[0];
+    assert.equal(deliveredItem?.state, "STAFF_SYNC_PENDING");
+    assert.ok(deliveredItem?.delivery_message_id);
+    assert.equal(harness.db.getTicket(ticket.id)?.status, "IN_PROGRESS");
+    assert.equal(harness.db.listMessagesChronological(ticket.id).filter((message) => message.direction === "STAFF_TO_USER").length, 1);
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "A valid reply").length, 1);
+
+    harness.clearApiOverrides();
+    harness.db.recordTicketBatchTopicEcho("answers_1", ticket.id, "FAILED", {
+      nextRetryAt: "2020-01-01T00:00:00.000Z"
+    });
+    await harness.bot.recoverPendingTicketBatchStaffOperations();
+
+    assert.equal(harness.db.getTicket(ticket.id)?.status, "CLOSED");
+    assert.ok(harness.db.getTicket(ticket.id)?.archived_at);
+    assert.equal(harness.db.listTicketBatchAnswerItems("answers_1")[0]?.state, "COMPLETED");
+    assert.equal(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID)?.status, "COMPLETED");
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "A valid reply").length, 1);
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_thread_id === ticket.message_thread_id && String(call.payload.text).includes("Batch reply sent to user")).length, 4);
+    assert.equal(harness.countApiCalls("sendDocument"), 1);
+    assert.equal(harness.countApiCalls("deleteForumTopic"), 1);
+    const refreshedSummary = harness.findApiCalls("editMessageText").at(-1);
+    assert.match(String(refreshedSummary?.payload.text), /Tickets closed: 1/);
+    assert.match(String(refreshedSummary?.payload.text), /Ticket closures pending\/failed: 0/);
+    assert.match(String(refreshedSummary?.payload.text), /Archives completed: 1/);
+    assert.match(String(refreshedSummary?.payload.text), /Topic closures unconfirmed: 1/);
+
+    await harness.bot.recoverPendingTicketBatchStaffOperations();
+
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "A valid reply").length, 1);
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_thread_id === ticket.message_thread_id && String(call.payload.text).includes("Batch reply sent to user")).length, 4);
+    assert.equal(harness.countApiCalls("sendDocument"), 1);
+    assert.equal(harness.countApiCalls("deleteForumTopic"), 1);
+  });
+
   it("rejects malformed packages and answer packages inside ticket topics without forwarding them", async () => {
     const harness = createHarness();
     const ticket = harness.seedTicket();
@@ -416,7 +477,7 @@ describe("ticket batch Telegram workflow", () => {
     assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID).length, 1);
   });
 
-  it("does not create a replacement preview for a partially applied package", async () => {
+  it("recovers a pending archive without resending the reply or recreating the preview", async () => {
     const harness = createHarness();
     const ticket = harness.seedTicket();
     const token = getTicketSnapshotToken(ticket, []);
@@ -430,9 +491,9 @@ describe("ticket batch Telegram workflow", () => {
     await harness.bot.handleUpdate(batchCallback(callbackData(firstPreview, "Apply"), 4, firstPreview));
 
     assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "A valid reply").length, 1);
-    assert.equal(harness.db.listMessagesChronological(ticket.id).filter((message) => message.direction === "STAFF_TO_USER").length, 1);
-    assert.equal(harness.db.listTicketBatchAnswerItems("answers_1")[0]?.state, "REPLY_SENT");
-    assert.equal(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID)?.status, "PARTIAL");
+    assert.equal(harness.db.listMessagesChronological(ticket.id).length, 0);
+    assert.equal(harness.db.listTicketBatchAnswerItems("answers_1")[0]?.state, "COMPLETED");
+    assert.equal(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID)?.status, "COMPLETED");
 
     const userRepliesBeforeRepeat = harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "A valid reply").length;
     harness.clearApiCalls();
@@ -441,8 +502,8 @@ describe("ticket batch Telegram workflow", () => {
     assert.equal(harness.findApiCalls("sendMessage").some((call) => String(call.payload.text).includes("Ticket answer package preview")), false);
     assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id).length, 0);
     assert.equal(userRepliesBeforeRepeat, 1);
-    assert.equal(harness.db.listTicketBatchAnswerItems("answers_1")[0]?.state, "REPLY_SENT");
-    assert.equal(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID)?.status, "PARTIAL");
+    assert.equal(harness.db.listTicketBatchAnswerItems("answers_1")[0]?.state, "COMPLETED");
+    assert.equal(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID)?.status, "COMPLETED");
   });
 
   it("does not create a preview for an already applying package", async () => {

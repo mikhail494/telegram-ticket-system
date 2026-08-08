@@ -13,6 +13,7 @@ import {
 import { formatDate, truncate } from "./format.js";
 import { displayTelegramUser } from "./telegram.js";
 import { logger } from "./logger.js";
+import { normalizeTelegramDeliveryError } from "./deliveryDiagnostics.js";
 
 const SUPPORT_LOGS_TOPIC_NAME = "📜 Support Logs";
 const SUPPORT_LOGS_THREAD_SETTING_PREFIX = "support_logs_message_thread_id";
@@ -166,8 +167,16 @@ export async function archiveTicketIfPossible(
     return true;
   } catch (error) {
     if (isForumTopicUnavailable(error)) {
+      const diagnostic = normalizeTelegramDeliveryError(error);
       logger.warn(
-        { err: error, ticketId: ticket.id },
+        {
+          ticketId: ticket.id,
+          stage: "SUPPORT_LOGS_DELIVERY",
+          category: diagnostic.category,
+          method: diagnostic.method,
+          telegramErrorCode: diagnostic.telegramErrorCode,
+          httpStatus: diagnostic.httpStatus
+        },
         "Support Logs topic is unavailable; recreating and retrying transcript upload"
       );
 
@@ -179,14 +188,30 @@ export async function archiveTicketIfPossible(
         await removeTicketTopicAfterArchive(api, ticket);
         return true;
       } catch (retryError) {
-        logger.error({ err: retryError, ticketId: ticket.id }, "Could not archive ticket transcript after retry");
-        await notifyTicketTopicArchiveFailure(api, ticket, describeError(retryError));
+        const retryDiagnostic = normalizeTelegramDeliveryError(retryError);
+        logger.error({
+          ticketId: ticket.id,
+          stage: "TRANSCRIPT_ARCHIVE_RETRY",
+          category: retryDiagnostic.category,
+          method: retryDiagnostic.method,
+          telegramErrorCode: retryDiagnostic.telegramErrorCode,
+          httpStatus: retryDiagnostic.httpStatus
+        }, "Could not archive ticket transcript after retry");
+        await notifyTicketTopicArchiveFailure(api, ticket, retryDiagnostic.category);
         return false;
       }
     }
 
-    logger.error({ err: error, ticketId: ticket.id }, "Could not archive ticket transcript");
-    await notifyTicketTopicArchiveFailure(api, ticket, describeError(error));
+    const diagnostic = normalizeTelegramDeliveryError(error);
+    logger.error({
+      ticketId: ticket.id,
+      stage: "TRANSCRIPT_ARCHIVE",
+      category: diagnostic.category,
+      method: diagnostic.method,
+      telegramErrorCode: diagnostic.telegramErrorCode,
+      httpStatus: diagnostic.httpStatus
+    }, "Could not archive ticket transcript");
+    await notifyTicketTopicArchiveFailure(api, ticket, diagnostic.category);
     return false;
   } finally {
     await fs.rm(tempFile.directory, { recursive: true, force: true });
@@ -493,16 +518,81 @@ async function removeTicketTopicAfterArchive(api: BotApi, ticket: TicketWithUser
 
   try {
     await api.deleteForumTopic(ticket.staff_chat_id, ticket.message_thread_id);
+    logger.info({
+      ticketId: ticket.id,
+      topicId: ticket.message_thread_id,
+      method: "deleteForumTopic",
+      outcome: "SUCCESS"
+    }, "Archived ticket topic cleanup completed");
     return;
   } catch (error) {
-    logger.warn({ err: error, ticketId: ticket.id }, "Could not delete archived ticket topic");
+    const diagnostic = normalizeTelegramDeliveryError(error);
+    if (isResolvedTopicCleanupError(diagnostic.description)) {
+      logger.info({
+        ticketId: ticket.id,
+        topicId: ticket.message_thread_id,
+        method: "deleteForumTopic",
+        outcome: "TERMINAL_SUCCESS",
+        category: diagnostic.category,
+        telegramErrorCode: diagnostic.telegramErrorCode
+      }, "Archived ticket topic was already unavailable");
+      return;
+    }
+    logger.warn({
+      ticketId: ticket.id,
+      topicId: ticket.message_thread_id,
+      method: "deleteForumTopic",
+      outcome: "FAILED",
+      category: diagnostic.category,
+      telegramErrorCode: diagnostic.telegramErrorCode,
+      httpStatus: diagnostic.httpStatus,
+      description: diagnostic.description
+    }, "Could not delete archived ticket topic");
   }
 
   try {
     await api.closeForumTopic(ticket.staff_chat_id, ticket.message_thread_id);
+    logger.info({
+      ticketId: ticket.id,
+      topicId: ticket.message_thread_id,
+      method: "closeForumTopic",
+      outcome: "SUCCESS"
+    }, "Archived ticket topic cleanup completed");
   } catch (error) {
-    logger.warn({ err: error, ticketId: ticket.id }, "Could not close archived ticket topic");
+    const diagnostic = normalizeTelegramDeliveryError(error);
+    if (isResolvedTopicCleanupError(diagnostic.description)) {
+      logger.info({
+        ticketId: ticket.id,
+        topicId: ticket.message_thread_id,
+        method: "closeForumTopic",
+        outcome: "TERMINAL_SUCCESS",
+        category: diagnostic.category,
+        telegramErrorCode: diagnostic.telegramErrorCode
+      }, "Archived ticket topic was already closed or unavailable");
+      return;
+    }
+    logger.warn({
+      ticketId: ticket.id,
+      topicId: ticket.message_thread_id,
+      method: "closeForumTopic",
+      outcome: "FAILED",
+      category: diagnostic.category,
+      telegramErrorCode: diagnostic.telegramErrorCode,
+      httpStatus: diagnostic.httpStatus,
+      description: diagnostic.description
+    }, "Could not close archived ticket topic");
   }
+}
+
+function isResolvedTopicCleanupError(description: string | null): boolean {
+  if (!description) return false;
+  const normalized = description.toLowerCase();
+  return normalized.includes("message thread not found")
+    || normalized.includes("topic not found")
+    || normalized.includes("topic is closed")
+    || normalized.includes("topic was closed")
+    || normalized.includes("already closed")
+    || normalized.includes("message is not modified");
 }
 
 async function notifyTicketTopicArchiveFailure(
@@ -526,7 +616,15 @@ async function notifyTicketTopicArchiveFailure(
       }
     );
   } catch (noticeError) {
-    logger.warn({ err: noticeError, ticketId: ticket.id }, "Could not notify staff about archive failure");
+    const diagnostic = normalizeTelegramDeliveryError(noticeError);
+    logger.warn({
+      ticketId: ticket.id,
+      stage: "ARCHIVE_FAILURE_NOTICE",
+      category: diagnostic.category,
+      method: diagnostic.method,
+      telegramErrorCode: diagnostic.telegramErrorCode,
+      httpStatus: diagnostic.httpStatus
+    }, "Could not notify staff about archive failure");
   }
 }
 
