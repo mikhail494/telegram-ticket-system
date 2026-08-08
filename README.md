@@ -7,7 +7,7 @@ A Telegram-native support desk that turns private user messages into structured 
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-7A3E9D.svg)](LICENSE)
 
-Version: `1.2.6` (v1.3.0 phase 1 development branch)
+Version: `1.2.7` (v1.3.0 phase 1 development branch)
 
 Users contact the bot in private chat, while staff work entirely in a dedicated Telegram forum supergroup. Each ticket receives its own topic, Quick Replies speed up routine responses, and closed conversations are archived as text transcripts in Support Logs.
 
@@ -278,7 +278,7 @@ npm test
 npm run build
 ```
 
-The current suite contains 212 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, entity notifications, bootstrap configuration, owner pairing, onboarding, workspace validation, and role authorization.
+The current suite contains 220 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, entity notifications, bootstrap configuration, owner pairing, onboarding, workspace validation, and role authorization.
 
 ## Project Structure
 

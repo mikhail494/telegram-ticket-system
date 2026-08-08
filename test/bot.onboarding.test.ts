@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Update } from "grammy/types";
+import packageMetadata from "../package.json" with { type: "json" };
 import { InstallationService } from "../src/installation.js";
 import { createBotHarness, TEST_STAFF_CHAT_ID } from "./helpers/botHarness.js";
 
@@ -54,7 +55,9 @@ test("owner receives dashboard instead of accidentally creating a ticket", async
   try {
     await harness.bot.handleUpdate(privateMessage(1, "ordinary owner text"));
     assert.equal(harness.db.listTicketsForUser(1, TEST_STAFF_CHAT_ID).length, 0);
-    assert.match(String(harness.findApiCalls("sendMessage")[0]?.payload.text), /Owner dashboard/);
+    const dashboard = String(harness.findApiCalls("sendMessage")[0]?.payload.text);
+    assert.match(dashboard, /Owner dashboard/);
+    assert.match(dashboard, new RegExp(`Version: ${packageMetadata.version.replaceAll(".", "\\.")}`));
   } finally { harness.cleanup(); }
 });
 

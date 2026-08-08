@@ -9,12 +9,13 @@ export interface WorkspaceStartupTasks {
 }
 
 export async function runWorkspaceStartup(installation: InstallationService, tasks: WorkspaceStartupTasks): Promise<"SETUP_REQUIRED" | "READY"> {
+  const setupState = installation.getState().setupState;
   const workspace = installation.getActiveWorkspace();
-  if (!workspace) return "SETUP_REQUIRED";
+  if (setupState !== "READY" || !workspace) return "SETUP_REQUIRED";
   await tasks.initializeSupportLogs();
   await tasks.recoverArchives();
   await tasks.recoverModeration();
   await tasks.recoverBatch();
   if (!workspace.imported_from_legacy) await tasks.sendLegacyStaffOnboarding();
-  return installation.getState().setupState;
+  return setupState;
 }

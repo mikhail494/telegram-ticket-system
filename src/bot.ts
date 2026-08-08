@@ -2,6 +2,7 @@ import { Bot, GrammyError, HttpError, InlineKeyboard, InputFile, Keyboard } from
 import { randomUUID } from "node:crypto";
 import type { CommandContext, Context } from "grammy";
 import type { Message, ReactionTypeEmoji, User } from "grammy/types";
+import packageMetadata from "../package.json" with { type: "json" };
 import {
   archiveTicketIfPossible,
   getSupportLogsTopicInfo,
@@ -673,7 +674,7 @@ export function createBot(
     const roles = new Map<string, number>();
     for (const entry of installation.listTeamMembers()) roles.set(entry.role, (roles.get(entry.role) ?? 0) + 1);
     return [member?.role === "OWNER" ? "Owner dashboard" : `${member?.role.replace("_", " ") ?? "Staff"} dashboard`, "",
-      `Bot: @${bot.botInfo?.username ?? "loading"}`, "Version: 1.2.6", `Setup: ${installation.getState().setupState}`,
+      `Bot: @${bot.botInfo?.username ?? "loading"}`, `Version: ${packageMetadata.version}`, `Setup: ${installation.getState().setupState}`,
       `Authorization: ${installation.getState().authorizationMode}`, `Owner: ${installation.getOwner()?.username ? `@${installation.getOwner()?.username}` : installation.getOwner()?.userTelegramId ?? "not paired"}`,
       `Staff workspace: ${workspace?.title ?? workspace?.telegram_chat_id ?? "not configured"}`,
       `Support Logs: ${workspace && db.getSetting(`support_logs_message_thread_id:${workspace.telegram_chat_id}`) ? "configured" : "not configured"}`,

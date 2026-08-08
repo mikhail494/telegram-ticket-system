@@ -7,9 +7,11 @@ import { runWorkspaceStartup } from "../src/startup.js";
 test("setup mode skips every staff-workspace startup task", async () => {
   const db = new SupportDatabase(":memory:");
   try {
+    const service = new InstallationService(db);
+    service.activateWorkspace({ chatId: -10041, title: "Pending setup workspace" });
     const calls: string[] = [];
     const task = (name: string) => async () => { calls.push(name); };
-    assert.equal(await runWorkspaceStartup(new InstallationService(db), { initializeSupportLogs: task("logs"), recoverArchives: task("archives"), recoverModeration: task("moderation"), recoverBatch: task("batch"), sendLegacyStaffOnboarding: task("onboarding") }), "SETUP_REQUIRED");
+    assert.equal(await runWorkspaceStartup(service, { initializeSupportLogs: task("logs"), recoverArchives: task("archives"), recoverModeration: task("moderation"), recoverBatch: task("batch"), sendLegacyStaffOnboarding: task("onboarding") }), "SETUP_REQUIRED");
     assert.deepEqual(calls, []);
   } finally { db.close(); }
 });
