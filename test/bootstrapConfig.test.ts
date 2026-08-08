@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { loadHostConfig } from "../src/config.js";
 import { runSetup } from "../src/setup.js";
+
+process.env.BOT_TOKEN ??= "123456:TEST_BOT_TOKEN";
+const { loadHostConfig } = await import("../src/config.js");
 
 test("host config allows an omitted STAFF_CHAT_ID", () => {
   const config = loadHostConfig({ env: { BOT_TOKEN: "123:test" }, envFile: false });
