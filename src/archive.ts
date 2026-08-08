@@ -13,7 +13,10 @@ import {
 import { formatDate, truncate } from "./format.js";
 import { displayTelegramUser } from "./telegram.js";
 import { logger } from "./logger.js";
-import { normalizeTelegramDeliveryError } from "./deliveryDiagnostics.js";
+import {
+  normalizeTelegramDeliveryError,
+  type NormalizedDeliveryError
+} from "./deliveryDiagnostics.js";
 
 const SUPPORT_LOGS_TOPIC_NAME = "📜 Support Logs";
 const SUPPORT_LOGS_THREAD_SETTING_PREFIX = "support_logs_message_thread_id";
@@ -27,6 +30,10 @@ interface TranscriptDelivery {
 
 interface SendTranscriptOptions {
   recreateTopic?: boolean;
+}
+
+interface ArchiveAttemptOptions {
+  onFailure?: (diagnostic: NormalizedDeliveryError) => void;
 }
 
 export interface ArchiveActor {
@@ -139,7 +146,8 @@ export async function archiveClosedTicketsPendingUpload(
 export async function archiveTicketIfPossible(
   api: BotApi,
   db: SupportDatabase,
-  ticketId: number
+  ticketId: number,
+  options: ArchiveAttemptOptions = {}
 ): Promise<boolean> {
   const ticket = db.getTicketWithUser(ticketId);
   if (!ticket || ticket.status !== "CLOSED") {
@@ -189,6 +197,7 @@ export async function archiveTicketIfPossible(
         return true;
       } catch (retryError) {
         const retryDiagnostic = normalizeTelegramDeliveryError(retryError);
+        options.onFailure?.(retryDiagnostic);
         logger.error({
           ticketId: ticket.id,
           stage: "TRANSCRIPT_ARCHIVE_RETRY",
@@ -203,6 +212,7 @@ export async function archiveTicketIfPossible(
     }
 
     const diagnostic = normalizeTelegramDeliveryError(error);
+    options.onFailure?.(diagnostic);
     logger.error({
       ticketId: ticket.id,
       stage: "TRANSCRIPT_ARCHIVE",

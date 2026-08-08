@@ -491,6 +491,16 @@ describe("ticket batch Telegram workflow", () => {
     await harness.bot.handleUpdate(batchCallback(callbackData(firstPreview, "Apply"), 4, firstPreview));
 
     assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "A valid reply").length, 1);
+    assert.equal(harness.db.listMessagesChronological(ticket.id).length, 1);
+    assert.equal(harness.db.listTicketBatchAnswerItems("answers_1")[0]?.state, "REPLY_SENT");
+    assert.equal(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID)?.status, "PARTIAL");
+
+    harness.db.recordTicketBatchTopicEcho("answers_1", ticket.id, "SENT", {
+      nextRetryAt: "2020-01-01T00:00:00.000Z"
+    });
+    await harness.bot.recoverPendingTicketBatchStaffOperations();
+
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id && call.payload.text === "A valid reply").length, 1);
     assert.equal(harness.db.listMessagesChronological(ticket.id).length, 0);
     assert.equal(harness.db.listTicketBatchAnswerItems("answers_1")[0]?.state, "COMPLETED");
     assert.equal(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID)?.status, "COMPLETED");

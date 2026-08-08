@@ -1093,7 +1093,30 @@ export class SupportDatabase {
       ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
   }
 
-  listPendingTicketBatchReplyAndCloseContinuations(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {
+  listClosedTicketBatchReplyAndClosePendingEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {
+    return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
+      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
+      JOIN tickets t ON t.id = i.ticket_id
+      WHERE p.staff_chat_id = ? AND p.status IN ('APPLYING', 'PARTIAL')
+        AND t.status = 'CLOSED'
+        AND i.action = 'reply_and_close'
+        AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING')
+        AND i.delivery_message_id IS NOT NULL
+        AND i.delivery_error_category IS NULL
+        AND i.delivery_error_permanence IS NULL
+        AND i.delivery_failure_event_state != 'SENT'
+        AND i.topic_echo_state IN ('PENDING', 'FAILED')
+      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, limit) as TicketBatchAnswerItemRecord[];
+  }
+
+  setTicketBatchPostDeliveryRetry(answerPackageId: string, ticketId: number, nextRetryAt: string | null, lastError: string | null): void {
+    this.db.prepare(`UPDATE ticket_batch_answer_items
+      SET topic_echo_next_retry_at = ?, last_error = ?, updated_at = ?
+      WHERE answer_package_id = ? AND ticket_id = ?`)
+      .run(nextRetryAt, lastError, now(), answerPackageId, ticketId);
+  }
+
+  listPendingTicketBatchReplyAndCloseContinuations(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[] {
     return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
       JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
       JOIN tickets t ON t.id = i.ticket_id
@@ -1104,8 +1127,33 @@ export class SupportDatabase {
         AND i.delivery_error_category IS NULL
         AND i.delivery_error_permanence IS NULL
         AND i.delivery_failure_event_state != 'SENT'
-        AND i.topic_echo_state = 'SENT'
-      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, limit) as TicketBatchAnswerItemRecord[];
+        AND (i.topic_echo_state = 'SENT' OR (i.topic_echo_state = 'NOT_REQUIRED' AND t.status = 'CLOSED'))
+        AND (i.topic_echo_next_retry_at IS NULL OR i.topic_echo_next_retry_at <= ?)
+      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
+  }
+
+  getNextTicketBatchStaffRetryAt(staffChatId: number): string | undefined {
+    const row = this.db.prepare(`SELECT MIN(retry_at) AS retry_at FROM (
+      SELECT i.topic_echo_next_retry_at AS retry_at
+      FROM ticket_batch_answer_items i
+      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
+      WHERE p.staff_chat_id = ? AND i.topic_echo_next_retry_at IS NOT NULL
+        AND (i.topic_echo_state IN ('PENDING', 'FAILED')
+          OR (i.action = 'reply_and_close' AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING')
+            AND i.topic_echo_state IN ('SENT', 'NOT_REQUIRED')))
+      UNION ALL
+      SELECT i.delivery_failure_event_next_retry_at
+      FROM ticket_batch_answer_items i
+      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
+      WHERE p.staff_chat_id = ? AND i.delivery_failure_event_state IN ('PENDING', 'FAILED')
+        AND i.delivery_failure_event_next_retry_at IS NOT NULL
+      UNION ALL
+      SELECT final_summary_next_retry_at
+      FROM ticket_batch_answer_packages
+      WHERE staff_chat_id = ? AND final_summary_state IN ('PENDING', 'FAILED')
+        AND final_summary_next_retry_at IS NOT NULL
+    )`).get(staffChatId, staffChatId, staffChatId) as { retry_at: string | null };
+    return row.retry_at ?? undefined;
   }
 
   listInvalidTicketBatchSuccessEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {

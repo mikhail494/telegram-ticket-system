@@ -204,4 +204,103 @@ describe("reply_and_close post-delivery recovery", () => {
     assert.match(String(summary.payload.text), /Topic closures unconfirmed: 0/);
     assert.equal(current.db.getTicketBatchAnswerPackage("summary_stages", TEST_STAFF_CHAT_ID)?.status, "PARTIAL");
   });
+
+  it("serializes concurrent recovery passes for an already closed ticket", async () => {
+    const current = harness();
+    const ticket = current.seedTicket({ user: { id: 4351 }, messageThreadId: 74351 });
+    createReplyAndClosePackage(current.db, "concurrent_recovery", [ticket]);
+    recordConfirmedReply(current.db, "concurrent_recovery", ticket, 8961);
+    current.db.recordTicketBatchTopicEcho("concurrent_recovery", ticket.id, "SENT", {
+      chatId: TEST_STAFF_CHAT_ID,
+      threadId: ticket.message_thread_id,
+      messageId: 9961
+    });
+    current.db.closeTicketRecord(ticket.id, {
+      type: "STAFF",
+      displayName: "Synthetic Staff",
+      username: "synthetic_staff"
+    });
+    current.db.finalizeTicketBatchAnswerPackage("concurrent_recovery", TEST_STAFF_CHAT_ID);
+    current.clearApiCalls();
+
+    await Promise.all([
+      current.bot.recoverPendingTicketBatchStaffOperations(),
+      current.bot.recoverPendingTicketBatchStaffOperations()
+    ]);
+
+    assert.equal(current.countApiCalls("sendDocument"), 1);
+    assert.equal(current.countApiCalls("deleteForumTopic"), 1);
+    assert.equal(current.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(current.db.listTicketBatchAnswerItems("concurrent_recovery")[0]?.state, "COMPLETED");
+  });
+
+  it("normalizes a pending echo after independent closure and resumes archive only", async () => {
+    const current = harness();
+    const ticket = current.seedTicket({ user: { id: 4401 }, messageThreadId: 74401 });
+    createReplyAndClosePackage(current.db, "closed_pending_echo", [ticket]);
+    recordConfirmedReply(current.db, "closed_pending_echo", ticket, 8971);
+    current.db.recordTicketBatchTopicEcho("closed_pending_echo", ticket.id, "FAILED", {
+      nextRetryAt: "2020-01-01T00:00:00.000Z"
+    });
+    current.db.closeTicketRecord(ticket.id, {
+      type: "STAFF",
+      displayName: "Synthetic Staff",
+      username: "synthetic_staff"
+    });
+    current.db.finalizeTicketBatchAnswerPackage("closed_pending_echo", TEST_STAFF_CHAT_ID);
+    current.clearApiCalls();
+
+    await current.bot.recoverPendingTicketBatchStaffOperations();
+
+    const item = current.db.listTicketBatchAnswerItems("closed_pending_echo")[0];
+    assert.equal(item?.topic_echo_state, "NOT_REQUIRED");
+    assert.equal(item?.state, "COMPLETED");
+    assert.equal(current.countApiCalls("sendDocument"), 1);
+    assert.equal(current.findApiCalls("sendMessage").some((call) =>
+      call.payload.message_thread_id === ticket.message_thread_id
+        && String(call.payload.text).includes("Batch reply sent to user")
+    ), false);
+    assert.equal(current.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+  });
+
+  it("persists archive retry_after and does not retry continuation before it is due", async () => {
+    const current = harness();
+    const ticket = current.seedTicket({ user: { id: 4451 }, messageThreadId: 74451 });
+    createReplyAndClosePackage(current.db, "archive_retry_after", [ticket]);
+    recordConfirmedReply(current.db, "archive_retry_after", ticket, 8981);
+    current.db.recordTicketBatchTopicEcho("archive_retry_after", ticket.id, "SENT", {
+      chatId: TEST_STAFF_CHAT_ID,
+      threadId: ticket.message_thread_id,
+      messageId: 9981
+    });
+    current.db.finalizeTicketBatchAnswerPackage("archive_retry_after", TEST_STAFF_CHAT_ID);
+    current.setApiResponseOverride("sendDocument", () => ({
+      ok: false,
+      error_code: 429,
+      description: "Too Many Requests",
+      parameters: { retry_after: 120 }
+    }));
+
+    await current.bot.recoverPendingTicketBatchStaffOperations();
+
+    const pending = current.db.listTicketBatchAnswerItems("archive_retry_after")[0];
+    assert.equal(current.db.getTicket(ticket.id)?.status, "CLOSED");
+    assert.equal(current.db.getTicket(ticket.id)?.archived_at, null);
+    assert.ok(pending?.topic_echo_next_retry_at);
+    assert.ok(new Date(pending.topic_echo_next_retry_at).getTime() >= Date.now() + 119_000);
+
+    current.clearApiOverrides();
+    current.clearApiCalls();
+    await current.bot.recoverPendingTicketBatchStaffOperations();
+    assert.equal(current.countApiCalls("sendDocument"), 0);
+    assert.equal(current.db.getTicket(ticket.id)?.archived_at, null);
+
+    current.db.recordTicketBatchTopicEcho("archive_retry_after", ticket.id, "SENT", {
+      nextRetryAt: "2020-01-01T00:00:00.000Z"
+    });
+    await current.bot.recoverPendingTicketBatchStaffOperations();
+    assert.equal(current.countApiCalls("sendDocument"), 1);
+    assert.ok(current.db.getTicket(ticket.id)?.archived_at);
+    assert.equal(current.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+  });
 });
