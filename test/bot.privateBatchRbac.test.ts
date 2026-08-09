@@ -86,19 +86,25 @@ function answerPackage(exportId: string, ticketId: number, snapshotToken: string
   });
 }
 
-test("OWNER and ADMIN receive private batch controls while junior roles do not", async () => {
+function exportIdFromCaption(call: RecordedApiCall): string {
+  const match = /^Export: (export_[a-f0-9]+)$/m.exec(String(call.payload.caption));
+  if (!match) throw new Error("Missing export ID in caption");
+  return match[1]!;
+}
+
+test("OWNER and ADMIN receive direct private export controls while junior roles do not", async () => {
   for (const role of ["OWNER", "ADMIN", "SENIOR_AGENT", "AGENT"] as const) {
     const { harness } = createReadyHarness({ role, rbac: true });
     const userId = role === "OWNER" ? 1 : 2;
     await harness.bot.handleUpdate(privateCallback(userId, "dashboard:batch", userId + 10));
-    const edited = harness.findApiCalls("editMessageText").map((call) => String(call.payload.text)).join("\n");
-    const sent = harness.findApiCalls("sendMessage").map((call) => String(call.payload.text)).join("\n");
-    if (role === "OWNER" || role === "ADMIN") assert.match(edited, /Batch operations/);
-    else assert.doesNotMatch(sent, /Export active tickets/);
+    if (role === "OWNER" || role === "ADMIN") {
+      const keyboard = harness.findApiCalls("editMessageText")[0]?.payload.reply_markup as { inline_keyboard?: Array<Array<{ callback_data?: string }>> };
+      assert.equal(keyboard.inline_keyboard?.flat().some((button) => button.callback_data === "batch-ui:export"), true);
+    }
   }
 });
 
-test("private export uses the existing exporter and targets the initiating administrator", async () => {
+test("private export uses the existing exporter, targets the initiating administrator, and enters answer waiting", async () => {
   const { harness } = createReadyHarness({ role: "ADMIN", rbac: true });
   harness.seedTicket();
 
@@ -107,27 +113,19 @@ test("private export uses the existing exporter and targets the initiating admin
   const exportCall = harness.findApiCalls("sendDocument")[0];
   assert.equal(exportCall?.payload.chat_id, 2);
   assert.equal(harness.findApiCalls("sendDocument").some((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID), false);
+  const exportId = exportIdFromCaption(exportCall!);
+  assert.equal(harness.db.getSetting("private_batch_export:2"), exportId);
+  assert.match(String(harness.findApiCalls("sendMessage").at(-1)?.payload.text), /Waiting for answers/);
 });
 
-test("private Apply requires an explicit session and rechecks the role at confirmation", async () => {
+test("private export accepts its answer file without a separate Apply mode and rechecks the role at confirmation", async () => {
   const { harness, installation } = createReadyHarness({ role: "ADMIN", rbac: true });
   const ticket = harness.seedTicket();
   const token = getTicketSnapshotToken(ticket, []);
-  harness.db.createTicketBatchExport({
-    exportId: "private_export",
-    staffChatId: TEST_STAFF_CHAT_ID,
-    createdAt: "2026-08-09T00:00:00.000Z",
-    selectionMode: "all_active",
-    ticketCount: 1,
-    items: [{ ticketId: ticket.id, snapshotToken: token }]
-  });
-  harness.setDownloadResponse(answerPackage("private_export", ticket.id, token));
-
-  await harness.bot.handleUpdate(privateDocument(2, "random.zip"));
-  assert.equal(harness.db.listTicketBatchAnswerItems("private_answers_1").length, 0);
-
-  await harness.bot.handleUpdate(privateCallback(2, "batch-ui:apply", 30));
-  await harness.bot.handleUpdate(privateDocument(2, "ticket-answers_private_export.json", 31));
+  await harness.bot.handleUpdate(privateCallback(2, "batch-ui:export", 30));
+  const exportId = exportIdFromCaption(harness.findApiCalls("sendDocument")[0]!);
+  harness.setDownloadResponse(answerPackage(exportId, ticket.id, token));
+  await harness.bot.handleUpdate(privateDocument(2, `ticket-answers_${exportId}.json`, 31));
   const preview = harness.findApiCalls("sendMessage").find((call) => String(call.payload.text).includes("Ticket answer package preview"));
   assert.ok(preview);
   const applyData = callbackData(preview!, "Apply");
@@ -138,6 +136,54 @@ test("private Apply requires an explicit session and rechecks the role at confir
 
   assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
   assert.match(String(harness.findApiCalls("answerCallbackQuery")[0]?.payload.text), /OWNER or ADMIN/i);
+});
+
+test("invalid answer files keep the current export waiting without ticket mutations", async () => {
+  const { harness } = createReadyHarness({ role: "ADMIN", rbac: true });
+  harness.seedTicket();
+  await harness.bot.handleUpdate(privateCallback(2, "batch-ui:export", 40));
+  const exportId = exportIdFromCaption(harness.findApiCalls("sendDocument")[0]!);
+  harness.clearApiCalls();
+
+  await harness.bot.handleUpdate(privateDocument(2, "ticket-answers_wrong_export.json", 41));
+
+  assert.equal(harness.db.getSetting("private_batch_export:2"), exportId);
+  assert.equal(harness.db.listTicketBatchAnswerItems("private_answers_1").length, 0);
+  assert.match(String(harness.findApiCalls("sendMessage").at(-1)?.payload.text), /Waiting for answers/);
+});
+
+test("pending private export remains discoverable after start and can be aborted without ticket actions", async () => {
+  const { harness } = createReadyHarness({ role: "ADMIN", rbac: true });
+  const ticket = harness.seedTicket();
+  await harness.bot.handleUpdate(privateCallback(2, "batch-ui:export", 50));
+  const exportId = exportIdFromCaption(harness.findApiCalls("sendDocument")[0]!);
+  harness.clearApiCalls();
+
+  await harness.bot.handleUpdate(privateMessage(2, "/start", 51));
+  await harness.bot.handleUpdate(privateCallback(2, "batch-ui:continue", 52));
+  assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /Waiting for answers/);
+  await harness.bot.handleUpdate(privateCallback(2, "batch-ui:abort", 53));
+  const confirmation = harness.findApiCalls("editMessageText").at(-1);
+  assert.match(String(confirmation?.payload.text), /Abort this batch workflow/);
+  await harness.bot.handleUpdate(privateCallback(2, "batch-ui:abort-confirm", 54));
+
+  assert.equal(harness.db.getSetting("private_batch_export:2"), "");
+  assert.equal(harness.db.getTicketBatchExport(exportId, TEST_STAFF_CHAT_ID)?.delivery_state, "DELIVERED");
+  assert.equal(harness.db.getTicketWithUser(ticket.id)?.status, "OPEN");
+});
+
+test("batch help is vendor-neutral and returns to the pending workflow", async () => {
+  const { harness } = createReadyHarness({ role: "ADMIN", rbac: true });
+  harness.seedTicket();
+  await harness.bot.handleUpdate(privateCallback(2, "batch-ui:export", 60));
+  harness.clearApiCalls();
+
+  await harness.bot.handleUpdate(privateCallback(2, "batch-ui:help", 61));
+  const help = String(harness.findApiCalls("editMessageText")[0]?.payload.text);
+  assert.match(help, /chosen AI assistant/i);
+  assert.doesNotMatch(help, /ChatGPT|Claude|OpenAI|Anthropic|schema/i);
+  await harness.bot.handleUpdate(privateCallback(2, "batch-ui:continue", 62));
+  assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /Waiting for answers/);
 });
 
 test("RBAC-active staff batch command is redirected without exporting", async () => {
