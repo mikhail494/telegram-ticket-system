@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-09
+
+### Added
+
+- Guided self-hosted setup with OWNER pairing, recovery, and Telegram-native staff-workspace selection.
+- Application roles for OWNER, ADMIN, SENIOR_AGENT, and AGENT, with explicit role-based access activation.
+- Management of multiple public Telegram chats with independent moderation configuration.
+- Topic-aware moderation warnings for forum supergroups.
+- Private OWNER/ADMIN ticket export and answer-package Apply workflows.
+
+### Changed
+
+- Existing installations adopt the workspace, Support Logs, moderation state, tickets, archives, batch state, and sanctions without activating role-based access automatically.
+- RBAC-active staff-chat batch commands now redirect privileged operations to private chat.
+
+### Database
+
+- Added migrations 20 and 21 for installation onboarding and per-public-chat moderation state.
+
 ## [1.2.7] - 2026-08-09
 
 ### Fixed
