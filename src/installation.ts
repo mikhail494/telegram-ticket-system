@@ -118,6 +118,7 @@ export class InstallationService {
     const matched = this.findToken(token, ["TEAM_INVITE"]);
     if (!matched) return { kind: "INVALID" };
     if (Date.parse(matched.expires_at) <= this.now().getTime()) return { kind: "EXPIRED" };
+    if (this.getMember(user.telegramId)?.role === "OWNER") return { kind: "INVALID" };
     this.db.invalidateTokenAndAssignMember(matched.id, user, matched.role!, this.now().toISOString());
     return { kind: "JOINED", role: matched.role! };
   }

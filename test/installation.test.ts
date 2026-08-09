@@ -190,6 +190,21 @@ test("team invitations are hashed, expiring, and single-use", () => {
   } finally { db.close(); }
 });
 
+test("an active owner cannot be demoted by consuming a team invitation", () => {
+  const db = new SupportDatabase(":memory:");
+  try {
+    const service = new InstallationService(db);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
+    const token = service.createTeamInvitation(1, "ADMIN");
+
+    assert.equal(service.consumeTeamInvitation(token, { telegramId: 1, username: "owner" }).kind, "INVALID");
+    assert.equal(service.getOwner()?.userTelegramId, 1);
+    assert.equal(service.listTeamMembers().filter((member) => member.role === "OWNER").length, 1);
+    assert.equal(service.consumeTeamInvitation(token, { telegramId: 2, username: "admin" }).kind, "JOINED");
+    assert.equal(service.getMember(2)?.role, "ADMIN");
+  } finally { db.close(); }
+});
+
 test("owner recovery keeps old owner until explicit private confirmation", () => {
   const db = new SupportDatabase(":memory:");
   try {
