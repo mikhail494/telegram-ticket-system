@@ -714,6 +714,23 @@ export function createBot(
     if (ctx.from) privateUiMessages.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
   }
 
+  async function refreshPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard): Promise<void> {
+    const target = ctx.from ? privateUiMessages.get(ctx.from.id) : undefined;
+    if (target) {
+      try {
+        await ctx.api.deleteMessage(target.chatId, target.messageId);
+      } catch {
+        try {
+          await ctx.api.editMessageReplyMarkup(target.chatId, target.messageId, { reply_markup: { inline_keyboard: [] } });
+        } catch {
+          logger.warn({ userId: ctx.from?.id }, "Could not retire private UI screen");
+        }
+      }
+    }
+    const sent = await ctx.reply(text, { reply_markup: replyMarkup });
+    if (ctx.from) privateUiMessages.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
+  }
+
   function dashboardText(userId: number): string {
     const member = installation.getMember(userId);
     const counts = db.getInstallationOperationalCounts();
@@ -786,12 +803,13 @@ export function createBot(
     await renderPrivateScreen(ctx, text, new InlineKeyboard().text("Manage public chats", "dashboard:public").row().text("Back", "dashboard:home"));
   }
 
-  async function showStaffWorkspaceSettings(ctx: Context, notice?: string): Promise<void> {
+  async function showStaffWorkspaceSettings(ctx: Context, notice?: string, refresh = false): Promise<void> {
     const workspace = installation.getActiveWorkspace();
     const current = workspace
       ? [workspace.title ?? "Unnamed workspace", workspace.username ? `@${workspace.username}` : String(workspace.telegram_chat_id)].join("\n")
       : "Not configured";
-    await renderPrivateScreen(ctx, ["Staff workspace", "", `Current:\n${current}`, ...(notice ? ["", notice] : [])].join("\n"), new InlineKeyboard()
+    const render = refresh ? refreshPrivateScreen : renderPrivateScreen;
+    await render(ctx, ["Staff workspace", "", `Current:\n${current}`, ...(notice ? ["", notice] : [])].join("\n"), new InlineKeyboard()
       .text("Choose staff workspace", "workspace:select").row()
       .text("Back", "dashboard:home"));
   }
@@ -846,7 +864,7 @@ export function createBot(
     if (!result.valid) {
       const notice = `Staff workspace is not ready:\n${formatWorkspaceChecklist(result)}`;
       if (mode === "RECONFIGURE") {
-        await showStaffWorkspaceSettings(ctx, notice);
+        await showStaffWorkspaceSettings(ctx, notice, true);
       } else {
         await renderPrivateScreen(ctx, notice, new InlineKeyboard().text("Retry", "setup:workspace").row().text("Back", "setup:stage:STAFF_WORKSPACE"));
       }
@@ -856,7 +874,7 @@ export function createBot(
     setRuntimeStaffChatId(result.chatId);
     if (mode === "RECONFIGURE") {
       if (!db.getSetting(`support_logs_message_thread_id:${result.chatId}`)) await initializeSupportLogsTopic(ctx.api, db);
-      await showStaffWorkspaceSettings(ctx, `Workspace validated:\n${formatWorkspaceChecklist(result)}`);
+      await showStaffWorkspaceSettings(ctx, `Workspace validated:\n${formatWorkspaceChecklist(result)}`, true);
       return;
     }
     installation.saveOnboardingStage(ctx.from.id, "WORKSPACE_PERMISSIONS");
@@ -1658,7 +1676,8 @@ export function createBot(
           if (actorRole === "OWNER") keyboard.text(`Admin ${member.user_telegram_id}`, `team:set:${member.user_telegram_id}:ADMIN`);
           keyboard.text(`Senior ${member.user_telegram_id}`, `team:set:${member.user_telegram_id}:SENIOR_AGENT`).text(`Agent ${member.user_telegram_id}`, `team:set:${member.user_telegram_id}:AGENT`).text("Revoke", `team:revoke:${member.user_telegram_id}`).row();
         }
-        if (actorRole === "OWNER") keyboard.text("Transfer ownership", "team:transfer").row().text("Review RBAC activation", "rbac:preview");
+        if (actorRole === "OWNER") keyboard.text("Transfer ownership", "team:transfer").row().text("Review RBAC activation", "rbac:preview").row();
+        keyboard.text("Back", "dashboard:home");
         await renderPrivateScreen(ctx, ["Team", ...installation.listTeamMembers().map((entry) => `${entry.role}: ${entry.username ? `@${entry.username}` : entry.user_telegram_id}`)].join("\n"), keyboard); return;
       }
       if (action === "public") {
@@ -1913,7 +1932,7 @@ export function createBot(
       await completeWorkspaceSelection(ctx, result, mode, { title: shared.title, username: shared.username });
     } catch {
       const mode = pendingWorkspaceSelection.get(ctx.from.id) ?? "SETUP";
-      if (mode === "RECONFIGURE") await showStaffWorkspaceSettings(ctx, "The selected group could not be inspected. Add the bot as administrator, enable Topics, then retry.");
+      if (mode === "RECONFIGURE") await showStaffWorkspaceSettings(ctx, "The selected group could not be inspected. Add the bot as administrator, enable Topics, then retry.", true);
       else await renderPrivateScreen(ctx, "The selected group could not be inspected. Add the bot as administrator, enable Topics, then retry.", new InlineKeyboard().text("Retry", "setup:workspace").row().text("Back", "setup:stage:STAFF_WORKSPACE"));
     }
   });
@@ -1987,7 +2006,7 @@ export function createBot(
             const result = await validateStaffWorkspace(ctx.api, chat.id, ctx.from.id);
             await completeWorkspaceSelection(ctx, result, workspaceMode);
           } catch {
-            if (workspaceMode === "RECONFIGURE") await showStaffWorkspaceSettings(ctx, "That public supergroup could not be validated. Check the username and bot permissions.");
+            if (workspaceMode === "RECONFIGURE") await showStaffWorkspaceSettings(ctx, "That public supergroup could not be validated. Check the username and bot permissions.", true);
             else await renderPrivateScreen(ctx, "That public supergroup could not be validated. Check the username and bot permissions.", new InlineKeyboard().text("Retry", "setup:workspace").row().text("Back", "setup:stage:STAFF_WORKSPACE"));
           }
           return;
