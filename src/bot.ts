@@ -261,14 +261,26 @@ export function createBot(
     }
   };
 
+  const requirePrivatePermission = async (ctx: Context, permission: Permission): Promise<boolean> => {
+    if (!isPrivateChat(ctx) || !ctx.from || !installation.can(ctx.from.id, permission)) {
+      if (isPrivateChat(ctx)) await ctx.reply("Your application role does not allow this action.");
+      return false;
+    }
+    if (!await hasRequiredPrivateWorkspaceMembership(ctx)) {
+      await ctx.reply("Staff workspace membership required for role-based access.");
+      return false;
+    }
+    return true;
+  };
+
   class StaffOnlyDeliveryError extends Error {
     constructor(readonly diagnostic: NormalizedDeliveryError, readonly retryAt: string | null) {
       super(diagnostic.category);
     }
   }
 
-  async function runStaffChatOperation<T>(operation: () => Promise<T>): Promise<T> {
-    const outcome = await staffChatDelivery.run(config.staffChatId, operation);
+  async function runStaffChatOperation<T>(operation: () => Promise<T>, chatId = config.staffChatId): Promise<T> {
+    const outcome = await staffChatDelivery.run(chatId, operation);
     if (outcome.value !== undefined) return outcome.value;
     throw new StaffOnlyDeliveryError(outcome.diagnostic ?? normalizeTelegramDeliveryError(new Error("Staff operation failed")), outcome.retryAt);
   }
@@ -464,6 +476,10 @@ export function createBot(
         text: "Quick Replies are available to staff only.",
         show_alert: true
       });
+      return null;
+    }
+    if (!hasApplicationPermission(ctx, "REPLY_TO_TICKETS")) {
+      await ctx.answerCallbackQuery({ text: "Your application role does not allow ticket replies.", show_alert: true });
       return null;
     }
 
@@ -697,6 +713,23 @@ export function createBot(
     const keyboard = new InlineKeyboard();
     if (role === "OWNER" || role === "ADMIN") keyboard.text("Setup", "setup:resume").text("Staff workspace", "setup:workspace").row().text("Public chats", "dashboard:public").text("Team", "dashboard:team").row().text("Moderation", "dashboard:moderation").text("Batch operations", "dashboard:batch").row().text("System status", "dashboard:status").row();
     return keyboard.text("Open test ticket as user", "dashboard:test-ticket");
+  }
+
+  function privateBatchKeyboard(): InlineKeyboard {
+    return new InlineKeyboard()
+      .text("Export tickets", "batch-ui:export")
+      .row()
+      .text("Apply answer package", "batch-ui:apply")
+      .row()
+      .text("Recent batch operations", "batch-ui:recent")
+      .row()
+      .text("Back", "dashboard:status");
+  }
+
+  async function showPrivateBatchOperations(ctx: Context): Promise<void> {
+    await ctx.reply("Batch operations\n\nExport active tickets or start an explicit answer-package Apply session.", {
+      reply_markup: privateBatchKeyboard()
+    });
   }
 
   async function showDashboard(ctx: Context): Promise<void> {
@@ -952,7 +985,13 @@ export function createBot(
       return;
     }
 
-    await ctx.reply(STAFF_HELP_TEXT, {
+    const helpText = installation.getState().authorizationMode === "RBAC_ACTIVE"
+      ? STAFF_HELP_TEXT.replace(
+        "/exporttickets - export active tickets for an answer package\nUpload a validated answer package in the staff group to preview and apply its replies.",
+        "Batch operations are available to OWNER and ADMIN in the bot's private chat."
+      )
+      : STAFF_HELP_TEXT;
+    await ctx.reply(helpText, {
       message_thread_id: ctx.message?.message_thread_id
     });
   });
@@ -1017,20 +1056,7 @@ export function createBot(
     });
   });
 
-  bot.command("exporttickets", async (ctx) => {
-    if (!isStaffChat(ctx)) {
-      if (isPrivateChat(ctx)) {
-        await ctx.reply(STAFF_ONLY_TEXT);
-      }
-      return;
-    }
-
-    if (!await requirePermission(ctx, "BATCH_OPERATIONS")) return;
-    if (typeof ctx.message?.message_thread_id === "number") {
-      await ctx.reply("Please run /exporttickets outside ticket topics.");
-      return;
-    }
-
+  async function exportActiveTickets(ctx: Context, destinationChatId: number): Promise<void> {
     if (runningTicketBatchExports.has(config.staffChatId)) {
       await ctx.reply("An export is already running for this staff chat.");
       return;
@@ -1080,7 +1106,7 @@ export function createBot(
         deliveryState: "PREPARING"
       });
       deliveryAttempted = true;
-      const delivered = await ctx.api.sendDocument(config.staffChatId, new InputFile(zip.filePath, zip.filename), {
+      const delivered = await ctx.api.sendDocument(destinationChatId, new InputFile(zip.filePath, zip.filename), {
         caption: formatTicketBatchExportCaption(exportId, zip)
       });
       try {
@@ -1113,6 +1139,26 @@ export function createBot(
       }
       runningTicketBatchExports.delete(config.staffChatId);
     }
+  }
+
+  bot.command("exporttickets", async (ctx) => {
+    if (!isStaffChat(ctx)) {
+      if (isPrivateChat(ctx)) {
+        await ctx.reply(STAFF_ONLY_TEXT);
+      }
+      return;
+    }
+
+    if (installation.getState().authorizationMode === "RBAC_ACTIVE") {
+      await ctx.reply("Batch operations are available to OWNER and ADMIN in the bot's private chat.");
+      return;
+    }
+    if (!await requirePermission(ctx, "BATCH_OPERATIONS")) return;
+    if (typeof ctx.message?.message_thread_id === "number") {
+      await ctx.reply("Please run /exporttickets outside ticket topics.");
+      return;
+    }
+    await exportActiveTickets(ctx, config.staffChatId);
   });
 
   bot.command("moderation", async (ctx) => {
@@ -1308,6 +1354,8 @@ export function createBot(
       return;
     }
 
+    if (!await requirePermission(ctx, "VIEW_TICKETS")) return;
+
     const ticketId = parseTicketId(ctx);
     if (!ticketId) {
       await ctx.reply("Usage: /ticket ID");
@@ -1332,6 +1380,8 @@ export function createBot(
       }
       return;
     }
+
+    if (!await requirePermission(ctx, "CLOSE_TICKETS")) return;
 
     const ticketId = parseTicketId(ctx);
     if (!ticketId) {
@@ -1430,6 +1480,8 @@ export function createBot(
       return;
     }
 
+    if (!await requirePermission(ctx, "VIEW_TICKETS")) return;
+
     const messageThreadId = ctx.message?.message_thread_id;
     if (typeof messageThreadId !== "number") {
       await ctx.reply("Use /whois inside a ticket topic.");
@@ -1487,19 +1539,55 @@ export function createBot(
       const action = data.split(":")[1]; await ctx.answerCallbackQuery();
       if (action === "test-ticket") { db.setSetting(`staff_test_ticket_mode:${ctx.from.id}`, "true"); await ctx.reply("Test-ticket mode enabled for your next message. Send harmless test content now."); return; }
       if (action === "team") {
+        if (!await requirePrivatePermission(ctx, "MANAGE_TEAM")) return;
         const actorRole = installation.getMember(ctx.from.id)?.role; const keyboard = new InlineKeyboard();
         if (actorRole === "OWNER") keyboard.text("Invite admin", "team:invite:ADMIN").row();
         keyboard.text("Invite senior agent", "team:invite:SENIOR_AGENT").text("Invite agent", "team:invite:AGENT").row();
         for (const member of installation.listTeamMembers().filter((entry) => entry.role !== "OWNER")) {
+          if (actorRole === "ADMIN" && member.role === "ADMIN") continue;
           if (actorRole === "OWNER") keyboard.text(`Admin ${member.user_telegram_id}`, `team:set:${member.user_telegram_id}:ADMIN`);
           keyboard.text(`Senior ${member.user_telegram_id}`, `team:set:${member.user_telegram_id}:SENIOR_AGENT`).text(`Agent ${member.user_telegram_id}`, `team:set:${member.user_telegram_id}:AGENT`).text("Revoke", `team:revoke:${member.user_telegram_id}`).row();
         }
         if (actorRole === "OWNER") keyboard.text("Transfer ownership", "team:transfer").row().text("Review RBAC activation", "rbac:preview");
         await ctx.reply(["Team", ...installation.listTeamMembers().map((entry) => `${entry.role}: ${entry.username ? `@${entry.username}` : entry.user_telegram_id}`)].join("\n"), { reply_markup: keyboard }); return;
       }
-      if (action === "public") { await showPublicChats(ctx); return; }
-      if (action === "batch") { await ctx.reply("Batch operations remain available through /exporttickets in the staff workspace."); return; }
+      if (action === "public") {
+        if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) return;
+        await showPublicChats(ctx);
+        return;
+      }
+      if (action === "batch") {
+        if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) return;
+        await showPrivateBatchOperations(ctx);
+        return;
+      }
       await showDashboard(ctx); return;
+    }
+
+    if (namespace === "batch-ui") {
+      if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) {
+        await ctx.answerCallbackQuery({ text: "Batch operations require OWNER or ADMIN.", show_alert: true });
+        return;
+      }
+      const action = data.split(":")[1];
+      await ctx.answerCallbackQuery();
+      if (action === "export") {
+        if (!ctx.chat) return;
+        await exportActiveTickets(ctx, ctx.chat.id);
+        return;
+      }
+      if (action === "apply") {
+        installation.saveOnboardingStage(ctx.from!.id, "BATCH_APPLY");
+        await ctx.reply("Send a ticket-answers_*.json file to validate it. Nothing will be applied until you confirm the preview.");
+        return;
+      }
+      if (action === "recent") {
+        const pending = db.getInstallationOperationalCounts().pendingBatchStaffOperations;
+        await ctx.reply(`Recent batch operations\nPending staff synchronization: ${pending}`);
+        return;
+      }
+      await ctx.reply("Unknown batch operation.");
+      return;
     }
 
     if (namespace === "public") {
@@ -1607,8 +1695,7 @@ export function createBot(
 
     if (namespace === "team") {
       if (!isPrivateChat(ctx) || !ctx.from) { await ctx.answerCallbackQuery({ text: "Private staff dashboard only.", show_alert: true }); return; }
-      if (!installation.getMember(ctx.from.id)) { await ctx.answerCallbackQuery({ text: "Staff access required.", show_alert: true }); return; }
-      if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
+      if (!await requirePrivatePermission(ctx, "MANAGE_TEAM")) { await ctx.answerCallbackQuery({ text: "Your application role cannot manage the team.", show_alert: true }); return; }
       const [, action, value, roleValue] = data.split(":");
       try {
         if (action === "transfer") { if (installation.getMember(ctx.from.id)?.role !== "OWNER") throw new Error("Only the OWNER can transfer ownership."); const token = installation.createOwnerRecoveryToken(); await ctx.answerCallbackQuery({ text: "Transfer link created." }); await ctx.reply(`One-use ownership transfer link (30 minutes):\nhttps://t.me/${bot.botInfo.username}?start=setup_${token}\n\nThe current OWNER remains active until the recipient confirms.`); return; }
@@ -1674,7 +1761,21 @@ export function createBot(
     }
 
     if (namespace === "batch") {
-      if (!ctx.from || !hasApplicationPermission(ctx, "BATCH_OPERATIONS")) { await ctx.answerCallbackQuery({ text: "Batch operations require OWNER or ADMIN.", show_alert: true }); return; }
+      if (isPrivateChat(ctx)) {
+        if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) {
+          await ctx.answerCallbackQuery({ text: "Batch operations require OWNER or ADMIN.", show_alert: true });
+          return;
+        }
+      } else if (!isStaffChat(ctx)) {
+        await ctx.answerCallbackQuery({ text: "Batch operations are available in the private staff dashboard.", show_alert: true });
+        return;
+      } else if (installation.getState().authorizationMode === "RBAC_ACTIVE") {
+        await ctx.answerCallbackQuery({ text: "Batch operations are available to OWNER and ADMIN in the bot's private chat.", show_alert: true });
+        return;
+      } else if (!ctx.from || !hasApplicationPermission(ctx, "BATCH_OPERATIONS")) {
+        await ctx.answerCallbackQuery({ text: "Batch operations require OWNER or ADMIN.", show_alert: true });
+        return;
+      }
       await handleTicketBatchCallback(ctx, data);
       return;
     }
@@ -1713,6 +1814,10 @@ export function createBot(
           await ctx.reply("Upload ticket answer packages outside ticket topics.");
           return;
         }
+        if (installation.getState().authorizationMode === "RBAC_ACTIVE") {
+          await ctx.reply("Batch operations are available to OWNER and ADMIN in the bot's private chat.");
+          return;
+        }
         if (!await requirePermission(ctx, "BATCH_OPERATIONS")) return;
         await handleTicketAnswerPackageUpload(ctx);
         return;
@@ -1723,6 +1828,16 @@ export function createBot(
 
     if (!isPrivateChat(ctx)) {
       await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler);
+      return;
+    }
+
+    if (ctx.from && installation.getMember(ctx.from.id) && installation.getOnboardingSession(ctx.from.id)?.stage === "BATCH_APPLY") {
+      if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) return;
+      if (!isTicketAnswerPackageDocument(ctx.message)) {
+        await ctx.reply("Send a ticket-answers_*.json file, or return to Batch operations.");
+        return;
+      }
+      await handleTicketAnswerPackageUpload(ctx);
       return;
     }
 
@@ -1840,6 +1955,9 @@ export function createBot(
       if (persistedPackage.preview_chat_id !== null && persistedPackage.preview_message_id !== null) {
         await ctx.api.editMessageText(persistedPackage.preview_chat_id, persistedPackage.preview_message_id, text, { reply_markup: keyboard });
         db.updateTicketBatchAnswerPackagePreviewPage(persistedPackage.answer_package_id, config.staffChatId, previewPage);
+        if (isPrivateChat(ctx) && ctx.from) {
+          installation.saveOnboardingStage(ctx.from.id, "WELCOME", "COMPLETED");
+        }
         return;
       }
       const previewMessage = await ctx.reply(text, { reply_markup: keyboard });
@@ -1856,6 +1974,9 @@ export function createBot(
         }
         throw new TicketBatchValidationError("This answer package already has an active preview.");
       }
+      if (isPrivateChat(ctx) && ctx.from) {
+        installation.saveOnboardingStage(ctx.from.id, "WELCOME", "COMPLETED");
+      }
       logger.info({ exportId, previewMessageId: previewMessage.message_id }, "Ticket answer package preview created");
     } catch (error) {
       const message = error instanceof TicketBatchValidationError ? error.message : "Could not validate the ticket answer package.";
@@ -1865,10 +1986,6 @@ export function createBot(
   }
 
   async function handleTicketBatchCallback(ctx: Context, data: string): Promise<void> {
-    if (!isStaffChat(ctx)) {
-      await ctx.answerCallbackQuery({ text: "Staff only.", show_alert: true });
-      return;
-    }
     const [, action, token, pageValue] = data.split(":");
     if ((action !== "cancel" && action !== "apply" && action !== "page") || !token) {
       await ctx.answerCallbackQuery({ text: "Unknown ticket batch action." });
@@ -1944,7 +2061,7 @@ export function createBot(
     const summary = await applyTicketBatchAnswerPackage(claimed.answer_package_id, ctx.from);
     db.queueTicketBatchFinalSummary(claimed.answer_package_id, config.staffChatId, {
       text: summary,
-      chatId: config.staffChatId,
+      chatId: ctx.chat?.id ?? config.staffChatId,
       originChatId: claimed.preview_chat_id,
       originMessageId: claimed.preview_message_id
     });
@@ -2011,7 +2128,7 @@ export function createBot(
     const previewChatId = packageRecord.preview_chat_id;
     const previewMessageId = packageRecord.preview_message_id;
     try {
-      await runStaffChatOperation(() => bot.api.editMessageText(previewChatId, previewMessageId, text, { reply_markup: undefined }));
+      await runStaffChatOperation(() => bot.api.editMessageText(previewChatId, previewMessageId, text, { reply_markup: undefined }), previewChatId);
     } catch (error) {
       const failure = batchStaffFailure(error);
       scheduleTicketBatchStaffRecovery(failure.retryAt);
@@ -2468,10 +2585,11 @@ export function createBot(
         if (item.final_summary_origin_chat_id !== null && item.final_summary_origin_message_id !== null) {
           const originChatId = item.final_summary_origin_chat_id;
           const originMessageId = item.final_summary_origin_message_id;
-          await runStaffChatOperation(() => bot.api.editMessageText(originChatId, originMessageId, text, { reply_markup: undefined }));
+          await runStaffChatOperation(() => bot.api.editMessageText(originChatId, originMessageId, text, { reply_markup: undefined }), originChatId);
           db.recordTicketBatchFinalSummarySent(item.answer_package_id, config.staffChatId, originMessageId);
         } else {
-          const sent = await runStaffChatOperation(() => bot.api.sendMessage(item.final_summary_chat_id ?? config.staffChatId, text));
+          const destinationChatId = item.final_summary_chat_id ?? config.staffChatId;
+          const sent = await runStaffChatOperation(() => bot.api.sendMessage(destinationChatId, text), destinationChatId);
           db.recordTicketBatchFinalSummarySent(item.answer_package_id, config.staffChatId, sent.message_id);
         }
       } catch (error) {
@@ -2803,6 +2921,11 @@ async function handleStaffGroupMessage(
     return;
   }
 
+  if (!hasApplicationPermission(ctx, "REPLY_TO_TICKETS")) {
+    await ctx.reply("Your application role does not allow ticket replies.", { message_thread_id: messageThreadId });
+    return;
+  }
+
   if (!messageHasTextOrSupportedMedia(ctx.message)) {
     return;
   }
@@ -2924,6 +3047,10 @@ async function handleStaffCallback(db: SupportDatabase, ctx: Context, data: stri
   }
 
   if (action === "close") {
+    if (!hasApplicationPermission(ctx, "CLOSE_TICKETS")) {
+      await ctx.answerCallbackQuery({ text: "Your application role cannot close tickets.", show_alert: true });
+      return;
+    }
     const result = await closeTicket(db, ctx.api, ticket.id, {
       notifyUser: true,
       staffNotice: "Ticket closed by staff.",
@@ -2934,6 +3061,10 @@ async function handleStaffCallback(db: SupportDatabase, ctx: Context, data: stri
   }
 
   if (action === "status" && isTicketStatus(rawStatus)) {
+    if (!hasApplicationPermission(ctx, "CLOSE_TICKETS")) {
+      await ctx.answerCallbackQuery({ text: "Your application role cannot update tickets.", show_alert: true });
+      return;
+    }
     if (ticket.status === "CLOSED") {
       await ctx.answerCallbackQuery({ text: "Ticket is already closed." });
       return;

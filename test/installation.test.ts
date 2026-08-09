@@ -167,6 +167,11 @@ test("role permissions enforce owner/admin/agent boundaries", () => {
     assert.equal(service.can(1, "MANAGE_ADMINS"), true);
     assert.equal(service.can(2, "MANAGE_ADMINS"), false);
     assert.equal(service.can(2, "MANAGE_TEAM"), true);
+    assert.equal(service.can(1, "BATCH_OPERATIONS"), true);
+    assert.equal(service.can(2, "BATCH_OPERATIONS"), true);
+    assert.equal(service.can(3, "BATCH_OPERATIONS"), false);
+    assert.equal(service.can(4, "BATCH_OPERATIONS"), false);
+    assert.equal(service.can(3, "BAN_USERS"), true);
     assert.equal(service.can(4, "BAN_USERS"), false);
     assert.equal(service.can(4, "REPLY_TO_TICKETS"), true);
     assert.throws(() => service.assignRole(2, 5, "ADMIN"));
@@ -226,5 +231,15 @@ test("onboarding state survives service recreation", () => {
     first.saveOnboardingStage(1, "STAFF_WORKSPACE");
     const second = new InstallationService(db);
     assert.equal(second.getOnboardingSession(1)?.stage, "STAFF_WORKSPACE");
+  } finally { db.close(); }
+});
+
+test("explicit private batch Apply mode survives service recreation", () => {
+  const db = new SupportDatabase(":memory:");
+  try {
+    const first = new InstallationService(db);
+    first.saveOnboardingStage(1, "BATCH_APPLY");
+    const second = new InstallationService(db);
+    assert.equal(second.getOnboardingSession(1)?.stage, "BATCH_APPLY");
   } finally { db.close(); }
 });

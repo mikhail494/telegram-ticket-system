@@ -17,7 +17,8 @@ export type Permission =
 
 export type OnboardingStage =
   | "WELCOME" | "BOT_IDENTITY" | "STAFF_WORKSPACE" | "WORKSPACE_PERMISSIONS"
-  | "SUPPORT_LOGS" | "PUBLIC_CHAT" | "TEAM_ROLES" | "SUMMARY" | "ACTIVATE_SUPPORT";
+  | "SUPPORT_LOGS" | "PUBLIC_CHAT" | "TEAM_ROLES" | "SUMMARY" | "ACTIVATE_SUPPORT"
+  | "BATCH_APPLY";
 
 export interface InstallationState {
   setupState: InstallationSetupState;
