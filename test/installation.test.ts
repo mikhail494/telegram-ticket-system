@@ -64,6 +64,41 @@ test("legacy adoption preserves operational settings and imports the moderation 
     assert.equal(db.getSetting("language_moderation:warning_text"), "Existing warning");
     assert.equal(db.getSetting("support_logs_thread_id:-10042"), "77");
     assert.equal(db.getInstallationOperationalCounts().publicChats, 1);
+    const imported = db.getManagedPublicChat(-10088);
+    assert.equal(imported?.moderation_enabled, 1);
+    assert.equal(imported?.warning_text, "Existing warning");
+    assert.deepEqual(imported?.allowlist, ["uid"]);
+  } finally { db.close(); }
+});
+
+test("legacy adoption imports a missing moderation target for an existing active workspace", () => {
+  const db = new SupportDatabase(":memory:");
+  try {
+    const service = new InstallationService(db);
+    service.adoptLegacyInstallation(-10042);
+    db.setSetting("language_moderation:target", "-10088");
+    db.setSetting("language_moderation:enabled", "true");
+
+    service.adoptLegacyInstallation(-10042);
+
+    assert.equal(service.getStaffChatId(), -10042);
+    assert.equal(db.getManagedPublicChat(-10088)?.moderation_enabled, 1);
+    assert.equal(service.listWorkspaces().length, 1);
+  } finally { db.close(); }
+});
+
+test("legacy adoption does not reactivate a deliberately removed moderation target", () => {
+  const db = new SupportDatabase(":memory:");
+  try {
+    db.setSetting("language_moderation:target", "-10088");
+    const service = new InstallationService(db);
+    service.adoptLegacyInstallation(-10042);
+    db.deactivateManagedPublicChat(-10088);
+
+    service.adoptLegacyInstallation(-10042);
+
+    assert.equal(db.getManagedPublicChat(-10088), undefined);
+    assert.equal(db.getManagedPublicChat(-10088, true)?.active, 0);
   } finally { db.close(); }
 });
 

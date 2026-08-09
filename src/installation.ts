@@ -65,11 +65,12 @@ export class InstallationService {
 
   adoptLegacyInstallation(staffChatId: number): WorkspaceRecord {
     const activeWorkspace = this.getActiveWorkspace();
-    if (activeWorkspace) return activeWorkspace;
-    const workspace = this.db.upsertWorkspace({ telegramChatId: staffChatId, importedFromLegacy: true });
-    this.db.setInstallationState({ setup_state: "READY", active_workspace_id: workspace.id });
+    const workspace = activeWorkspace ?? this.db.upsertWorkspace({ telegramChatId: staffChatId, importedFromLegacy: true });
+    if (!activeWorkspace) this.db.setInstallationState({ setup_state: "READY", active_workspace_id: workspace.id });
     const moderationTarget = Number(this.db.getSetting("language_moderation:target"));
-    if (Number.isSafeInteger(moderationTarget) && moderationTarget !== 0) this.db.importManagedPublicChat(moderationTarget, workspace.id);
+    if (Number.isSafeInteger(moderationTarget) && moderationTarget !== 0 && !this.db.getManagedPublicChat(moderationTarget, true)) {
+      this.db.importManagedPublicChat(moderationTarget, workspace.id);
+    }
     return workspace;
   }
 

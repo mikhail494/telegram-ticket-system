@@ -70,6 +70,10 @@ import {
 import { StaffChatDeliveryCoordinator, type StaffChatDeliveryOptions } from "./staffChatDelivery.js";
 import { InstallationService, type Permission } from "./installation.js";
 import { formatWorkspaceChecklist, isPrivateInviteLink, parsePublicSupergroupReference, validateStaffWorkspace } from "./workspaceValidation.js";
+import {
+  formatPublicChatPermissionChecklist,
+  validatePublicModerationChat
+} from "./publicChatModeration.js";
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
@@ -79,7 +83,7 @@ const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
 const MODERATION_SETTING_PREFIX = "language_moderation";
 const ENTITY_NOTIFICATION_SETTING_PREFIX = "entity_notifications";
 const STAFF_OPERATION_NO_RETRY_AT = "9999-12-31T23:59:59.999Z";
-const pendingWarningTimers = new Map<number, ReturnType<typeof setTimeout>>();
+const pendingWarningTimers = new Map<string, ReturnType<typeof setTimeout>>();
 type ModerationReactionEmoji = "\u{1F440}" | "\u{1F621}";
 const MODERATION_STRIKE_REACTION: ModerationReactionEmoji = "\u{1F440}";
 const MODERATION_SANCTION_REACTION: ModerationReactionEmoji = "\u{1F621}";
@@ -228,6 +232,11 @@ export function createBot(
   const entityNotificationProviders = runtime.entityNotificationProviders ?? new Map();
   const runningTicketBatchExports = new Set<number>();
   const staffChatDelivery = new StaffChatDeliveryCoordinator(runtime.staffChatDelivery);
+  const pendingPublicChatSelection = new Set<number>();
+  const pendingPublicChatConfiguration = new Map<number, {
+    chatId: number;
+    field: "warning" | "allowlist" | "cooldown" | "threshold" | "lookback";
+  }>();
   let ticketBatchRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   let ticketBatchRecoveryTimerAt: number | undefined;
   let ticketBatchRecoveryQueue: Promise<void> = Promise.resolve();
@@ -679,7 +688,8 @@ export function createBot(
       `Staff workspace: ${workspace?.title ?? workspace?.telegram_chat_id ?? "not configured"}`,
       `Support Logs: ${workspace && db.getSetting(`support_logs_message_thread_id:${workspace.telegram_chat_id}`) ? "configured" : "not configured"}`,
       `Public chats: ${counts.publicChats}`, `Team: OWNER ${roles.get("OWNER") ?? 0}, ADMIN ${roles.get("ADMIN") ?? 0}, SENIOR_AGENT ${roles.get("SENIOR_AGENT") ?? 0}, AGENT ${roles.get("AGENT") ?? 0}`,
-      `Moderation enabled: ${counts.moderationEnabled}`, `Pending moderation cleanup: ${counts.pendingCleanup}`, `Pending archives: ${counts.pendingArchives}`,
+      `Moderation enabled: ${counts.moderationEnabled}/${counts.publicChats}`, `Unhealthy moderation chats: ${counts.unhealthyModerationChats}`,
+      `Pending moderation cleanup: ${counts.pendingCleanup}`, `Pending archives: ${counts.pendingArchives}`,
       `Pending batch staff operations: ${counts.pendingBatchStaffOperations}`, "Database: available"].join("\n");
   }
 
@@ -735,6 +745,175 @@ export function createBot(
     const rights = { is_anonymous: false, can_manage_chat: true, can_delete_messages: true, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: false, can_change_info: false, can_invite_users: true, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_post_messages: false, can_edit_messages: false, can_pin_messages: true, can_manage_topics: true };
     const keyboard = new Keyboard().requestChat("Select forum staff group", 1300, { chat_is_channel: false, chat_is_forum: true, bot_is_member: true, request_title: true, request_username: true, bot_administrator_rights: rights, user_administrator_rights: rights }).resized().oneTime();
     await ctx.reply("Choose the staff forum group by title. You can also paste a public @username or t.me link.", { reply_markup: keyboard });
+  }
+
+  function publicChatLabel(chat: ReturnType<SupportDatabase["getManagedPublicChat"]>): string {
+    if (!chat) return "Unknown public chat";
+    return chat.title ?? (chat.username ? `@${chat.username}` : String(chat.chat_id));
+  }
+
+  function publicChatButtonLabel(chat: ReturnType<SupportDatabase["getManagedPublicChat"]>): string {
+    const label = publicChatLabel(chat);
+    return label.length > 40 ? `${label.slice(0, 39)}...` : label;
+  }
+
+  function publicChatConnectionLabel(chat: NonNullable<ReturnType<SupportDatabase["getManagedPublicChat"]>>): string {
+    if (chat.connection_status === "CONNECTED") return "yes";
+    if (chat.connection_status === "UNREACHABLE") return "no";
+    return "unknown";
+  }
+
+  async function showPublicChats(ctx: Context): Promise<void> {
+    const chats = db.listManagedPublicChats();
+    const keyboard = new InlineKeyboard().text("Add public chat", "public:add").row();
+    for (const chat of chats) {
+      keyboard.text(`Open settings: ${publicChatButtonLabel(chat)}`, `public:open:${chat.chat_id}`).row();
+    }
+    const lines = chats.length
+      ? chats.flatMap((chat) => [
+        "",
+        publicChatLabel(chat),
+        chat.username ? `@${chat.username}` : "No public username",
+        `Connected: ${publicChatConnectionLabel(chat)}`,
+        `Moderation: ${chat.moderation_enabled ? "enabled" : "disabled"}`,
+        `Permissions: ${chat.permission_status.toLowerCase()}`,
+        `Reactions: ${chat.reaction_status.toLowerCase()} (advisory)`
+      ])
+      : ["", "No public chats are configured."];
+    await ctx.reply(["Public chats", ...lines].join("\n"), { reply_markup: keyboard });
+  }
+
+  async function showPublicChatSettings(ctx: Context, chatId: number): Promise<void> {
+    const chat = db.getManagedPublicChat(chatId);
+    if (!chat) { await ctx.reply("This public chat is not managed."); return; }
+    const keyboard = new InlineKeyboard()
+      .text(chat.moderation_enabled ? "Disable moderation" : "Enable moderation", `public:${chat.moderation_enabled ? "disable" : "enable"}:${chat.chat_id}`)
+      .row()
+      .text("Check permissions", `public:check:${chat.chat_id}`)
+      .row()
+      .text("Warning text", `public:config-warning:${chat.chat_id}`)
+      .text("Allowlist", `public:config-allowlist:${chat.chat_id}`)
+      .row()
+      .text("Cooldown", `public:config-cooldown:${chat.chat_id}`)
+      .text("Threshold", `public:config-threshold:${chat.chat_id}`)
+      .text("Lookback", `public:config-lookback:${chat.chat_id}`)
+      .row()
+      .text("Remove chat", `public:remove:${chat.chat_id}`)
+      .row()
+      .text("Back", "public:list");
+    await ctx.reply([
+      "Public chat settings",
+      "",
+      `Title: ${chat.title ?? "unknown"}`,
+      `Username: ${chat.username ? `@${chat.username}` : "not available"}`,
+      `Chat ID: ${chat.chat_id}`,
+      `Forum topics: ${chat.is_forum ? "enabled" : "not enabled"}`,
+      `Connected: ${publicChatConnectionLabel(chat)}`,
+      `Moderation: ${chat.moderation_enabled ? "enabled" : "disabled"}`,
+      `Permissions: ${chat.permission_status.toLowerCase()}`,
+      `Reactions: ${chat.reaction_status.toLowerCase()} (advisory only)`,
+      `Warning: ${chat.warning_text}`,
+      `Allowlist entries: ${chat.allowlist.length}`,
+      `Warning cooldown: ${chat.warning_cooldown_minutes} minutes`,
+      `Ordinary-message threshold: ${chat.warning_message_threshold}`,
+      `Lookback: ${chat.lookback_minutes} minutes`
+    ].join("\n"), { reply_markup: keyboard });
+  }
+
+  async function sendPublicChatPicker(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+    pendingPublicChatSelection.add(ctx.from.id);
+    const rights = {
+      is_anonymous: false,
+      can_manage_chat: true,
+      can_delete_messages: true,
+      can_manage_video_chats: false,
+      can_restrict_members: true,
+      can_promote_members: false,
+      can_change_info: false,
+      can_invite_users: true,
+      can_post_stories: false,
+      can_edit_stories: false,
+      can_delete_stories: false,
+      can_post_messages: false,
+      can_edit_messages: false,
+      can_pin_messages: false,
+      can_manage_topics: false
+    };
+    const keyboard = new Keyboard().requestChat("Select public supergroup", 1400, {
+      chat_is_channel: false,
+      bot_is_member: true,
+      request_title: true,
+      request_username: true,
+      request_photo: false,
+      bot_administrator_rights: rights,
+      user_administrator_rights: rights
+    }).resized().oneTime();
+    await ctx.reply("Choose a public supergroup. You may also paste its public @username or t.me link.", { reply_markup: keyboard });
+  }
+
+  async function inspectAndSavePublicChat(ctx: Context, chatId: number, shared?: { title?: string; username?: string }): Promise<void> {
+    if (!ctx.from || !bot.botInfo) return;
+    const workspace = installation.getActiveWorkspace();
+    if (!workspace) { await ctx.reply("Configure the staff workspace first."); return; }
+    const result = await validatePublicModerationChat(ctx.api, chatId, bot.botInfo.id);
+    db.upsertManagedPublicChat({
+      chatId: result.chatId,
+      workspaceId: workspace.id,
+      title: result.title ?? shared?.title,
+      username: result.username ?? shared?.username,
+      isForum: result.isForum
+    });
+    db.recordManagedPublicChatPermissionHealth({
+      chatId: result.chatId,
+      healthy: result.valid,
+      reactionsAvailable: result.reactionsAvailable,
+      connected: true,
+      title: result.title ?? shared?.title,
+      username: result.username ?? shared?.username,
+      isForum: result.isForum
+    });
+    pendingPublicChatSelection.delete(ctx.from.id);
+    await ctx.reply(`Public chat saved. Moderation remains disabled until enabled explicitly.\n${formatPublicChatPermissionChecklist(result)}`);
+    await showPublicChatSettings(ctx, result.chatId);
+  }
+
+  async function savePendingPublicChatConfiguration(ctx: Context, text: string): Promise<boolean> {
+    if (!ctx.from) return false;
+    const pending = pendingPublicChatConfiguration.get(ctx.from.id);
+    if (!pending) return false;
+    const chat = db.getManagedPublicChat(pending.chatId);
+    if (!chat) {
+      pendingPublicChatConfiguration.delete(ctx.from.id);
+      await ctx.reply("This public chat is no longer managed.");
+      return true;
+    }
+    let warningText = chat.warning_text;
+    let allowlist = chat.allowlist;
+    let warningCooldownMinutes = chat.warning_cooldown_minutes;
+    let warningMessageThreshold = chat.warning_message_threshold;
+    let lookbackMinutes = chat.lookback_minutes;
+    const trimmed = text.trim();
+    if (pending.field === "warning") {
+      if (!trimmed || trimmed.length > 500) { await ctx.reply("Warning text must contain 1-500 characters."); return true; }
+      warningText = trimmed;
+    } else if (pending.field === "allowlist") {
+      const entries = trimmed === "-" ? [] : [...new Set(trimmed.split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean))];
+      if (entries.length > 100 || entries.some((entry) => entry.length > 80)) { await ctx.reply("Use at most 100 allowlist terms, each up to 80 characters."); return true; }
+      allowlist = entries;
+    } else {
+      const parsed = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
+      const maximum = pending.field === "threshold" ? 10_000 : 1_440;
+      if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) { await ctx.reply(`Enter a whole number from 1 to ${maximum}.`); return true; }
+      if (pending.field === "cooldown") warningCooldownMinutes = parsed;
+      if (pending.field === "threshold") warningMessageThreshold = parsed;
+      if (pending.field === "lookback") lookbackMinutes = parsed;
+    }
+    db.updateManagedPublicChatConfig(chat.chat_id, { warningText, allowlist, warningCooldownMinutes, warningMessageThreshold, lookbackMinutes });
+    pendingPublicChatConfiguration.delete(ctx.from.id);
+    await ctx.reply("Public chat moderation settings saved.");
+    await showPublicChatSettings(ctx, chat.chat_id);
+    return true;
   }
 
   bot.command("start", async (ctx) => {
@@ -945,17 +1124,34 @@ export function createBot(
     if (action === "target") {
       const chatId = Number(args[0]);
       if (!Number.isSafeInteger(chatId)) { await ctx.reply("Usage: /moderation target <chat_id>"); return; }
-      try { await ctx.api.getChat(chatId); } catch { await ctx.reply("The target chat is not reachable by this bot."); return; }
-      db.setSetting(moderationSettingKey("target"), String(chatId));
+      try {
+        const chat = await ctx.api.getChat(chatId);
+        const workspace = installation.getActiveWorkspace();
+        db.setSetting(moderationSettingKey("target"), String(chatId));
+        if (workspace) db.importManagedPublicChat(chatId, workspace.id);
+        db.upsertManagedPublicChat({
+          chatId,
+          workspaceId: workspace?.id ?? null,
+          title: "title" in chat ? chat.title ?? null : null,
+          username: "username" in chat ? chat.username ?? null : null,
+          isForum: chat.type === "supergroup" && chat.is_forum === true
+        });
+      } catch { await ctx.reply("The target chat is not reachable by this bot."); return; }
       await ctx.reply(`Moderation target set to ${chatId}. It remains disabled until /moderation enable succeeds.`);
       return;
     }
     if (action === "enable") {
       const rights = await validateModerationRights(ctx.api, current.targetChatId, bot.botInfo?.id);
       if (rights !== "ok") { await ctx.reply(`Moderation remains disabled: ${rights}`); return; }
-      db.setSetting(moderationSettingKey("enabled"), "true"); await ctx.reply("English-only moderation is enabled."); return;
+      db.setSetting(moderationSettingKey("enabled"), "true");
+      if (current.targetChatId !== null) db.setManagedPublicChatModerationEnabled(current.targetChatId, true);
+      await ctx.reply("English-only moderation is enabled."); return;
     }
-    if (action === "disable") { db.setSetting(moderationSettingKey("enabled"), "false"); await ctx.reply("Moderation disabled. Existing strikes and tiers were preserved."); return; }
+    if (action === "disable") {
+      db.setSetting(moderationSettingKey("enabled"), "false");
+      if (current.targetChatId !== null) db.setManagedPublicChatModerationEnabled(current.targetChatId, false);
+      await ctx.reply("Moderation disabled. Existing strikes and tiers were preserved."); return;
+    }
     if (action === "allowlist") { await ctx.reply(current.allowlist.length ? `Allowlist (${current.allowlist.length}): ${current.allowlist.join(", ")}` : "Allowlist is empty."); return; }
     if (action === "allow" || action === "unallow") {
       const term = args.join(" ").trim().toLowerCase();
@@ -963,6 +1159,13 @@ export function createBot(
       const entries = new Set(current.allowlist);
       if (action === "allow") entries.add(term); else entries.delete(term);
       db.setSetting(moderationSettingKey("allowlist"), JSON.stringify([...entries].sort()));
+      if (current.targetChatId !== null) db.updateManagedPublicChatConfig(current.targetChatId, {
+        warningText: current.warningText,
+        allowlist: [...entries].sort(),
+        warningCooldownMinutes: current.warningCooldownMinutes,
+        warningMessageThreshold: current.warningMessageThreshold,
+        lookbackMinutes: current.lookbackMinutes
+      });
       await ctx.reply(action === "allow" ? "Allowlist entry saved." : "Allowlist entry removed."); return;
     }
     const userId = Number(args[0]);
@@ -1294,9 +1497,112 @@ export function createBot(
         if (actorRole === "OWNER") keyboard.text("Transfer ownership", "team:transfer").row().text("Review RBAC activation", "rbac:preview");
         await ctx.reply(["Team", ...installation.listTeamMembers().map((entry) => `${entry.role}: ${entry.username ? `@${entry.username}` : entry.user_telegram_id}`)].join("\n"), { reply_markup: keyboard }); return;
       }
-      if (action === "public") { await ctx.reply("Public chats are available in the next implementation phase. Existing moderation configuration remains active."); return; }
+      if (action === "public") { await showPublicChats(ctx); return; }
       if (action === "batch") { await ctx.reply("Batch operations remain available through /exporttickets in the staff workspace."); return; }
       await showDashboard(ctx); return;
+    }
+
+    if (namespace === "public") {
+      if (!isPrivateChat(ctx) || !ctx.from || !installation.can(ctx.from.id, "CONFIGURE_INSTALLATION")) {
+        await ctx.answerCallbackQuery({ text: "Owner or administrator access required.", show_alert: true });
+        return;
+      }
+      if (!await hasRequiredPrivateWorkspaceMembership(ctx)) {
+        await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true });
+        return;
+      }
+      const [, action, rawChatId] = data.split(":");
+      const chatId = Number(rawChatId);
+      if (action === "add") {
+        await ctx.answerCallbackQuery();
+        await sendPublicChatPicker(ctx);
+        return;
+      }
+      if (action === "list") {
+        await ctx.answerCallbackQuery();
+        await showPublicChats(ctx);
+        return;
+      }
+      if (!Number.isSafeInteger(chatId)) {
+        await ctx.answerCallbackQuery({ text: "Invalid public chat.", show_alert: true });
+        return;
+      }
+      const managed = db.getManagedPublicChat(chatId);
+      if (!managed) {
+        await ctx.answerCallbackQuery({ text: "This public chat is not managed.", show_alert: true });
+        return;
+      }
+      if (action === "open") {
+        await ctx.answerCallbackQuery();
+        await showPublicChatSettings(ctx, chatId);
+        return;
+      }
+      if (action?.startsWith("config-")) {
+        const field = action.slice("config-".length);
+        if (!(["warning", "allowlist", "cooldown", "threshold", "lookback"] as const).includes(field as "warning" | "allowlist" | "cooldown" | "threshold" | "lookback")) {
+          await ctx.answerCallbackQuery({ text: "Unknown configuration field.", show_alert: true });
+          return;
+        }
+        pendingPublicChatConfiguration.set(ctx.from.id, { chatId, field: field as "warning" | "allowlist" | "cooldown" | "threshold" | "lookback" });
+        const prompts = {
+          warning: "Send the warning text (1-500 characters).",
+          allowlist: "Send comma-separated allowlist terms, or send a single dash to clear it.",
+          cooldown: "Send the warning cooldown in minutes (1-1440).",
+          threshold: "Send the ordinary-message threshold (1-10000).",
+          lookback: "Send the violation lookback in minutes (1-1440)."
+        } as const;
+        await ctx.answerCallbackQuery();
+        await ctx.reply(prompts[field as keyof typeof prompts]);
+        return;
+      }
+      if (action === "disable") {
+        db.setManagedPublicChatModerationEnabled(chatId, false);
+        await ctx.answerCallbackQuery({ text: "Moderation disabled." });
+        await showPublicChatSettings(ctx, chatId);
+        return;
+      }
+      if (action === "remove") {
+        await ctx.answerCallbackQuery();
+        await ctx.reply(`Remove ${publicChatLabel(managed)} from managed public chats? Historical moderation records will be preserved.`, {
+          reply_markup: new InlineKeyboard().text("Confirm removal", `public:confirm-remove:${chatId}`).row().text("Cancel", `public:open:${chatId}`)
+        });
+        return;
+      }
+      if (action === "confirm-remove") {
+        db.deactivateManagedPublicChat(chatId);
+        await ctx.answerCallbackQuery({ text: "Public chat removed." });
+        await showPublicChats(ctx);
+        return;
+      }
+      if (action === "check" || action === "enable") {
+        try {
+          if (!bot.botInfo) throw new Error("Bot identity is unavailable.");
+          const result = await validatePublicModerationChat(ctx.api, chatId, bot.botInfo.id);
+          db.recordManagedPublicChatPermissionHealth({
+            chatId,
+            healthy: result.valid,
+            reactionsAvailable: result.reactionsAvailable,
+            connected: true,
+            title: result.title,
+            username: result.username,
+            isForum: result.isForum
+          });
+          if (action === "enable" && result.valid) db.setManagedPublicChatModerationEnabled(chatId, true);
+          await ctx.answerCallbackQuery({
+            text: action === "enable" && result.valid ? "Moderation enabled." : result.valid ? "Permissions are healthy." : "Required permissions are missing.",
+            show_alert: !result.valid
+          });
+          await ctx.reply(formatPublicChatPermissionChecklist(result));
+          await showPublicChatSettings(ctx, chatId);
+        } catch (error) {
+          db.recordManagedPublicChatUnreachable(chatId);
+          logger.warn({ chatId, err: error }, "Could not validate managed public chat permissions");
+          await ctx.answerCallbackQuery({ text: "The public chat could not be inspected.", show_alert: true });
+        }
+        return;
+      }
+      await ctx.answerCallbackQuery({ text: "Unknown public chat action.", show_alert: true });
+      return;
     }
 
     if (namespace === "team") {
@@ -1380,6 +1686,15 @@ export function createBot(
     if (!ctx.from || !isPrivateChat(ctx) || !installation.can(ctx.from.id, "CONFIGURE_INSTALLATION")) return;
     if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.reply("Staff workspace membership required for role-based access."); return; }
     const shared = ctx.message.chat_shared;
+    if (shared.request_id === 1400) {
+      try {
+        await inspectAndSavePublicChat(ctx, shared.chat_id, { title: shared.title, username: shared.username });
+      } catch (error) {
+        logger.warn({ chatId: shared.chat_id, err: error }, "Could not add selected public chat");
+        await ctx.reply("The selected public chat could not be inspected. Add the bot as an administrator, then retry.");
+      }
+      return;
+    }
     if (shared.request_id !== 1300) return;
     try {
       const result = await validateStaffWorkspace(ctx.api, shared.chat_id, ctx.from.id);
@@ -1413,6 +1728,24 @@ export function createBot(
 
     if (ctx.from && installation.getMember(ctx.from.id) && db.getSetting(`staff_test_ticket_mode:${ctx.from.id}`) !== "true") {
       const text = ctx.message && "text" in ctx.message ? ctx.message.text : "";
+      if (text && await savePendingPublicChatConfiguration(ctx, text)) return;
+      if (pendingPublicChatSelection.has(ctx.from.id) && text) {
+        if (isPrivateInviteLink(text)) {
+          await ctx.reply("The Bot API cannot inspect an inaccessible private invite link. Add the bot to the group, then use the Telegram public-chat picker. You do not need a numeric chat ID.");
+          return;
+        }
+        const reference = parsePublicSupergroupReference(text);
+        if (reference) {
+          try {
+            const chat = await ctx.api.getChat(reference);
+            await inspectAndSavePublicChat(ctx, chat.id);
+          } catch (error) {
+            logger.warn({ err: error }, "Could not resolve public chat reference");
+            await ctx.reply("That public supergroup could not be validated. Check its public username and the bot permissions, or use the Telegram picker.");
+          }
+          return;
+        }
+      }
       const session = installation.getOnboardingSession(ctx.from.id);
       if (session?.state === "ACTIVE" && session.stage === "STAFF_WORKSPACE" && text) {
         if (isPrivateInviteLink(text)) { await ctx.reply("The bot cannot inspect an inaccessible private invite link. Add the bot to that group, then use the Telegram group picker.", { reply_markup: new InlineKeyboard().text("Choose group", "setup:workspace") }); return; }
@@ -3174,7 +3507,7 @@ function moderationSettingKey(name: string): string {
 }
 
 function moderationConfig(db: SupportDatabase) {
-  return parseModerationConfig({
+  const legacy = parseModerationConfig({
     enabled: db.getSetting(moderationSettingKey("enabled")),
     target: db.getSetting(moderationSettingKey("target")),
     warning_text: db.getSetting(moderationSettingKey("warning_text")),
@@ -3183,6 +3516,34 @@ function moderationConfig(db: SupportDatabase) {
     warning_message_threshold: db.getSetting(moderationSettingKey("warning_message_threshold")),
     allowlist: db.getSetting(moderationSettingKey("allowlist"))
   });
+  const managed = legacy.targetChatId === null ? undefined : db.getManagedPublicChat(legacy.targetChatId, true);
+  if (managed?.active === 0) return { ...legacy, enabled: false, targetChatId: null };
+  return managed ? {
+    enabled: managed.moderation_enabled === 1,
+    targetChatId: managed.chat_id,
+    warningText: managed.warning_text,
+    lookbackMinutes: managed.lookback_minutes,
+    warningCooldownMinutes: managed.warning_cooldown_minutes,
+    warningMessageThreshold: managed.warning_message_threshold,
+    allowlist: managed.allowlist
+  } : legacy;
+}
+
+function moderationConfigForChat(db: SupportDatabase, chatId: number) {
+  const managed = db.getManagedPublicChat(chatId, true);
+  if (managed) {
+    return {
+      enabled: managed.active === 1 && managed.moderation_enabled === 1,
+      targetChatId: managed.active === 1 ? managed.chat_id : null,
+      warningText: managed.warning_text,
+      lookbackMinutes: managed.lookback_minutes,
+      warningCooldownMinutes: managed.warning_cooldown_minutes,
+      warningMessageThreshold: managed.warning_message_threshold,
+      allowlist: managed.allowlist
+    };
+  }
+  const legacy = moderationConfig(db);
+  return legacy.targetChatId === chatId ? legacy : { ...legacy, enabled: false, targetChatId: null };
 }
 
 async function formatModerationStatus(
@@ -3207,15 +3568,9 @@ async function formatModerationStatus(
 async function validateModerationRights(api: BotApi, targetChatId: number | null, botId: number | undefined): Promise<string> {
   if (!targetChatId || !botId) return "configure a reachable target chat first.";
   try {
-    await api.getChat(targetChatId);
-    const member = await api.getChatMember(targetChatId, botId);
-    if (member.status !== "administrator" && member.status !== "creator") return "the bot is not an administrator in the target chat.";
-    const capabilities = member as { can_delete_messages?: boolean; can_restrict_members?: boolean };
-    const missing = [
-      !capabilities.can_delete_messages ? "delete messages" : null,
-      !capabilities.can_restrict_members ? "restrict and ban members" : null
-    ].filter((entry): entry is string => Boolean(entry));
-    return missing.length ? `missing required rights: ${missing.join(", ")}.` : "ok";
+    const result = await validatePublicModerationChat(api, targetChatId, botId);
+    const missing = result.checks.filter((check) => !check.passed).map((check) => check.label.toLowerCase());
+    return result.valid ? "ok" : `missing required rights: ${missing.join(", ")}.`;
   } catch {
     return "the target chat or bot membership could not be verified.";
   }
@@ -3228,11 +3583,12 @@ async function handlePublicLanguageModeration(
   cleanupScheduler: ModerationCleanupScheduler
 ): Promise<void> {
   if (!ctx.chat || !ctx.from || !ctx.message || ctx.from.is_bot) return;
-  const moderation = moderationConfig(db);
+  const moderation = moderationConfigForChat(db, ctx.chat.id);
   if (!moderation.enabled || moderation.targetChatId !== ctx.chat.id || ctx.chat.id === config.staffChatId) return;
   const content = getMessageContent(ctx.message).text;
-  const chatState = db.getLanguageModerationChatState(ctx.chat.id);
-  db.upsertLanguageModerationChatState(ctx.chat.id, {
+  const messageThreadId = typeof ctx.message.message_thread_id === "number" ? ctx.message.message_thread_id : null;
+  const chatState = db.getLanguageModerationWarningState(ctx.chat.id, messageThreadId);
+  db.upsertLanguageModerationWarningState(ctx.chat.id, messageThreadId, {
     lastWarningMessageId: chatState?.last_warning_message_id ?? null,
     lastWarningAt: chatState?.last_warning_at ?? null,
     ordinaryMessagesSinceWarning: (chatState?.ordinary_messages_since_warning ?? 0) + 1,
@@ -3242,9 +3598,9 @@ async function handlePublicLanguageModeration(
   if (!content || isCommandText(content) || classifyEnglishOnlyMessage(content, moderation.allowlist) !== "violation") return;
 
   const state = db.getLanguageModerationUserState(ctx.chat.id, ctx.from.id) ?? { current_strikes: 0, sanction_tier: 0, first_strike_at: null };
-  if (!db.addLanguageModerationViolation({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, message_id: ctx.message.message_id, username: usernameOf(ctx.from), cycle_tier: state.sanction_tier })) return;
+  if (!db.addLanguageModerationViolation({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, message_id: ctx.message.message_id, message_thread_id: messageThreadId, username: usernameOf(ctx.from), cycle_tier: state.sanction_tier })) return;
   if (state.current_strikes === 0) {
-    const currentChatState = db.getLanguageModerationChatState(ctx.chat.id);
+    const currentChatState = db.getLanguageModerationWarningState(ctx.chat.id, messageThreadId);
     const currentTime = now();
     const lastWarningAt = currentChatState?.last_warning_at ? Date.parse(currentChatState.last_warning_at) : 0;
     const canWarn = !lastWarningAt || (
@@ -3255,8 +3611,8 @@ async function handlePublicLanguageModeration(
       if (!currentChatState?.pending_warning_due_at) {
         const startedAt = currentTime;
         const dueAt = new Date(startedAt.getTime() + 3_000);
-        db.upsertLanguageModerationChatState(ctx.chat.id, { lastWarningMessageId: currentChatState?.last_warning_message_id ?? null, lastWarningAt: currentChatState?.last_warning_at ?? null, ordinaryMessagesSinceWarning: currentChatState?.ordinary_messages_since_warning ?? 0, pendingWarningStartedAt: startedAt.toISOString(), pendingWarningDueAt: dueAt.toISOString() });
-        schedulePendingWarning(ctx.api, db, ctx.chat.id, 3_000);
+        db.upsertLanguageModerationWarningState(ctx.chat.id, messageThreadId, { lastWarningMessageId: currentChatState?.last_warning_message_id ?? null, lastWarningAt: currentChatState?.last_warning_at ?? null, ordinaryMessagesSinceWarning: currentChatState?.ordinary_messages_since_warning ?? 0, pendingWarningStartedAt: startedAt.toISOString(), pendingWarningDueAt: dueAt.toISOString() });
+        schedulePendingWarning(ctx.api, db, ctx.chat.id, messageThreadId, 3_000);
       }
     } else {
       db.upsertLanguageModerationUserState({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from), current_strikes: 1, sanction_tier: state.sanction_tier, first_strike_at: currentTime.toISOString() });
@@ -3296,7 +3652,17 @@ async function handlePublicLanguageModeration(
     const cleanupJobId = db.createLanguageModerationCleanupJob({ staff_chat_id: config.staffChatId, chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from) ?? null, chat_title: ("title" in ctx.chat ? ctx.chat.title : null) ?? null, sanction_tier: nextTier, sanction_kind: tier === 0 ? "24-hour mute" : tier === 1 ? "7-day mute" : "permanent ban", violation_cycle_id: violationCycleId, cleanup_due_at: new Date(now().getTime() + 10_000).toISOString() });
     cleanupScheduler(ctx.api, db, cleanupJobId);
   } catch (error) {
-    db.setSetting(moderationSettingKey("enabled"), "false");
+    const managed = db.getManagedPublicChat(ctx.chat.id);
+    if (managed) {
+      db.recordManagedPublicChatPermissionHealth({
+        chatId: ctx.chat.id,
+        healthy: false,
+        reactionsAvailable: managed.reaction_status === "UNKNOWN" ? null : managed.reaction_status === "AVAILABLE"
+      });
+      db.setManagedPublicChatModerationEnabled(ctx.chat.id, false);
+    } else {
+      db.setSetting(moderationSettingKey("enabled"), "false");
+    }
     logger.error({ chatId: ctx.chat.id, userId: ctx.from.id, err: error }, "Language moderation sanction failed; moderation disabled");
   }
 }
@@ -3325,30 +3691,40 @@ async function setModerationReaction(
   }
 }
 
-function schedulePendingWarning(api: BotApi, db: SupportDatabase, chatId: number, delayMs: number): void {
-  if (pendingWarningTimers.has(chatId)) return;
+function schedulePendingWarning(api: BotApi, db: SupportDatabase, chatId: number, messageThreadId: number | null, delayMs: number): void {
+  const key = `${chatId}:${messageThreadId ?? 0}`;
+  if (pendingWarningTimers.has(key)) return;
   const timer = setTimeout(() => {
-    pendingWarningTimers.delete(chatId);
-    void processPendingWarning(api, db, chatId);
+    pendingWarningTimers.delete(key);
+    void processPendingWarning(api, db, chatId, messageThreadId);
   }, delayMs);
   timer.unref();
-  pendingWarningTimers.set(chatId, timer);
+  pendingWarningTimers.set(key, timer);
 }
 
-export async function processPendingWarning(api: BotApi, db: SupportDatabase, chatId: number): Promise<void> {
-  const state = db.getLanguageModerationChatState(chatId);
+export async function processPendingWarning(api: BotApi, db: SupportDatabase, chatId: number, messageThreadId: number | null = null): Promise<void> {
+  const state = db.getLanguageModerationWarningState(chatId, messageThreadId);
   if (!state?.pending_warning_due_at || Date.parse(state.pending_warning_due_at) > Date.now()) return;
-  const moderation = moderationConfig(db);
+  const moderation = moderationConfigForChat(db, chatId);
   if (!moderation.enabled || moderation.targetChatId !== chatId) return;
-  const grouped = db.claimLanguageModerationFirstStrikes(chatId, new Date(Date.now() - moderation.lookbackMinutes * 60_000).toISOString());
-  if (!grouped.length) return;
+  const grouped = db.claimLanguageModerationFirstStrikes(chatId, new Date(Date.now() - moderation.lookbackMinutes * 60_000).toISOString(), messageThreadId);
+  if (!grouped.length) {
+    db.upsertLanguageModerationWarningState(chatId, messageThreadId, {
+      lastWarningMessageId: state.last_warning_message_id,
+      lastWarningAt: state.last_warning_at,
+      ordinaryMessagesSinceWarning: state.ordinary_messages_since_warning,
+      pendingWarningDueAt: null,
+      pendingWarningStartedAt: null
+    });
+    return;
+  }
   for (const user of grouped) {
     await setModerationReaction(api, chatId, user.messageId, MODERATION_STRIKE_REACTION);
   }
   if (state.last_warning_message_id) { try { await api.deleteMessage(chatId, state.last_warning_message_id); } catch {} }
   try {
-    const warning = await api.sendMessage(chatId, moderation.warningText);
-    db.upsertLanguageModerationChatState(chatId, { lastWarningMessageId: warning.message_id, lastWarningAt: new Date().toISOString(), ordinaryMessagesSinceWarning: 0, pendingWarningDueAt: null, pendingWarningStartedAt: null });
+    const warning = await api.sendMessage(chatId, moderation.warningText, messageThreadId === null ? {} : { message_thread_id: messageThreadId });
+    db.upsertLanguageModerationWarningState(chatId, messageThreadId, { lastWarningMessageId: warning.message_id, lastWarningAt: new Date().toISOString(), ordinaryMessagesSinceWarning: 0, pendingWarningDueAt: null, pendingWarningStartedAt: null });
   } catch (error) {
     logger.warn({ chatId, err: error }, "Could not send pending language moderation warning");
   }

@@ -22,6 +22,33 @@ export interface WorkspaceRecord {
   active: number; imported_from_legacy: number; created_at: string; updated_at: string;
 }
 
+export type ManagedPublicChatPermissionStatus = "UNKNOWN" | "HEALTHY" | "UNHEALTHY";
+export type ManagedPublicChatReactionStatus = "UNKNOWN" | "AVAILABLE" | "UNAVAILABLE";
+export type ManagedPublicChatConnectionStatus = "UNKNOWN" | "CONNECTED" | "UNREACHABLE";
+
+export interface ManagedPublicChatRecord {
+  chat_id: number;
+  workspace_id: number | null;
+  title: string | null;
+  username: string | null;
+  is_forum: number;
+  active: number;
+  imported_from_legacy: number;
+  moderation_enabled: number;
+  warning_text: string;
+  allowlist_json: string;
+  warning_cooldown_minutes: number;
+  warning_message_threshold: number;
+  lookback_minutes: number;
+  permission_status: ManagedPublicChatPermissionStatus;
+  reaction_status: ManagedPublicChatReactionStatus;
+  connection_status: ManagedPublicChatConnectionStatus;
+  permissions_checked_at: string | null;
+  created_at: string;
+  updated_at: string;
+  allowlist: readonly string[];
+}
+
 export interface TeamMemberRecord {
   user_telegram_id: number; username: string | null; display_name: string | null;
   role: TeamRole; active: number; added_by: number | null; created_at: string; updated_at: string;
@@ -264,9 +291,21 @@ export interface LanguageModerationUserState {
 
 export interface LanguageModerationViolation {
   chat_id: number; user_telegram_id: number; message_id: number; username: string | null;
+  message_thread_id: number | null;
   detected_at: string; cycle_tier: number; moderation_cycle_id: string | null; cleanup_state: LanguageModerationViolationCleanupState;
   cleanup_attempt_count: number; cleanup_last_error_category: string | null; cleanup_last_error_code: number | null;
   cleanup_last_error_description: string | null; cleanup_completed_at: string | null;
+}
+
+export interface LanguageModerationWarningState {
+  chat_id: number;
+  message_thread_id: number;
+  last_warning_message_id: number | null;
+  last_warning_at: string | null;
+  ordinary_messages_since_warning: number;
+  pending_warning_due_at: string | null;
+  pending_warning_started_at: string | null;
+  updated_at: string;
 }
 
 export type LanguageModerationViolationCleanupState = "PENDING" | "DELETED" | "ALREADY_ABSENT" | "TERMINAL_FAILED";
@@ -1253,9 +1292,9 @@ export class SupportDatabase {
       .run(input.chat_id, input.user_telegram_id, input.username, input.current_strikes, input.sanction_tier, input.first_strike_at, now());
   }
 
-  addLanguageModerationViolation(input: Pick<LanguageModerationViolation, "chat_id" | "user_telegram_id" | "message_id" | "username" | "cycle_tier">): boolean {
-    const result = this.db.prepare("INSERT OR IGNORE INTO language_moderation_violations (chat_id, user_telegram_id, message_id, username, detected_at, cycle_tier) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(input.chat_id, input.user_telegram_id, input.message_id, input.username, now(), input.cycle_tier);
+  addLanguageModerationViolation(input: Pick<LanguageModerationViolation, "chat_id" | "user_telegram_id" | "message_id" | "username" | "cycle_tier"> & { message_thread_id?: number | null }): boolean {
+    const result = this.db.prepare("INSERT OR IGNORE INTO language_moderation_violations (chat_id, user_telegram_id, message_id, username, detected_at, cycle_tier, message_thread_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(input.chat_id, input.user_telegram_id, input.message_id, input.username, now(), input.cycle_tier, input.message_thread_id ?? null);
     return result.changes === 1;
   }
 
@@ -1263,15 +1302,15 @@ export class SupportDatabase {
     return this.db.prepare("SELECT * FROM language_moderation_violations WHERE chat_id = ? AND detected_at >= ? ORDER BY detected_at ASC, message_id ASC").all(chatId, since) as LanguageModerationViolation[];
   }
 
-  claimLanguageModerationFirstStrikes(chatId: number, since: string): Array<{ userId: number; username: string | null; messageId: number }> {
+  claimLanguageModerationFirstStrikes(chatId: number, since: string, messageThreadId: number | null = null): Array<{ userId: number; username: string | null; messageId: number }> {
     const transaction = this.db.transaction(() => {
       const candidates = this.db.prepare(`
         SELECT v.user_telegram_id AS userId, MAX(v.message_id) AS messageId, MAX(v.username) AS username
         FROM language_moderation_violations v
         LEFT JOIN language_moderation_user_state s ON s.chat_id = v.chat_id AND s.user_telegram_id = v.user_telegram_id
-        WHERE v.chat_id = ? AND v.detected_at >= ? AND COALESCE(s.current_strikes, 0) = 0
+        WHERE v.chat_id = ? AND v.detected_at >= ? AND COALESCE(v.message_thread_id, 0) = ? AND COALESCE(s.current_strikes, 0) = 0
         GROUP BY v.user_telegram_id ORDER BY v.user_telegram_id ASC
-      `).all(chatId, since) as Array<{ userId: number; username: string | null; messageId: number }>;
+      `).all(chatId, since, messageThreadId ?? 0) as Array<{ userId: number; username: string | null; messageId: number }>;
       const timestamp = now();
       const update = this.db.prepare(`INSERT INTO language_moderation_user_state (chat_id, user_telegram_id, username, current_strikes, sanction_tier, first_strike_at, updated_at) VALUES (?, ?, ?, 1, 0, ?, ?) ON CONFLICT(chat_id, user_telegram_id) DO UPDATE SET current_strikes = 1, username = excluded.username, first_strike_at = excluded.first_strike_at, updated_at = excluded.updated_at WHERE language_moderation_user_state.current_strikes = 0`);
       return candidates.filter((candidate) => update.run(chatId, candidate.userId, candidate.username, timestamp, timestamp).changes === 1);
@@ -1340,13 +1379,32 @@ export class SupportDatabase {
     this.db.prepare("DELETE FROM language_moderation_violations WHERE chat_id = ? AND user_telegram_id = ? AND moderation_cycle_id = ?").run(chatId, userId, cycleId);
   }
 
-  getLanguageModerationChatState(chatId: number): { chat_id: number; last_warning_message_id: number | null; last_warning_at: string | null; ordinary_messages_since_warning: number; pending_warning_due_at: string | null; pending_warning_started_at: string | null; updated_at: string } | undefined {
-    return this.db.prepare("SELECT * FROM language_moderation_chat_state WHERE chat_id = ?").get(chatId) as { chat_id: number; last_warning_message_id: number | null; last_warning_at: string | null; ordinary_messages_since_warning: number; pending_warning_due_at: string | null; pending_warning_started_at: string | null; updated_at: string } | undefined;
+  getLanguageModerationChatState(chatId: number): LanguageModerationWarningState | undefined {
+    return this.getLanguageModerationWarningState(chatId, null);
   }
 
   upsertLanguageModerationChatState(chatId: number, values: { lastWarningMessageId?: number | null; lastWarningAt?: string | null; ordinaryMessagesSinceWarning: number; pendingWarningDueAt?: string | null; pendingWarningStartedAt?: string | null }): void {
-    this.db.prepare(`INSERT INTO language_moderation_chat_state (chat_id, last_warning_message_id, last_warning_at, ordinary_messages_since_warning, pending_warning_due_at, pending_warning_started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET last_warning_message_id = excluded.last_warning_message_id, last_warning_at = excluded.last_warning_at, ordinary_messages_since_warning = excluded.ordinary_messages_since_warning, pending_warning_due_at = excluded.pending_warning_due_at, pending_warning_started_at = excluded.pending_warning_started_at, updated_at = excluded.updated_at`)
-      .run(chatId, values.lastWarningMessageId ?? null, values.lastWarningAt ?? null, values.ordinaryMessagesSinceWarning, values.pendingWarningDueAt ?? null, values.pendingWarningStartedAt ?? null, now());
+    this.upsertLanguageModerationWarningState(chatId, null, values);
+  }
+
+  getLanguageModerationWarningState(chatId: number, messageThreadId: number | null): LanguageModerationWarningState | undefined {
+    return this.db.prepare("SELECT * FROM language_moderation_warning_state WHERE chat_id = ? AND message_thread_id = ?")
+      .get(chatId, messageThreadId ?? 0) as LanguageModerationWarningState | undefined;
+  }
+
+  upsertLanguageModerationWarningState(
+    chatId: number,
+    messageThreadId: number | null,
+    values: { lastWarningMessageId?: number | null; lastWarningAt?: string | null; ordinaryMessagesSinceWarning: number; pendingWarningDueAt?: string | null; pendingWarningStartedAt?: string | null }
+  ): void {
+    this.db.prepare(`INSERT INTO language_moderation_warning_state (chat_id, message_thread_id, last_warning_message_id, last_warning_at, ordinary_messages_since_warning, pending_warning_due_at, pending_warning_started_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(chat_id, message_thread_id) DO UPDATE SET last_warning_message_id = excluded.last_warning_message_id,
+        last_warning_at = excluded.last_warning_at, ordinary_messages_since_warning = excluded.ordinary_messages_since_warning,
+        pending_warning_due_at = excluded.pending_warning_due_at, pending_warning_started_at = excluded.pending_warning_started_at,
+        updated_at = excluded.updated_at`)
+      .run(chatId, messageThreadId ?? 0, values.lastWarningMessageId ?? null, values.lastWarningAt ?? null,
+        values.ordinaryMessagesSinceWarning, values.pendingWarningDueAt ?? null, values.pendingWarningStartedAt ?? null, now());
   }
 
   createLanguageModerationCleanupJob(input: Omit<LanguageModerationCleanupJob, "id" | "state" | "created_at" | "updated_at">): number {
@@ -1457,10 +1515,100 @@ export class SupportDatabase {
   }
 
   importManagedPublicChat(chatId: number, workspaceId: number): void {
+    const legacy = this.legacyManagedPublicChatConfig();
     const timestamp = now();
-    this.db.prepare(`INSERT INTO managed_public_chats (chat_id, workspace_id, active, imported_from_legacy, created_at, updated_at)
-      VALUES (?, ?, 1, 1, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET workspace_id = COALESCE(managed_public_chats.workspace_id, excluded.workspace_id), updated_at = excluded.updated_at`)
-      .run(chatId, workspaceId, timestamp, timestamp);
+    this.db.prepare(`INSERT INTO managed_public_chats (
+        chat_id, workspace_id, active, imported_from_legacy, moderation_enabled, warning_text, allowlist_json,
+        warning_cooldown_minutes, warning_message_threshold, lookback_minutes, created_at, updated_at
+      ) VALUES (?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(chat_id) DO UPDATE SET
+        workspace_id = COALESCE(managed_public_chats.workspace_id, excluded.workspace_id),
+        active = 1, updated_at = excluded.updated_at`)
+      .run(chatId, workspaceId, legacy.enabled ? 1 : 0, legacy.warningText, JSON.stringify(legacy.allowlist),
+        legacy.warningCooldownMinutes, legacy.warningMessageThreshold, legacy.lookbackMinutes, timestamp, timestamp);
+  }
+
+  upsertManagedPublicChat(input: {
+    chatId: number;
+    workspaceId?: number | null;
+    title?: string | null;
+    username?: string | null;
+    isForum?: boolean;
+  }): ManagedPublicChatRecord {
+    const timestamp = now();
+    this.db.prepare(`INSERT INTO managed_public_chats (chat_id, workspace_id, title, username, is_forum, active, imported_from_legacy, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?)
+      ON CONFLICT(chat_id) DO UPDATE SET workspace_id = COALESCE(excluded.workspace_id, managed_public_chats.workspace_id),
+        title = COALESCE(excluded.title, managed_public_chats.title), username = COALESCE(excluded.username, managed_public_chats.username),
+        is_forum = excluded.is_forum, active = 1, updated_at = excluded.updated_at`)
+      .run(input.chatId, input.workspaceId ?? null, input.title ?? null, input.username ?? null, input.isForum ? 1 : 0, timestamp, timestamp);
+    return this.getManagedPublicChat(input.chatId, true)!;
+  }
+
+  getManagedPublicChat(chatId: number, includeInactive = false): ManagedPublicChatRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM managed_public_chats WHERE chat_id = ?${includeInactive ? "" : " AND active = 1"}`)
+      .get(chatId) as Omit<ManagedPublicChatRecord, "allowlist"> | undefined;
+    return row ? this.hydrateManagedPublicChat(row) : undefined;
+  }
+
+  listManagedPublicChats(includeInactive = false): ManagedPublicChatRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM managed_public_chats${includeInactive ? "" : " WHERE active = 1"} ORDER BY title COLLATE NOCASE, chat_id`)
+      .all() as Array<Omit<ManagedPublicChatRecord, "allowlist">>;
+    return rows.map((row) => this.hydrateManagedPublicChat(row));
+  }
+
+  updateManagedPublicChatConfig(chatId: number, input: {
+    warningText: string;
+    allowlist: readonly string[];
+    warningCooldownMinutes: number;
+    warningMessageThreshold: number;
+    lookbackMinutes: number;
+  }): boolean {
+    const result = this.db.prepare(`UPDATE managed_public_chats SET warning_text = ?, allowlist_json = ?,
+      warning_cooldown_minutes = ?, warning_message_threshold = ?, lookback_minutes = ?, updated_at = ?
+      WHERE chat_id = ? AND active = 1`)
+      .run(input.warningText.trim(), JSON.stringify(normalizeManagedChatAllowlist(input.allowlist)), input.warningCooldownMinutes,
+        input.warningMessageThreshold, input.lookbackMinutes, now(), chatId);
+    return result.changes === 1;
+  }
+
+  setManagedPublicChatModerationEnabled(chatId: number, enabled: boolean): boolean {
+    return this.db.prepare("UPDATE managed_public_chats SET moderation_enabled = ?, updated_at = ? WHERE chat_id = ? AND active = 1")
+      .run(enabled ? 1 : 0, now(), chatId).changes === 1;
+  }
+
+  recordManagedPublicChatPermissionHealth(input: {
+    chatId: number;
+    healthy: boolean;
+    reactionsAvailable: boolean | null;
+    connected?: boolean;
+    title?: string | null;
+    username?: string | null;
+    isForum?: boolean;
+  }): boolean {
+    return this.db.prepare(`UPDATE managed_public_chats SET permission_status = ?, reaction_status = ?,
+      connection_status = COALESCE(?, connection_status),
+      title = CASE WHEN ? = 1 THEN ? ELSE title END,
+      username = CASE WHEN ? = 1 THEN ? ELSE username END,
+      is_forum = CASE WHEN ? = 1 THEN ? ELSE is_forum END,
+      permissions_checked_at = ?, updated_at = ? WHERE chat_id = ? AND active = 1`)
+      .run(input.healthy ? "HEALTHY" : "UNHEALTHY", input.reactionsAvailable === null ? "UNKNOWN" : input.reactionsAvailable ? "AVAILABLE" : "UNAVAILABLE",
+        input.connected === undefined ? null : input.connected ? "CONNECTED" : "UNREACHABLE",
+        input.title === undefined ? 0 : 1, input.title ?? null,
+        input.username === undefined ? 0 : 1, input.username ?? null,
+        input.isForum === undefined ? 0 : 1, input.isForum ? 1 : 0,
+        now(), now(), input.chatId).changes === 1;
+  }
+
+  recordManagedPublicChatUnreachable(chatId: number): boolean {
+    return this.db.prepare(`UPDATE managed_public_chats SET connection_status = 'UNREACHABLE',
+      permission_status = 'UNHEALTHY', permissions_checked_at = ?, updated_at = ? WHERE chat_id = ? AND active = 1`)
+      .run(now(), now(), chatId).changes === 1;
+  }
+
+  deactivateManagedPublicChat(chatId: number): boolean {
+    return this.db.prepare("UPDATE managed_public_chats SET active = 0, moderation_enabled = 0, updated_at = ? WHERE chat_id = ? AND active = 1")
+      .run(now(), chatId).changes === 1;
   }
 
   getTeamMember(userId: number): TeamMemberRecord | undefined {
@@ -1564,12 +1712,12 @@ export class SupportDatabase {
       .run(chatId, messageId, now(), userId);
   }
 
-  getInstallationOperationalCounts(): { publicChats: number; moderationEnabled: number; pendingCleanup: number; pendingArchives: number; pendingBatchStaffOperations: number } {
+  getInstallationOperationalCounts(): { publicChats: number; moderationEnabled: number; unhealthyModerationChats: number; pendingCleanup: number; pendingArchives: number; pendingBatchStaffOperations: number } {
     const scalar = (sql: string): number => (this.db.prepare(sql).get() as { count: number }).count;
-    const moderationEnabled = this.getSetting("language_moderation:enabled") === "true" ? 1 : 0;
     return {
       publicChats: scalar("SELECT COUNT(*) AS count FROM managed_public_chats WHERE active = 1"),
-      moderationEnabled,
+      moderationEnabled: scalar("SELECT COUNT(*) AS count FROM managed_public_chats WHERE active = 1 AND moderation_enabled = 1"),
+      unhealthyModerationChats: scalar("SELECT COUNT(*) AS count FROM managed_public_chats WHERE active = 1 AND permission_status = 'UNHEALTHY'"),
       pendingCleanup: scalar("SELECT COUNT(*) AS count FROM language_moderation_cleanup_jobs WHERE state != 'COMPLETED'"),
       pendingArchives: scalar("SELECT COUNT(*) AS count FROM tickets WHERE status = 'CLOSED' AND archived_at IS NULL"),
       pendingBatchStaffOperations: scalar("SELECT COUNT(*) AS count FROM ticket_batch_answer_packages WHERE final_summary_state IN ('PENDING','FAILED')")
@@ -1622,6 +1770,28 @@ export class SupportDatabase {
       `
       )
       .all(limit) as BannedUserRecord[];
+  }
+
+  private hydrateManagedPublicChat(row: Omit<ManagedPublicChatRecord, "allowlist">): ManagedPublicChatRecord {
+    return { ...row, allowlist: normalizeManagedChatAllowlist(parseJsonStringArray(row.allowlist_json)) };
+  }
+
+  private legacyManagedPublicChatConfig(): {
+    enabled: boolean;
+    warningText: string;
+    allowlist: readonly string[];
+    warningCooldownMinutes: number;
+    warningMessageThreshold: number;
+    lookbackMinutes: number;
+  } {
+    return {
+      enabled: this.getSetting("language_moderation:enabled") === "true",
+      warningText: this.getSetting("language_moderation:warning_text")?.trim() || "Please use English in the main chat. Further violations may be reviewed by an authorized moderator under the current community policy.",
+      allowlist: normalizeManagedChatAllowlist(parseJsonStringArray(this.getSetting("language_moderation:allowlist") ?? "[]")),
+      warningCooldownMinutes: positiveIntegerOr(this.getSetting("language_moderation:warning_cooldown_minutes"), 10),
+      warningMessageThreshold: positiveIntegerOr(this.getSetting("language_moderation:warning_message_threshold"), 15),
+      lookbackMinutes: positiveIntegerOr(this.getSetting("language_moderation:lookback_minutes"), 5)
+    };
   }
 
   private migrate(): void {
@@ -2240,6 +2410,64 @@ export class SupportDatabase {
           this.db.prepare(`INSERT OR IGNORE INTO installation_state (id, setup_state, authorization_mode, active_workspace_id, updated_at)
             VALUES (1, 'SETUP_REQUIRED', 'LEGACY_TRUSTED_GROUP', NULL, ?)`).run(now());
         }
+      },
+      {
+        id: 21,
+        name: "add_multi_chat_topic_aware_moderation",
+        up: () => {
+          if (!this.hasTable("managed_public_chats")) return;
+          this.addColumnIfMissing("managed_public_chats", "is_forum", "INTEGER NOT NULL DEFAULT 0 CHECK(is_forum IN (0,1))");
+          this.addColumnIfMissing("managed_public_chats", "moderation_enabled", "INTEGER NOT NULL DEFAULT 0 CHECK(moderation_enabled IN (0,1))");
+          this.addColumnIfMissing("managed_public_chats", "warning_text", "TEXT NOT NULL DEFAULT 'Please use English in the main chat. Further violations may be reviewed by an authorized moderator under the current community policy.'");
+          this.addColumnIfMissing("managed_public_chats", "allowlist_json", "TEXT NOT NULL DEFAULT '[]'");
+          this.addColumnIfMissing("managed_public_chats", "warning_cooldown_minutes", "INTEGER NOT NULL DEFAULT 10 CHECK(warning_cooldown_minutes > 0)");
+          this.addColumnIfMissing("managed_public_chats", "warning_message_threshold", "INTEGER NOT NULL DEFAULT 15 CHECK(warning_message_threshold > 0)");
+          this.addColumnIfMissing("managed_public_chats", "lookback_minutes", "INTEGER NOT NULL DEFAULT 5 CHECK(lookback_minutes > 0)");
+          this.addColumnIfMissing("managed_public_chats", "permission_status", "TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK(permission_status IN ('UNKNOWN','HEALTHY','UNHEALTHY'))");
+          this.addColumnIfMissing("managed_public_chats", "reaction_status", "TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK(reaction_status IN ('UNKNOWN','AVAILABLE','UNAVAILABLE'))");
+          this.addColumnIfMissing("managed_public_chats", "connection_status", "TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK(connection_status IN ('UNKNOWN','CONNECTED','UNREACHABLE'))");
+          this.addColumnIfMissing("managed_public_chats", "permissions_checked_at", "TEXT");
+
+          if (this.hasTable("language_moderation_violations")) {
+            this.addColumnIfMissing("language_moderation_violations", "message_thread_id", "INTEGER");
+          }
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS language_moderation_warning_state (
+              chat_id INTEGER NOT NULL,
+              message_thread_id INTEGER NOT NULL DEFAULT 0,
+              last_warning_message_id INTEGER,
+              last_warning_at TEXT,
+              ordinary_messages_since_warning INTEGER NOT NULL DEFAULT 0,
+              pending_warning_due_at TEXT,
+              pending_warning_started_at TEXT,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(chat_id, message_thread_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_language_moderation_warning_due
+              ON language_moderation_warning_state(pending_warning_due_at, chat_id, message_thread_id);
+          `);
+          if (this.hasTable("language_moderation_violations")) {
+            this.db.exec(`CREATE INDEX IF NOT EXISTS idx_language_moderation_violations_topic
+              ON language_moderation_violations(chat_id, message_thread_id, detected_at, user_telegram_id);`);
+          }
+          if (this.hasTable("language_moderation_chat_state")) {
+            this.db.exec(`INSERT OR IGNORE INTO language_moderation_warning_state (
+                chat_id, message_thread_id, last_warning_message_id, last_warning_at, ordinary_messages_since_warning,
+                pending_warning_due_at, pending_warning_started_at, updated_at
+              ) SELECT chat_id, 0, last_warning_message_id, last_warning_at, ordinary_messages_since_warning,
+                pending_warning_due_at, pending_warning_started_at, updated_at FROM language_moderation_chat_state;`);
+          }
+
+          const target = this.hasTable("settings") ? Number(this.getSetting("language_moderation:target")) : Number.NaN;
+          if (Number.isSafeInteger(target) && target !== 0) {
+            const legacy = this.legacyManagedPublicChatConfig();
+            this.db.prepare(`UPDATE managed_public_chats SET moderation_enabled = ?, warning_text = ?, allowlist_json = ?,
+              warning_cooldown_minutes = ?, warning_message_threshold = ?, lookback_minutes = ?, updated_at = ?
+              WHERE chat_id = ? AND imported_from_legacy = 1`)
+              .run(legacy.enabled ? 1 : 0, legacy.warningText, JSON.stringify(legacy.allowlist), legacy.warningCooldownMinutes,
+                legacy.warningMessageThreshold, legacy.lookbackMinutes, now(), target);
+          }
+        }
       }
     ];
 
@@ -2267,7 +2495,7 @@ export class SupportDatabase {
     return Boolean(row);
   }
 
-  private hasColumn(tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs" | "language_moderation_violations" | "ticket_batch_exports" | "ticket_batch_answer_packages" | "ticket_batch_answer_items", columnName: string): boolean {
+  private hasColumn(tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs" | "language_moderation_violations" | "language_moderation_chat_state" | "managed_public_chats" | "ticket_batch_exports" | "ticket_batch_answer_packages" | "ticket_batch_answer_items", columnName: string): boolean {
     const rows = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as TableColumnInfo[];
     return rows.some((row) => row.name === columnName);
   }
@@ -2281,7 +2509,7 @@ export class SupportDatabase {
   }
 
   private addColumnIfMissing(
-    tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs" | "language_moderation_violations" | "ticket_batch_exports" | "ticket_batch_answer_packages" | "ticket_batch_answer_items",
+    tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs" | "language_moderation_violations" | "language_moderation_chat_state" | "managed_public_chats" | "ticket_batch_exports" | "ticket_batch_answer_packages" | "ticket_batch_answer_items",
     columnName: string,
     columnDefinition: string
   ): void {
@@ -2291,4 +2519,23 @@ export class SupportDatabase {
 
     this.db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition};`);
   }
+}
+
+function parseJsonStringArray(value: string): readonly string[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeManagedChatAllowlist(values: readonly string[]): readonly string[] {
+  return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))];
+}
+
+function positiveIntegerOr(value: string | undefined, fallback: number): number {
+  if (!value || !/^\d+$/.test(value)) return fallback;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
