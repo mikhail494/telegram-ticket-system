@@ -86,6 +86,14 @@ function answerPackage(exportId: string, ticketId: number, snapshotToken: string
   });
 }
 
+function privateCommand(userId: number, text: string, messageId = 1): Update {
+  const command = text.split(/\s+/, 1)[0]!;
+  const update = privateMessage(userId, text, messageId);
+  if (!update.message) throw new Error("Expected private message update.");
+  update.message.entities = [{ type: "bot_command", offset: 0, length: command.length }];
+  return update;
+}
+
 function exportIdFromCaption(call: RecordedApiCall): string {
   const match = /^Export: (export_[a-f0-9]+)$/m.exec(String(call.payload.caption));
   if (!match) throw new Error("Missing export ID in caption");
@@ -104,7 +112,7 @@ test("OWNER and ADMIN receive direct private export controls while junior roles 
   }
 });
 
-test("private export uses the existing exporter, targets the initiating administrator, and enters answer waiting", async () => {
+test("private export retires the dashboard before sending the ZIP and a fresh answer-waiting screen", async () => {
   const { harness } = createReadyHarness({ role: "ADMIN", rbac: true });
   harness.seedTicket();
 
@@ -113,8 +121,23 @@ test("private export uses the existing exporter, targets the initiating administ
   const exportCall = harness.findApiCalls("sendDocument")[0];
   assert.equal(exportCall?.payload.chat_id, 2);
   assert.equal(harness.findApiCalls("sendDocument").some((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID), false);
+  const dashboardRetirement = harness.findApiCalls("deleteMessage")[0];
+  assert.equal(dashboardRetirement?.payload.message_id, 10);
+  assert.ok(harness.apiCalls.indexOf(dashboardRetirement!) < harness.apiCalls.indexOf(exportCall!));
   const exportId = exportIdFromCaption(exportCall!);
   assert.equal(harness.db.getSetting("private_batch_export:2"), exportId);
+  assert.match(String(harness.findApiCalls("sendMessage").at(-1)?.payload.text), /Waiting for answers/);
+});
+
+test("private export continues after dashboard deletion falls back to disabling its keyboard", async () => {
+  const { harness } = createReadyHarness({ role: "ADMIN", rbac: true });
+  harness.seedTicket();
+  harness.failNextApiCall("deleteMessage");
+
+  await harness.bot.handleUpdate(privateCallback(2, "batch-ui:export"));
+
+  assert.equal(harness.countApiCalls("sendDocument"), 1);
+  assert.equal(harness.countApiCalls("editMessageReplyMarkup"), 1);
   assert.match(String(harness.findApiCalls("sendMessage").at(-1)?.payload.text), /Waiting for answers/);
 });
 
@@ -152,16 +175,26 @@ test("invalid answer files keep the current export waiting without ticket mutati
   assert.match(String(harness.findApiCalls("sendMessage").at(-1)?.payload.text), /Waiting for answers/);
 });
 
-test("pending private export remains discoverable after start and can be aborted without ticket actions", async () => {
+test("pending private export survives /start, returns through Continue batch, and can be aborted without ticket actions", async () => {
   const { harness } = createReadyHarness({ role: "ADMIN", rbac: true });
   const ticket = harness.seedTicket();
   await harness.bot.handleUpdate(privateCallback(2, "batch-ui:export", 50));
   const exportId = exportIdFromCaption(harness.findApiCalls("sendDocument")[0]!);
   harness.clearApiCalls();
 
-  await harness.bot.handleUpdate(privateMessage(2, "/start", 51));
+  await harness.bot.handleUpdate(privateCommand(2, "/start", 51));
+  assert.equal(harness.db.getSetting("private_batch_export:2"), exportId);
+  assert.equal(harness.countApiCalls("deleteMessage"), 1);
+  const dashboard = harness.findApiCalls("sendMessage").at(-1);
+  assert.match(String(dashboard?.payload.text), /ADMIN dashboard/);
+  assert.equal(callbackData(dashboard!, "Continue batch"), "batch-ui:continue");
+
+  harness.clearApiCalls();
   await harness.bot.handleUpdate(privateCallback(2, "batch-ui:continue", 52));
   assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /Waiting for answers/);
+  await harness.bot.handleUpdate(privateCallback(2, "dashboard:home", 53));
+  assert.equal(harness.db.getSetting("private_batch_export:2"), exportId);
+  assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /ADMIN dashboard/);
   await harness.bot.handleUpdate(privateCallback(2, "batch-ui:abort", 53));
   const confirmation = harness.findApiCalls("editMessageText").at(-1);
   assert.match(String(confirmation?.payload.text), /Abort this batch workflow/);
@@ -170,6 +203,18 @@ test("pending private export remains discoverable after start and can be aborted
   assert.equal(harness.db.getSetting("private_batch_export:2"), "");
   assert.equal(harness.db.getTicketBatchExport(exportId, TEST_STAFF_CHAT_ID)?.delivery_state, "DELIVERED");
   assert.equal(harness.db.getTicketWithUser(ticket.id)?.status, "OPEN");
+});
+
+test("armed test-ticket mode does not consume /start", async () => {
+  const { harness } = createReadyHarness({ role: "ADMIN", rbac: true });
+
+  await harness.bot.handleUpdate(privateCallback(2, "dashboard:test-ticket", 70));
+  harness.clearApiCalls();
+  await harness.bot.handleUpdate(privateCommand(2, "/start", 71));
+
+  assert.equal(harness.db.listTicketsForUser(2, TEST_STAFF_CHAT_ID).length, 0);
+  assert.equal(harness.db.getSetting("staff_test_ticket_mode:2"), "true");
+  assert.match(String(harness.findApiCalls("sendMessage").at(-1)?.payload.text), /ADMIN dashboard/);
 });
 
 test("batch help is vendor-neutral and returns to the pending workflow", async () => {

@@ -700,7 +700,7 @@ export function createBot(
     const callbackTarget = callbackMessage?.chat.type === "private"
       ? { chatId: callbackMessage.chat.id, messageId: callbackMessage.message_id }
       : undefined;
-    const target = callbackTarget ?? (ctx.from ? privateUiMessages.get(ctx.from.id) : undefined);
+    const target = (ctx.from ? privateUiMessages.get(ctx.from.id) : undefined) ?? callbackTarget;
     if (target) {
       try {
         await ctx.api.editMessageText(target.chatId, target.messageId, text, { reply_markup: replyMarkup });
@@ -715,9 +715,18 @@ export function createBot(
     if (ctx.from) privateUiMessages.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
   }
 
-  async function refreshPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard) {
-    const target = ctx.from ? privateUiMessages.get(ctx.from.id) : undefined;
-    if (target) {
+  function privateUiTargets(ctx: Context): Array<{ chatId: number; messageId: number }> {
+    const callbackMessage = ctx.callbackQuery?.message;
+    const callbackTarget = callbackMessage?.chat.type === "private"
+      ? { chatId: callbackMessage.chat.id, messageId: callbackMessage.message_id }
+      : undefined;
+    const trackedTarget = ctx.from ? privateUiMessages.get(ctx.from.id) : undefined;
+    return [callbackTarget, trackedTarget].filter((target): target is { chatId: number; messageId: number } => Boolean(target))
+      .filter((target, index, targets) => targets.findIndex((other) => other.chatId === target.chatId && other.messageId === target.messageId) === index);
+  }
+
+  async function retirePrivateScreens(ctx: Context): Promise<void> {
+    for (const target of privateUiTargets(ctx)) {
       try {
         await ctx.api.deleteMessage(target.chatId, target.messageId);
       } catch {
@@ -728,9 +737,18 @@ export function createBot(
         }
       }
     }
+    if (ctx.from) privateUiMessages.delete(ctx.from.id);
+  }
+
+  async function sendFreshPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard) {
     const sent = await ctx.reply(text, { reply_markup: replyMarkup });
     if (ctx.from) privateUiMessages.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
     return sent;
+  }
+
+  async function refreshPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard) {
+    await retirePrivateScreens(ctx);
+    return sendFreshPrivateScreen(ctx, text, replyMarkup);
   }
 
   async function retireWorkspacePickerPrompt(userId: number | undefined): Promise<void> {
@@ -803,16 +821,20 @@ export function createBot(
       .text("Back", "dashboard:home");
   }
 
+  function privateBatchWaitingText(exportId: string, notice?: string): string {
+    return ["Waiting for answers", "", "Your ticket export is ready.", `Send the completed ticket-answers_${exportId}.json file here. Only a valid answer package for this export will continue.`, ...(notice ? ["", notice] : [])].join("\n");
+  }
+
   async function showPrivateBatchWaiting(ctx: Context, exportId: string, refresh = false, notice?: string): Promise<void> {
     const render = refresh ? refreshPrivateScreen : renderPrivateScreen;
-    await render(ctx, ["Waiting for answers", "", "Your ticket export is ready.", `Send the completed ticket-answers_${exportId}.json file here. Only a valid answer package for this export will continue.`, ...(notice ? ["", notice] : [])].join("\n"), privateBatchWaitingKeyboard());
+    await render(ctx, privateBatchWaitingText(exportId, notice), privateBatchWaitingKeyboard());
   }
 
   async function showPrivateBatchHelp(ctx: Context): Promise<void> {
     await renderPrivateScreen(ctx, ["Preparing batch answers", "", "1. Give your chosen AI assistant the product documentation, support policies, FAQ, tone guidance, and any other authoritative context it needs.", "2. Upload this ticket export ZIP to that assistant.", "3. Ask it to follow the instructions included in the archive and prepare the completed import file.", "4. Send the returned answer file here for preview and explicit approval."].join("\n"), new InlineKeyboard().text("Back", "batch-ui:continue"));
   }
 
-  async function showDashboard(ctx: Context): Promise<void> {
+  async function showDashboard(ctx: Context, fresh = false): Promise<void> {
     if (!ctx.from) return;
     const member = installation.getMember(ctx.from.id);
     if (!member) return;
@@ -820,7 +842,8 @@ export function createBot(
       await ctx.reply("Staff workspace membership required for role-based access.");
       return;
     }
-    await renderPrivateScreen(ctx, dashboardText(ctx.from.id), dashboardKeyboard(ctx.from.id, member.role));
+    const render = fresh ? refreshPrivateScreen : renderPrivateScreen;
+    await render(ctx, dashboardText(ctx.from.id), dashboardKeyboard(ctx.from.id, member.role));
   }
 
   async function showSystemStatus(ctx: Context): Promise<void> {
@@ -1107,7 +1130,7 @@ export function createBot(
       return;
     }
 
-    if (ctx.from && installation.getMember(ctx.from.id)) { await showDashboard(ctx); return; }
+    if (ctx.from && installation.getMember(ctx.from.id)) { await showDashboard(ctx, true); return; }
     if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet. Please try again later."); return; }
     await ctx.reply(START_TEXT);
   });
@@ -1747,10 +1770,11 @@ export function createBot(
           await showPrivateBatchWaiting(ctx, existing);
           return;
         }
+        await retirePrivateScreens(ctx);
         const exportId = await exportActiveTickets(ctx, ctx.chat.id);
         if (exportId) {
           setPendingPrivateBatchExport(ctx.from!.id, exportId);
-          await showPrivateBatchWaiting(ctx, exportId, true);
+          await sendFreshPrivateScreen(ctx, privateBatchWaitingText(exportId), privateBatchWaitingKeyboard());
         }
         return;
       }
