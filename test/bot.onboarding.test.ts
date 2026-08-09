@@ -133,6 +133,28 @@ test("dashboard moderation replaces the dashboard with moderation management", a
   } finally { harness.cleanup(); }
 });
 
+test("team screen returns to the dashboard through the current message", async () => {
+  let service!: InstallationService;
+  const harness = createBotHarness({ installationServiceFactory: (db) => {
+    service = new InstallationService(db);
+    service.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
+    return service;
+  } });
+  try {
+    await harness.bot.handleUpdate(privateCallback(1, "dashboard:team", 10));
+    const team = harness.findApiCalls("editMessageText")[0];
+    const keyboard = team?.payload.reply_markup as { inline_keyboard?: Array<Array<{ callback_data?: string }>> };
+    assert.equal(keyboard.inline_keyboard?.flat().some((button) => button.callback_data === "dashboard:home"), true);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(1, "dashboard:home", 10));
+    assert.equal(harness.countApiCalls("editMessageText"), 1);
+    assert.equal(harness.countApiCalls("sendMessage"), 0);
+    assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /Owner dashboard/);
+  } finally { harness.cleanup(); }
+});
+
 test("staff explicitly enables one-message test-ticket mode", async () => {
   let service!: InstallationService;
   const harness = createBotHarness({ installationServiceFactory: (db) => {
@@ -201,7 +223,7 @@ test("activation completes setup and replaces the wizard with the ready dashboar
   } finally { harness.cleanup(); }
 });
 
-test("ready staff workspace selection stays outside first-run onboarding", async () => {
+test("ready staff workspace selection refreshes its active screen below picker output", async () => {
   let service!: InstallationService;
   const harness = createBotHarness({ installationServiceFactory: (db) => {
     service = new InstallationService(db);
@@ -226,9 +248,35 @@ test("ready staff workspace selection stays outside first-run onboarding", async
     assert.equal(service.getOnboardingSession(1)?.stage, "ACTIVATE_SUPPORT");
     assert.equal(service.getOnboardingSession(1)?.state, "COMPLETED");
     assert.equal(harness.countApiCalls("createForumTopic"), 0);
-    assert.equal(harness.countApiCalls("editMessageText"), 1);
-    assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /^Staff workspace$/m);
-    assert.doesNotMatch(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /Setup 5\/9/);
+    assert.equal(harness.countApiCalls("deleteMessage"), 1);
+    assert.equal(harness.countApiCalls("editMessageText"), 0);
+    assert.equal(harness.countApiCalls("sendMessage"), 1);
+    assert.match(String(harness.findApiCalls("sendMessage")[0]?.payload.text), /^Staff workspace$/m);
+    assert.doesNotMatch(String(harness.findApiCalls("sendMessage")[0]?.payload.text), /Setup 5\/9/);
+  } finally { harness.cleanup(); }
+});
+
+test("workspace screen refresh survives cleanup failure without repeating workspace setup", async () => {
+  let service!: InstallationService;
+  const harness = createBotHarness({ installationServiceFactory: (db) => {
+    service = new InstallationService(db);
+    service.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
+    db.setSetting(`support_logs_message_thread_id:${TEST_STAFF_CHAT_ID}`, "153");
+    return service;
+  } });
+  try {
+    await harness.bot.handleUpdate(privateCallback(1, "dashboard:workspace", 10));
+    await harness.bot.handleUpdate(privateCallback(1, "workspace:select", 10));
+    harness.clearApiCalls();
+    harness.failNextApiCall("deleteMessage");
+    const update: Update = { update_id: 22, message: { message_id: 22, date: 1, from: { id: 1, is_bot: false, first_name: "Owner" }, chat: { id: 1, type: "private", first_name: "Owner" }, chat_shared: { request_id: 1300, chat_id: TEST_STAFF_CHAT_ID, title: "Staff" } } };
+    await harness.bot.handleUpdate(update);
+    assert.equal(harness.countApiCalls("deleteMessage"), 1);
+    assert.equal(harness.countApiCalls("editMessageReplyMarkup"), 1);
+    assert.equal(harness.countApiCalls("sendMessage"), 1);
+    assert.equal(harness.countApiCalls("createForumTopic"), 0);
+    assert.equal(service.getStaffChatId(), TEST_STAFF_CHAT_ID);
   } finally { harness.cleanup(); }
 });
 
