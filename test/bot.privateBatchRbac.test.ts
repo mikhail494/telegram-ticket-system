@@ -91,9 +91,10 @@ test("OWNER and ADMIN receive private batch controls while junior roles do not",
     const { harness } = createReadyHarness({ role, rbac: true });
     const userId = role === "OWNER" ? 1 : 2;
     await harness.bot.handleUpdate(privateCallback(userId, "dashboard:batch", userId + 10));
-    const texts = harness.findApiCalls("sendMessage").map((call) => String(call.payload.text)).join("\n");
-    if (role === "OWNER" || role === "ADMIN") assert.match(texts, /Batch operations/);
-    else assert.doesNotMatch(texts, /Export active tickets/);
+    const edited = harness.findApiCalls("editMessageText").map((call) => String(call.payload.text)).join("\n");
+    const sent = harness.findApiCalls("sendMessage").map((call) => String(call.payload.text)).join("\n");
+    if (role === "OWNER" || role === "ADMIN") assert.match(edited, /Batch operations/);
+    else assert.doesNotMatch(sent, /Export active tickets/);
   }
 });
 
