@@ -56,6 +56,8 @@ export interface ModerationLogInput {
   username: string | null;
   publicChatId: number;
   publicChatTitle: string | null;
+  publicChatUsername?: string | null;
+  messageThreadIds?: readonly number[];
   sanctionTier: number;
   sanctionKind: string;
   timestamp: string;
@@ -254,6 +256,8 @@ export async function logModerationSanction(api: BotApi, db: SupportDatabase, in
     `Username: ${input.username ? `@${input.username}` : "none"}`,
     `Public chat ID: ${input.publicChatId}`,
     `Public chat: ${input.publicChatTitle ?? "unknown"}`,
+    `Public username: ${input.publicChatUsername ? `@${input.publicChatUsername}` : "none"}`,
+    `Topic threads: ${input.messageThreadIds?.length ? input.messageThreadIds.join(", ") : "none"}`,
     `Sanction tier: ${input.sanctionTier}`,
     `Sanction: ${input.sanctionKind}`,
     `UTC: ${input.timestamp}`,

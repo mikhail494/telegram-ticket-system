@@ -114,11 +114,12 @@ function createDueJob(
   return jobId;
 }
 
-function seedCycleViolation(harness: BotHarness, userId: number, messageId: number, cycleTier = 0, violationCycleId = `test-cycle:${userId}:${cycleTier}`): void {
+function seedCycleViolation(harness: BotHarness, userId: number, messageId: number, cycleTier = 0, violationCycleId = `test-cycle:${userId}:${cycleTier}`, messageThreadId: number | null = null): void {
   assert.equal(harness.db.addLanguageModerationViolation({
     chat_id: PUBLIC_CHAT_ID,
     user_telegram_id: userId,
     message_id: messageId,
+    message_thread_id: messageThreadId,
     username: `public_${userId}`,
     cycle_tier: cycleTier
   }), true);
@@ -339,9 +340,10 @@ describe("moderation cleanup and Support Logs recovery", () => {
   it("retains retryable deletion work until recovery deletes it and emits one Support Logs event", async () => {
     const harness = createHarness();
     enable(harness);
+    harness.db.upsertManagedPublicChat({ chatId: PUBLIC_CHAT_ID, workspaceId: harness.db.getActiveWorkspace()?.id, title: "Public Community", username: "synthetic_community", isForum: true });
     const jobId = createDueJob(harness, 22);
-    seedCycleViolation(harness, 22, 205);
-    seedCycleViolation(harness, 22, 206);
+    seedCycleViolation(harness, 22, 205, 0, "test-cycle:22:0", 101);
+    seedCycleViolation(harness, 22, 206, 0, "test-cycle:22:0", 202);
     harness.failNextApiCall("deleteMessage");
 
     await processModerationCleanupJob(harness.bot.api, harness.db, jobId, FIXED_NOW);
@@ -361,6 +363,8 @@ describe("moderation cleanup and Support Logs recovery", () => {
     assert.equal(harness.db.listLanguageModerationCycleViolations(PUBLIC_CHAT_ID, 22, 0).length, 0);
     assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "COMPLETED");
     assert.equal(publicLogMessages(harness).length, 1);
+    assert.match(String(publicLogMessages(harness)[0]?.payload.text), /@synthetic_community/);
+    assert.match(String(publicLogMessages(harness)[0]?.payload.text), /Topic threads: 101, 202/);
 
     await processModerationRecovery(harness.bot.api, harness.db, new Date("2026-07-31T12:02:00.000Z"));
     assert.equal(publicLogMessages(harness).length, 1);

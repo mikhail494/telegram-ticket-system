@@ -169,11 +169,17 @@ export async function processModerationCleanupJob(
 
     if (state !== "LOG_PENDING") return;
     const { logModerationSanction } = await import("./archive.js");
+    const managedChat = db.getManagedPublicChat(job.chat_id, true);
+    const messageThreadIds = [...new Set(db.listLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId)
+      .map((violation) => violation.message_thread_id)
+      .filter((threadId): threadId is number => threadId !== null))].sort((left, right) => left - right);
     await logModerationSanction(api, db, {
       userTelegramId: job.user_telegram_id,
       username: job.username,
       publicChatId: job.chat_id,
       publicChatTitle: job.chat_title,
+      publicChatUsername: managedChat?.username ?? null,
+      messageThreadIds,
       sanctionTier: job.sanction_tier,
       sanctionKind: job.sanction_kind,
       timestamp: job.updated_at
