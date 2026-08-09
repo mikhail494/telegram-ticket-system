@@ -57,11 +57,11 @@ test("owner receives dashboard instead of accidentally creating a ticket", async
     assert.equal(harness.db.listTicketsForUser(1, TEST_STAFF_CHAT_ID).length, 0);
     const dashboard = String(harness.findApiCalls("sendMessage")[0]?.payload.text);
     assert.match(dashboard, /Owner dashboard/);
-    assert.match(dashboard, new RegExp(`Version: ${packageMetadata.version.replaceAll(".", "\\.")}`));
+    assert.doesNotMatch(dashboard, new RegExp(`Version: ${packageMetadata.version.replaceAll(".", "\\.")}`));
   } finally { harness.cleanup(); }
 });
 
-test("owner dashboard recognizes the scoped Support Logs topic", async () => {
+test("system status recognizes the scoped Support Logs topic", async () => {
   let service!: InstallationService;
   const harness = createBotHarness({ installationServiceFactory: (db) => {
     service = new InstallationService(db);
@@ -71,9 +71,65 @@ test("owner dashboard recognizes the scoped Support Logs topic", async () => {
     return service;
   } });
   try {
-    await harness.bot.handleUpdate(privateMessage(1, "ordinary owner text"));
-    const dashboard = String(harness.findApiCalls("sendMessage")[0]?.payload.text);
-    assert.match(dashboard, /Support Logs: configured/);
+    await harness.bot.handleUpdate(privateCallback(1, "dashboard:status"));
+    const status = String(harness.findApiCalls("editMessageText")[0]?.payload.text);
+    assert.match(status, /Support Logs: configured/);
+  } finally { harness.cleanup(); }
+});
+
+test("ready dashboard is concise and opens system status in the same message", async () => {
+  let service!: InstallationService;
+  const harness = createBotHarness({ installationServiceFactory: (db) => {
+    service = new InstallationService(db);
+    service.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
+    db.setSetting(`support_logs_message_thread_id:${TEST_STAFF_CHAT_ID}`, "153");
+    return service;
+  } });
+  try {
+    await harness.bot.handleUpdate(privateMessage(1, "owner dashboard", 1));
+    const dashboard = harness.findApiCalls("sendMessage")[0];
+    assert.match(String(dashboard?.payload.text), /Owner dashboard/);
+    assert.doesNotMatch(String(dashboard?.payload.text), /Version:|Authorization:|Database:/);
+    const keyboard = dashboard?.payload.reply_markup as { inline_keyboard?: Array<Array<{ callback_data?: string }>> };
+    assert.equal(keyboard.inline_keyboard?.flat().some((button) => button.callback_data === "setup:resume"), false);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(1, "dashboard:status", 10));
+    assert.equal(harness.countApiCalls("editMessageText"), 1);
+    assert.equal(harness.countApiCalls("sendMessage"), 0);
+    const status = harness.findApiCalls("editMessageText")[0];
+    assert.match(String(status?.payload.text), /System status/);
+    assert.match(String(status?.payload.text), /Version:/);
+    const statusKeyboard = status?.payload.reply_markup as { inline_keyboard?: Array<Array<{ callback_data?: string }>> };
+    assert.equal(statusKeyboard.inline_keyboard?.flat().some((button) => button.callback_data === "dashboard:home"), true);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(1, "dashboard:home", 10));
+    assert.equal(harness.countApiCalls("editMessageText"), 1);
+    assert.equal(harness.countApiCalls("sendMessage"), 0);
+    assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /Owner dashboard/);
+  } finally { harness.cleanup(); }
+});
+
+test("dashboard moderation replaces the dashboard with moderation management", async () => {
+  let service!: InstallationService;
+  const harness = createBotHarness({ installationServiceFactory: (db) => {
+    service = new InstallationService(db);
+    service.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
+    return service;
+  } });
+  try {
+    await harness.bot.handleUpdate(privateCallback(1, "dashboard:moderation", 10));
+    assert.equal(harness.countApiCalls("editMessageText"), 1);
+    assert.equal(harness.countApiCalls("sendMessage"), 0);
+    const screen = harness.findApiCalls("editMessageText")[0];
+    assert.match(String(screen?.payload.text), /^Moderation$/m);
+    assert.doesNotMatch(String(screen?.payload.text), /Owner dashboard/);
+    const keyboard = screen?.payload.reply_markup as { inline_keyboard?: Array<Array<{ callback_data?: string }>> };
+    assert.equal(keyboard.inline_keyboard?.flat().some((button) => button.callback_data === "dashboard:public"), true);
+    assert.equal(keyboard.inline_keyboard?.flat().some((button) => button.callback_data === "dashboard:home"), true);
   } finally { harness.cleanup(); }
 });
 
@@ -118,6 +174,61 @@ test("ChatShared stores workspace only after centralized validation", async () =
     await harness.bot.handleUpdate(update);
     assert.equal(service.getStaffChatId(), -100777);
     assert.equal(harness.countApiCalls("createForumTopic"), 1);
+  } finally { harness.cleanup(); }
+});
+
+test("activation completes setup and replaces the wizard with the ready dashboard", async () => {
+  let service!: InstallationService;
+  const harness = createBotHarness({ installationServiceFactory: (db) => {
+    service = new InstallationService(db);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
+    service.activateWorkspace({ chatId: TEST_STAFF_CHAT_ID, title: "Staff" });
+    return service;
+  } });
+  try {
+    await harness.bot.handleUpdate(privateCallback(1, "setup:activate", 10));
+    assert.equal(service.getState().setupState, "READY");
+    assert.equal(service.getOnboardingSession(1)?.state, "COMPLETED");
+    assert.equal(harness.countApiCalls("editMessageText"), 1);
+    assert.equal(harness.countApiCalls("sendMessage"), 0);
+    assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /Owner dashboard/);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(1, "setup:exit", 10));
+    assert.equal(service.getOnboardingSession(1)?.state, "COMPLETED");
+    assert.equal(harness.countApiCalls("editMessageText"), 1);
+    assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /Owner dashboard/);
+  } finally { harness.cleanup(); }
+});
+
+test("ready staff workspace selection stays outside first-run onboarding", async () => {
+  let service!: InstallationService;
+  const harness = createBotHarness({ installationServiceFactory: (db) => {
+    service = new InstallationService(db);
+    service.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
+    service.saveOnboardingStage(1, "ACTIVATE_SUPPORT", "COMPLETED");
+    db.setSetting(`support_logs_message_thread_id:${TEST_STAFF_CHAT_ID}`, "153");
+    return service;
+  } });
+  try {
+    await harness.bot.handleUpdate(privateCallback(1, "dashboard:workspace", 10));
+    assert.equal(harness.countApiCalls("editMessageText"), 1);
+    assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /^Staff workspace$/m);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(1, "workspace:select", 10));
+    assert.equal(harness.countApiCalls("sendMessage"), 1);
+
+    harness.clearApiCalls();
+    const update: Update = { update_id: 21, message: { message_id: 21, date: 1, from: { id: 1, is_bot: false, first_name: "Owner" }, chat: { id: 1, type: "private", first_name: "Owner" }, chat_shared: { request_id: 1300, chat_id: TEST_STAFF_CHAT_ID, title: "Staff" } } };
+    await harness.bot.handleUpdate(update);
+    assert.equal(service.getOnboardingSession(1)?.stage, "ACTIVATE_SUPPORT");
+    assert.equal(service.getOnboardingSession(1)?.state, "COMPLETED");
+    assert.equal(harness.countApiCalls("createForumTopic"), 0);
+    assert.equal(harness.countApiCalls("editMessageText"), 1);
+    assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /^Staff workspace$/m);
+    assert.doesNotMatch(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /Setup 5\/9/);
   } finally { harness.cleanup(); }
 });
 
