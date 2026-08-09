@@ -239,6 +239,7 @@ export function createBot(
   }>();
   const pendingWorkspaceSelection = new Map<number, "SETUP" | "RECONFIGURE">();
   const privateUiMessages = new Map<number, { chatId: number; messageId: number }>();
+  const workspacePickerPrompts = new Map<number, { chatId: number; messageId: number }>();
   let ticketBatchRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   let ticketBatchRecoveryTimerAt: number | undefined;
   let ticketBatchRecoveryQueue: Promise<void> = Promise.resolve();
@@ -714,7 +715,7 @@ export function createBot(
     if (ctx.from) privateUiMessages.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
   }
 
-  async function refreshPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard): Promise<void> {
+  async function refreshPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard) {
     const target = ctx.from ? privateUiMessages.get(ctx.from.id) : undefined;
     if (target) {
       try {
@@ -729,6 +730,19 @@ export function createBot(
     }
     const sent = await ctx.reply(text, { reply_markup: replyMarkup });
     if (ctx.from) privateUiMessages.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
+    return sent;
+  }
+
+  async function retireWorkspacePickerPrompt(userId: number | undefined): Promise<void> {
+    if (userId === undefined) return;
+    const prompt = workspacePickerPrompts.get(userId);
+    workspacePickerPrompts.delete(userId);
+    if (!prompt) return;
+    try {
+      await bot.api.deleteMessage(prompt.chatId, prompt.messageId);
+    } catch {
+      logger.warn({ userId }, "Could not delete workspace picker prompt");
+    }
   }
 
   function dashboardText(userId: number): string {
@@ -755,28 +769,47 @@ export function createBot(
       `Pending batch staff operations: ${counts.pendingBatchStaffOperations}`, "Database: available"].join("\n");
   }
 
-  function dashboardKeyboard(role: string): InlineKeyboard {
+  function privateBatchWorkflowSettingKey(userId: number): string {
+    return `private_batch_export:${userId}`;
+  }
+
+  function getPendingPrivateBatchExport(userId: number): string | undefined {
+    const exportId = db.getSetting(privateBatchWorkflowSettingKey(userId))?.trim();
+    if (!exportId) return undefined;
+    return db.getTicketBatchExport(exportId, config.staffChatId)?.delivery_state === "DELIVERED" ? exportId : undefined;
+  }
+
+  function setPendingPrivateBatchExport(userId: number, exportId: string | undefined): void {
+    db.setSetting(privateBatchWorkflowSettingKey(userId), exportId ?? "");
+    installation.saveOnboardingStage(userId, exportId ? "BATCH_APPLY" : "WELCOME", exportId ? "ACTIVE" : "COMPLETED");
+  }
+
+  function dashboardKeyboard(userId: number, role: string): InlineKeyboard {
     const keyboard = new InlineKeyboard();
     if (role === "OWNER" || role === "ADMIN") {
       if (installation.getState().setupState !== "READY") keyboard.text("Continue setup", "setup:resume").row();
-      keyboard.text("Staff workspace", "dashboard:workspace").row().text("Public chats", "dashboard:public").text("Team", "dashboard:team").row().text("Moderation", "dashboard:moderation").text("Batch operations", "dashboard:batch").row().text("System status", "dashboard:status").row();
+      const pendingExport = getPendingPrivateBatchExport(userId);
+      keyboard.text("Staff workspace", "dashboard:workspace").row().text("Public chats", "dashboard:public").text("Team", "dashboard:team").row().text("Moderation", "dashboard:moderation").row().text(pendingExport ? "Continue batch" : "Export tickets", pendingExport ? "batch-ui:continue" : "batch-ui:export").text("Batch status", "batch-ui:recent").row().text("System status", "dashboard:status").row();
     }
     return keyboard.text("Open test ticket as user", "dashboard:test-ticket");
   }
 
-  function privateBatchKeyboard(): InlineKeyboard {
+  function privateBatchWaitingKeyboard(): InlineKeyboard {
     return new InlineKeyboard()
-      .text("Export tickets", "batch-ui:export")
+      .text("How to prepare answers", "batch-ui:help")
       .row()
-      .text("Apply answer package", "batch-ui:apply")
-      .row()
-      .text("Recent batch operations", "batch-ui:recent")
+      .text("Abort batch", "batch-ui:abort")
       .row()
       .text("Back", "dashboard:home");
   }
 
-  async function showPrivateBatchOperations(ctx: Context): Promise<void> {
-    await renderPrivateScreen(ctx, "Batch operations\n\nExport active tickets or start an explicit answer-package Apply session.", privateBatchKeyboard());
+  async function showPrivateBatchWaiting(ctx: Context, exportId: string, refresh = false, notice?: string): Promise<void> {
+    const render = refresh ? refreshPrivateScreen : renderPrivateScreen;
+    await render(ctx, ["Waiting for answers", "", "Your ticket export is ready.", `Send the completed ticket-answers_${exportId}.json file here. Only a valid answer package for this export will continue.`, ...(notice ? ["", notice] : [])].join("\n"), privateBatchWaitingKeyboard());
+  }
+
+  async function showPrivateBatchHelp(ctx: Context): Promise<void> {
+    await renderPrivateScreen(ctx, ["Preparing batch answers", "", "1. Give your chosen AI assistant the product documentation, support policies, FAQ, tone guidance, and any other authoritative context it needs.", "2. Upload this ticket export ZIP to that assistant.", "3. Ask it to follow the instructions included in the archive and prepare the completed import file.", "4. Send the returned answer file here for preview and explicit approval."].join("\n"), new InlineKeyboard().text("Back", "batch-ui:continue"));
   }
 
   async function showDashboard(ctx: Context): Promise<void> {
@@ -787,7 +820,7 @@ export function createBot(
       await ctx.reply("Staff workspace membership required for role-based access.");
       return;
     }
-    await renderPrivateScreen(ctx, dashboardText(ctx.from.id), dashboardKeyboard(member.role));
+    await renderPrivateScreen(ctx, dashboardText(ctx.from.id), dashboardKeyboard(ctx.from.id, member.role));
   }
 
   async function showSystemStatus(ctx: Context): Promise<void> {
@@ -854,13 +887,15 @@ export function createBot(
   async function sendWorkspacePicker(ctx: Context, mode: "SETUP" | "RECONFIGURE" = "SETUP"): Promise<void> {
     if (ctx.from) pendingWorkspaceSelection.set(ctx.from.id, mode);
     const rights = { is_anonymous: false, can_manage_chat: true, can_delete_messages: true, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: false, can_change_info: false, can_invite_users: true, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_post_messages: false, can_edit_messages: false, can_pin_messages: true, can_manage_topics: true };
-    const keyboard = new Keyboard().requestChat("Select forum staff group", 1300, { chat_is_channel: false, chat_is_forum: true, bot_is_member: true, request_title: true, request_username: true, bot_administrator_rights: rights, user_administrator_rights: rights }).resized().oneTime();
-    await ctx.reply("Choose the staff forum group by title. You can also paste a public @username or t.me link.", { reply_markup: keyboard });
+    const keyboard = new Keyboard().requestChat("Select forum staff group", 1300, { chat_is_channel: false, chat_is_forum: true, bot_is_member: true, request_title: true, request_username: true, bot_administrator_rights: rights, user_administrator_rights: rights }).text("Cancel workspace selection").resized().oneTime();
+    const prompt = await ctx.reply("Choose the staff forum group by title. You can also paste a public @username or t.me link.", { reply_markup: keyboard });
+    if (ctx.from) workspacePickerPrompts.set(ctx.from.id, { chatId: prompt.chat.id, messageId: prompt.message_id });
   }
 
   async function completeWorkspaceSelection(ctx: Context, result: WorkspaceValidationResult, mode: "SETUP" | "RECONFIGURE", fallback?: { title?: string; username?: string }): Promise<void> {
     if (!ctx.from) return;
     pendingWorkspaceSelection.delete(ctx.from.id);
+    await retireWorkspacePickerPrompt(ctx.from.id);
     if (!result.valid) {
       const notice = `Staff workspace is not ready:\n${formatWorkspaceChecklist(result)}`;
       if (mode === "RECONFIGURE") {
@@ -1159,10 +1194,10 @@ export function createBot(
     });
   });
 
-  async function exportActiveTickets(ctx: Context, destinationChatId: number): Promise<void> {
+  async function exportActiveTickets(ctx: Context, destinationChatId: number): Promise<string | undefined> {
     if (runningTicketBatchExports.has(config.staffChatId)) {
       await ctx.reply("An export is already running for this staff chat.");
-      return;
+      return undefined;
     }
 
     runningTicketBatchExports.add(config.staffChatId);
@@ -1179,7 +1214,7 @@ export function createBot(
       }));
       if (!tickets.length) {
         await ctx.reply("There are no active tickets to export.");
-        return;
+        return undefined;
       }
 
       exportId = `export_${randomUUID().replace(/-/g, "")}`;
@@ -1217,7 +1252,9 @@ export function createBot(
       } catch (error) {
         logger.error({ err: error, exportId }, "Ticket batch export delivery could not be persisted");
         await ctx.reply("Export delivery could not be confirmed. Do not upload an answer package for it.");
+        return undefined;
       }
+      return exportId;
     } catch (error) {
       logger.error({ err: error, exportId }, "Could not send ticket batch export");
       if (exportId) {
@@ -1232,6 +1269,7 @@ export function createBot(
         }
       }
       await ctx.reply("Export failed before delivery. Nothing was sent.");
+      return undefined;
     } finally {
       if (zip) {
         try {
@@ -1687,7 +1725,9 @@ export function createBot(
       }
       if (action === "batch") {
         if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) return;
-        await showPrivateBatchOperations(ctx);
+        const exportId = getPendingPrivateBatchExport(ctx.from.id);
+        if (exportId) await showPrivateBatchWaiting(ctx, exportId);
+        else await showDashboard(ctx);
         return;
       }
       await showDashboard(ctx); return;
@@ -1702,20 +1742,51 @@ export function createBot(
       await ctx.answerCallbackQuery();
       if (action === "export") {
         if (!ctx.chat) return;
-        await exportActiveTickets(ctx, ctx.chat.id);
+        const existing = getPendingPrivateBatchExport(ctx.from!.id);
+        if (existing) {
+          await showPrivateBatchWaiting(ctx, existing);
+          return;
+        }
+        const exportId = await exportActiveTickets(ctx, ctx.chat.id);
+        if (exportId) {
+          setPendingPrivateBatchExport(ctx.from!.id, exportId);
+          await showPrivateBatchWaiting(ctx, exportId, true);
+        }
+        return;
+      }
+      if (action === "continue") {
+        const exportId = getPendingPrivateBatchExport(ctx.from!.id);
+        if (exportId) await showPrivateBatchWaiting(ctx, exportId);
+        else await showDashboard(ctx);
         return;
       }
       if (action === "apply") {
-        installation.saveOnboardingStage(ctx.from!.id, "BATCH_APPLY");
-        await ctx.reply("Send a ticket-answers_*.json file to validate it. Nothing will be applied until you confirm the preview.");
+        const exportId = getPendingPrivateBatchExport(ctx.from!.id);
+        if (exportId) await showPrivateBatchWaiting(ctx, exportId);
+        else await showDashboard(ctx);
+        return;
+      }
+      if (action === "help") {
+        const exportId = getPendingPrivateBatchExport(ctx.from!.id);
+        if (exportId) await showPrivateBatchHelp(ctx);
+        else await showDashboard(ctx);
+        return;
+      }
+      if (action === "abort") {
+        await renderPrivateScreen(ctx, "Abort this batch workflow? The export remains available in history, but this private answer-import flow will be cleared.", new InlineKeyboard().text("Abort batch", "batch-ui:abort-confirm").row().text("Keep waiting", "batch-ui:continue"));
+        return;
+      }
+      if (action === "abort-confirm") {
+        setPendingPrivateBatchExport(ctx.from!.id, undefined);
+        await showDashboard(ctx);
         return;
       }
       if (action === "recent") {
         const pending = db.getInstallationOperationalCounts().pendingBatchStaffOperations;
-        await ctx.reply(`Recent batch operations\nPending staff synchronization: ${pending}`);
+        await renderPrivateScreen(ctx, `Batch status\n\nPending staff synchronization: ${pending}`, new InlineKeyboard().text("Back", "dashboard:home"));
         return;
       }
-      await ctx.reply("Unknown batch operation.");
+      await showDashboard(ctx);
       return;
     }
 
@@ -1961,13 +2032,19 @@ export function createBot(
       return;
     }
 
-    if (ctx.from && installation.getMember(ctx.from.id) && installation.getOnboardingSession(ctx.from.id)?.stage === "BATCH_APPLY") {
+    if (ctx.from && installation.getMember(ctx.from.id) && getPendingPrivateBatchExport(ctx.from.id)) {
       if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) return;
+      const exportId = getPendingPrivateBatchExport(ctx.from.id)!;
       if (!isTicketAnswerPackageDocument(ctx.message)) {
-        await ctx.reply("Send a ticket-answers_*.json file, or return to Batch operations.");
+        await showPrivateBatchWaiting(ctx, exportId, true, "That file is not an answer package for this workflow.");
         return;
       }
-      await handleTicketAnswerPackageUpload(ctx);
+      const filename = ctx.message.document?.file_name ?? "";
+      if (filename.toLowerCase() !== `ticket-answers_${exportId}.json`.toLowerCase()) {
+        await showPrivateBatchWaiting(ctx, exportId, true, "This answer package belongs to a different export.");
+        return;
+      }
+      await handleTicketAnswerPackageUpload(ctx, exportId);
       return;
     }
 
@@ -1994,6 +2071,13 @@ export function createBot(
       const session = installation.getOnboardingSession(ctx.from.id);
       const workspaceMode = pendingWorkspaceSelection.get(ctx.from.id) ?? (session?.state === "ACTIVE" && session.stage === "STAFF_WORKSPACE" ? "SETUP" : undefined);
       if (workspaceMode && text) {
+        if (workspaceMode === "RECONFIGURE" && text === "Cancel workspace selection") {
+          pendingWorkspaceSelection.delete(ctx.from.id);
+          await retireWorkspacePickerPrompt(ctx.from.id);
+          await ctx.reply("Workspace selection cancelled.", { reply_markup: { remove_keyboard: true } });
+          await showStaffWorkspaceSettings(ctx, undefined, true);
+          return;
+        }
         if (isPrivateInviteLink(text)) {
           const retry = workspaceMode === "RECONFIGURE" ? "workspace:select" : "setup:workspace";
           await renderPrivateScreen(ctx, "The bot cannot inspect an inaccessible private invite link. Add the bot to that group, then use the Telegram group picker.", new InlineKeyboard().text("Choose group", retry));
@@ -2028,13 +2112,17 @@ export function createBot(
     await handlePrivateUserMessage(db, ctx);
   });
 
-  async function handleTicketAnswerPackageUpload(ctx: Context): Promise<void> {
+  async function handleTicketAnswerPackageUpload(ctx: Context, privateWorkflowExportId?: string): Promise<void> {
     const document = ctx.message && "document" in ctx.message ? ctx.message.document : undefined;
     if (!document || !ctx.chat) {
       return;
     }
     if (typeof document.file_size === "number" && document.file_size > 5 * 1024 * 1024) {
-      await ctx.reply("Ticket answer packages must be 5 MiB or smaller.");
+      if (privateWorkflowExportId && isPrivateChat(ctx)) {
+        await showPrivateBatchWaiting(ctx, privateWorkflowExportId, true, "Ticket answer packages must be 5 MiB or smaller.");
+      } else {
+        await ctx.reply("Ticket answer packages must be 5 MiB or smaller.");
+      }
       return;
     }
     const filename = document.file_name ?? "";
@@ -2061,6 +2149,9 @@ export function createBot(
       const exportRecord = db.getTicketBatchExport(exportId, config.staffChatId);
       if (!exportRecord) {
         throw new TicketBatchValidationError("This answer package references an unknown export for this staff chat.");
+      }
+      if (privateWorkflowExportId && exportId !== privateWorkflowExportId) {
+        throw new TicketBatchValidationError("This answer package belongs to a different export.");
       }
       if (exportRecord.delivery_state !== "DELIVERED") {
         throw new TicketBatchValidationError("This answer package references an export whose delivery was not confirmed.");
@@ -2101,11 +2192,13 @@ export function createBot(
         await ctx.api.editMessageText(persistedPackage.preview_chat_id, persistedPackage.preview_message_id, text, { reply_markup: keyboard });
         db.updateTicketBatchAnswerPackagePreviewPage(persistedPackage.answer_package_id, config.staffChatId, previewPage);
         if (isPrivateChat(ctx) && ctx.from) {
-          installation.saveOnboardingStage(ctx.from.id, "WELCOME", "COMPLETED");
+          setPendingPrivateBatchExport(ctx.from.id, undefined);
         }
         return;
       }
-      const previewMessage = await ctx.reply(text, { reply_markup: keyboard });
+      const previewMessage = privateWorkflowExportId && isPrivateChat(ctx)
+        ? await refreshPrivateScreen(ctx, text, keyboard)
+        : await ctx.reply(text, { reply_markup: keyboard });
       if (!db.setTicketBatchAnswerPackagePreview(persistedPackage.answer_package_id, config.staffChatId, {
         token: previewToken,
         chatId: ctx.chat.id,
@@ -2120,13 +2213,17 @@ export function createBot(
         throw new TicketBatchValidationError("This answer package already has an active preview.");
       }
       if (isPrivateChat(ctx) && ctx.from) {
-        installation.saveOnboardingStage(ctx.from.id, "WELCOME", "COMPLETED");
+        setPendingPrivateBatchExport(ctx.from.id, undefined);
       }
       logger.info({ exportId, previewMessageId: previewMessage.message_id }, "Ticket answer package preview created");
     } catch (error) {
       const message = error instanceof TicketBatchValidationError ? error.message : "Could not validate the ticket answer package.";
       logger.warn("Ticket answer package validation failed");
-      await ctx.reply(message);
+      if (privateWorkflowExportId && isPrivateChat(ctx)) {
+        await showPrivateBatchWaiting(ctx, privateWorkflowExportId, true, message);
+      } else {
+        await ctx.reply(message);
+      }
     }
   }
 
@@ -2177,6 +2274,10 @@ export function createBot(
       await ctx.answerCallbackQuery({ text: "Ticket batch preview cancelled." });
       db.clearTicketBatchAnswerPackagePreview(packageRecord.answer_package_id, config.staffChatId);
       await cleanupTicketBatchPreview(packageRecord, "Package cancelled.");
+      if (isPrivateChat(ctx) && ctx.from) {
+        setPendingPrivateBatchExport(ctx.from.id, packageRecord.export_id);
+        await showPrivateBatchWaiting(ctx, packageRecord.export_id, true, "The preview was cancelled. You can send another answer file for this export.");
+      }
       return;
     }
 
@@ -2730,11 +2831,15 @@ export function createBot(
         if (item.final_summary_origin_chat_id !== null && item.final_summary_origin_message_id !== null) {
           const originChatId = item.final_summary_origin_chat_id;
           const originMessageId = item.final_summary_origin_message_id;
-          await runStaffChatOperation(() => bot.api.editMessageText(originChatId, originMessageId, text, { reply_markup: undefined }), originChatId);
+          await runStaffChatOperation(() => bot.api.editMessageText(originChatId, originMessageId, text, {
+            reply_markup: originChatId > 0 ? new InlineKeyboard().text("Back to dashboard", "dashboard:home") : undefined
+          }), originChatId);
           db.recordTicketBatchFinalSummarySent(item.answer_package_id, config.staffChatId, originMessageId);
         } else {
           const destinationChatId = item.final_summary_chat_id ?? config.staffChatId;
-          const sent = await runStaffChatOperation(() => bot.api.sendMessage(destinationChatId, text), destinationChatId);
+          const sent = await runStaffChatOperation(() => bot.api.sendMessage(destinationChatId, text, {
+            reply_markup: destinationChatId > 0 ? new InlineKeyboard().text("Back to dashboard", "dashboard:home") : undefined
+          }), destinationChatId);
           db.recordTicketBatchFinalSummarySent(item.answer_package_id, config.staffChatId, sent.message_id);
         }
       } catch (error) {
@@ -3613,7 +3718,7 @@ function formatTicketBatchExportCaption(
     `Tickets: ${zip.ticketCount}`,
     `Messages: ${zip.messageCount}`,
     `Attachments: ${zip.attachmentCount}`,
-    `Upload this ZIP to ChatGPT and return ticket-answers_${exportId}.json.`
+    `Use the included instructions to prepare and return ticket-answers_${exportId}.json.`
   ].join("\n");
 }
 
