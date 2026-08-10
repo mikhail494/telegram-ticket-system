@@ -93,9 +93,10 @@ test("ready dashboard is concise and opens system status in the same message", a
     assert.doesNotMatch(String(dashboard?.payload.text), /Version:|Authorization:|Database:/);
     const keyboard = dashboard?.payload.reply_markup as { inline_keyboard?: Array<Array<{ callback_data?: string }>> };
     assert.equal(keyboard.inline_keyboard?.flat().some((button) => button.callback_data === "setup:resume"), false);
+    const currentMessageId = dashboard!.responseMessageId!;
 
     harness.clearApiCalls();
-    await harness.bot.handleUpdate(privateCallback(1, "dashboard:status", 10));
+    await harness.bot.handleUpdate(privateCallback(1, "dashboard:status", currentMessageId));
     assert.equal(harness.countApiCalls("editMessageText"), 1);
     assert.equal(harness.countApiCalls("sendMessage"), 0);
     const status = harness.findApiCalls("editMessageText")[0];
@@ -105,7 +106,7 @@ test("ready dashboard is concise and opens system status in the same message", a
     assert.equal(statusKeyboard.inline_keyboard?.flat().some((button) => button.callback_data === "dashboard:home"), true);
 
     harness.clearApiCalls();
-    await harness.bot.handleUpdate(privateCallback(1, "dashboard:home", 10));
+    await harness.bot.handleUpdate(privateCallback(1, "dashboard:home", currentMessageId));
     assert.equal(harness.countApiCalls("editMessageText"), 1);
     assert.equal(harness.countApiCalls("sendMessage"), 0);
     assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /Owner dashboard/);
@@ -183,6 +184,41 @@ test("workspace picker requests a forum and required admin rights", async () => 
     assert.equal(request?.request_title, true);
     assert.equal((request?.bot_administrator_rights as Record<string, unknown>)?.can_manage_topics, true);
     assert.equal((request?.bot_administrator_rights as Record<string, unknown>)?.can_delete_messages, true);
+  } finally { harness.cleanup(); }
+});
+
+test("stale private operator callbacks are inert while the current dashboard and nested public-chat controls remain active", async () => {
+  let service!: InstallationService;
+  const harness = createBotHarness({ installationServiceFactory: (db) => {
+    service = new InstallationService(db);
+    service.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
+    const workspaceId = db.getActiveWorkspace()!.id;
+    db.upsertManagedPublicChat({ chatId: -100701, workspaceId, title: "Synthetic public chat" });
+    service.setOnboardingPrimaryMessage(1, 1, 100);
+    return service;
+  } });
+  try {
+    for (const [index, data] of ["dashboard:status", "dashboard:test-ticket", "dashboard:team", "dashboard:workspace", "dashboard:moderation", "dashboard:public"].entries()) {
+      await harness.bot.handleUpdate(privateCallback(1, data, 10 + index));
+    }
+    assert.equal(harness.countApiCalls("editMessageText"), 0);
+    assert.equal(harness.db.getSetting("staff_test_ticket_mode:1"), undefined);
+    assert.equal(harness.findApiCalls("answerCallbackQuery").every((call) => /no longer active/i.test(String(call.payload.text))), true);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(1, "dashboard:public", 100));
+    assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /Public chats/);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(1, "public:remove:-100701", 100));
+    const confirmation = harness.findApiCalls("editMessageText")[0]!;
+    assert.match(String(confirmation.payload.text), /Remove Synthetic public chat/);
+    assert.equal(service.getOnboardingSession(1)?.primary_message_id, 100);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(1, "public:confirm-remove:-100701", 100));
+    assert.equal(harness.db.getManagedPublicChat(-100701), undefined);
   } finally { harness.cleanup(); }
 });
 
@@ -354,13 +390,13 @@ test("RBAC activation preview explains the legacy cutover and retained roles", a
   } });
   try {
     await harness.bot.handleUpdate(privateCallback(1, "rbac:preview"));
-    const preview = String(harness.findApiCalls("sendMessage")[0]?.payload.text);
+    const preview = String(harness.findApiCalls("editMessageText")[0]?.payload.text);
     assert.match(preview, /Current authorization: LEGACY_TRUSTED_GROUP/);
     assert.match(preview, /OWNER: @owner/);
     assert.match(preview, /ADMIN: user_2/);
     assert.match(preview, /Unassigned staff-group participants will lose staff access/);
     assert.match(preview, /Telegram staff-workspace membership remains required/);
-    const markup = harness.findApiCalls("sendMessage")[0]?.payload.reply_markup as {
+    const markup = harness.findApiCalls("editMessageText")[0]?.payload.reply_markup as {
       inline_keyboard?: Array<Array<{ text?: string; callback_data?: string }>>;
     };
     const buttons = markup.inline_keyboard?.flat() ?? [];
@@ -369,12 +405,12 @@ test("RBAC activation preview explains the legacy cutover and retained roles", a
     assert.equal(buttons.find((button) => button.text === "Cancel")?.callback_data, "rbac:cancel");
 
     harness.clearApiCalls();
-    await harness.bot.handleUpdate(privateCallback(1, "rbac:cancel", 11));
+    await harness.bot.handleUpdate(privateCallback(1, "rbac:cancel", 10));
     assert.equal(harness.countApiCalls("answerCallbackQuery"), 1);
     assert.equal(service.getState().authorizationMode, "LEGACY_TRUSTED_GROUP");
 
     harness.clearApiCalls();
-    await harness.bot.handleUpdate(privateCallback(1, activationData, 12));
+    await harness.bot.handleUpdate(privateCallback(1, activationData, 10));
     assert.equal(service.getState().authorizationMode, "LEGACY_TRUSTED_GROUP");
   } finally { harness.cleanup(); }
 });
