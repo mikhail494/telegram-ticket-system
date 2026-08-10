@@ -695,24 +695,47 @@ export function createBot(
     });
   }
 
+  function persistedPrivateScreen(userId: number): { chatId: number; messageId: number } | undefined {
+    const session = installation.getOnboardingSession(userId);
+    if (!session || session.primary_message_chat_id === null || session.primary_message_id === null) return undefined;
+    return { chatId: session.primary_message_chat_id, messageId: session.primary_message_id };
+  }
+
+  function rememberPrivateScreen(ctx: Context, target: { chatId: number; messageId: number }): void {
+    if (!ctx.from) return;
+    privateUiMessages.set(ctx.from.id, target);
+    if (!installation.getOnboardingSession(ctx.from.id)) installation.saveOnboardingStage(ctx.from.id, "WELCOME", "COMPLETED");
+    installation.setOnboardingPrimaryMessage(ctx.from.id, target.chatId, target.messageId);
+  }
+
+  function isObsoletePrivateBatchCallback(ctx: Context): boolean {
+    const message = ctx.callbackQuery?.message;
+    if (!ctx.from || message?.chat.type !== "private") return true;
+    const current = persistedPrivateScreen(ctx.from.id);
+    return current !== undefined && (current.chatId !== message.chat.id || current.messageId !== message.message_id);
+  }
+
   async function renderPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard): Promise<void> {
     const callbackMessage = ctx.callbackQuery?.message;
     const callbackTarget = callbackMessage?.chat.type === "private"
       ? { chatId: callbackMessage.chat.id, messageId: callbackMessage.message_id }
       : undefined;
-    const target = (ctx.from ? privateUiMessages.get(ctx.from.id) : undefined) ?? callbackTarget;
+    const target = (ctx.from ? privateUiMessages.get(ctx.from.id) : undefined) ?? (ctx.from ? persistedPrivateScreen(ctx.from.id) : undefined) ?? callbackTarget;
     if (target) {
       try {
         await ctx.api.editMessageText(target.chatId, target.messageId, text, { reply_markup: replyMarkup });
-        if (ctx.from) privateUiMessages.set(ctx.from.id, target);
+        rememberPrivateScreen(ctx, target);
         return;
       } catch (error) {
-        if (error instanceof GrammyError && error.description.includes("message is not modified")) return;
+        if (error instanceof GrammyError && error.description.includes("message is not modified")) {
+          rememberPrivateScreen(ctx, target);
+          return;
+        }
         logger.warn({ userId: ctx.from?.id }, "Could not replace private UI screen");
       }
     }
     const sent = await ctx.reply(text, { reply_markup: replyMarkup });
-    if (ctx.from) privateUiMessages.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
+    rememberPrivateScreen(ctx, { chatId: sent.chat.id, messageId: sent.message_id });
   }
 
   function privateUiTargets(ctx: Context): Array<{ chatId: number; messageId: number }> {
@@ -721,7 +744,8 @@ export function createBot(
       ? { chatId: callbackMessage.chat.id, messageId: callbackMessage.message_id }
       : undefined;
     const trackedTarget = ctx.from ? privateUiMessages.get(ctx.from.id) : undefined;
-    return [callbackTarget, trackedTarget].filter((target): target is { chatId: number; messageId: number } => Boolean(target))
+    const persistedTarget = ctx.from ? persistedPrivateScreen(ctx.from.id) : undefined;
+    return [callbackTarget, trackedTarget, persistedTarget].filter((target): target is { chatId: number; messageId: number } => Boolean(target))
       .filter((target, index, targets) => targets.findIndex((other) => other.chatId === target.chatId && other.messageId === target.messageId) === index);
   }
 
@@ -742,7 +766,7 @@ export function createBot(
 
   async function sendFreshPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard) {
     const sent = await ctx.reply(text, { reply_markup: replyMarkup });
-    if (ctx.from) privateUiMessages.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
+    rememberPrivateScreen(ctx, { chatId: sent.chat.id, messageId: sent.message_id });
     return sent;
   }
 
@@ -1757,6 +1781,10 @@ export function createBot(
     }
 
     if (namespace === "batch-ui") {
+      if (isObsoletePrivateBatchCallback(ctx)) {
+        await ctx.answerCallbackQuery({ text: "This batch screen is no longer active. Use /start.", show_alert: true });
+        return;
+      }
       if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) {
         await ctx.answerCallbackQuery({ text: "Batch operations require OWNER or ADMIN.", show_alert: true });
         return;
