@@ -64,6 +64,30 @@ export class InstallationService {
     return owner ? { userTelegramId: owner.user_telegram_id, username: owner.username } : null;
   }
 
+  ensureBaselineAgent(user: UserInput): TeamMemberRecord | null {
+    const existing = this.getMember(user.telegramId);
+    if (existing) return existing;
+    this.db.upsertTeamMember({
+      userId: user.telegramId,
+      username: user.username,
+      displayName: [user.firstName, user.lastName].filter(Boolean).join(" ") || null,
+      role: "AGENT"
+    });
+    return this.getMember(user.telegramId);
+  }
+
+  activateReadyRoleBasedAccess(): boolean {
+    const state = this.getState();
+    if (
+      state.setupState !== "READY"
+      || state.authorizationMode === "RBAC_ACTIVE"
+      || !this.getActiveWorkspace()
+      || !this.getOwner()
+    ) return false;
+    this.db.setInstallationState({ authorization_mode: "RBAC_ACTIVE" });
+    return true;
+  }
+
   adoptLegacyInstallation(staffChatId: number): WorkspaceRecord {
     const activeWorkspace = this.getActiveWorkspace();
     const workspace = activeWorkspace ?? this.db.upsertWorkspace({ telegramChatId: staffChatId, importedFromLegacy: true });
@@ -105,6 +129,7 @@ export class InstallationService {
     if (result === "INVALID") return { kind: "INVALID" };
     if (result === "TRANSFER_PENDING") return { kind: "TRANSFER_CONFIRMATION_REQUIRED" };
     this.saveOnboardingStage(user.telegramId, "WELCOME");
+    this.activateReadyRoleBasedAccess();
     return { kind: "PAIRED" };
   }
 

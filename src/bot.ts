@@ -18,7 +18,8 @@ import {
   type TicketBatchAnswerItemRecord,
   type TicketRecord,
   type TicketStatus,
-  type TicketWithUser
+  type TicketWithUser,
+  type TeamMemberRecord
 } from "./db.js";
 import {
   CLOSED_TEXT,
@@ -224,6 +225,19 @@ export function createBot(
   installationServicesByApi.set(bot.api, installation);
   bot.use(async (ctx, next) => {
     installationServicesByContext.set(ctx, installation);
+    if (
+      ctx.from
+      && !ctx.from.is_bot
+      && installation.getState().setupState === "READY"
+      && ctx.chat?.id === installation.getStaffChatId()
+    ) {
+      installation.ensureBaselineAgent({
+        telegramId: ctx.from.id,
+        username: ctx.from.username,
+        firstName: ctx.from.first_name,
+        lastName: ctx.from.last_name
+      });
+    }
     await next();
   });
   const fetchImpl = runtime.fetch ?? globalThis.fetch;
@@ -260,6 +274,29 @@ export function createBot(
     try {
       const member = await ctx.api.getChatMember(staffChatId, ctx.from.id);
       return member.status !== "left" && member.status !== "kicked";
+    } catch {
+      return false;
+    }
+  };
+
+  const enrollBaselineStaffMember = (user: User | undefined): boolean => {
+    if (!user || user.is_bot || installation.getState().setupState !== "READY") return false;
+    return installation.ensureBaselineAgent({
+      telegramId: user.id,
+      username: user.username,
+      firstName: user.first_name,
+      lastName: user.last_name
+    }) !== null;
+  };
+
+  const enrollPrivateWorkspaceMember = async (ctx: Context): Promise<boolean> => {
+    if (!ctx.from || ctx.from.is_bot || installation.getMember(ctx.from.id) || installation.getState().setupState !== "READY") return Boolean(ctx.from && installation.getMember(ctx.from.id));
+    const staffChatId = installation.getStaffChatId();
+    if (staffChatId === null) return false;
+    try {
+      const member = await ctx.api.getChatMember(staffChatId, ctx.from.id);
+      if (member.status === "left" || member.status === "kicked") return false;
+      return enrollBaselineStaffMember(ctx.from);
     } catch {
       return false;
     }
@@ -1140,6 +1177,52 @@ export function createBot(
     return true;
   }
 
+  function teamMemberLabel(member: TeamMemberRecord): string {
+    if (member.username) return `@${member.username}`;
+    return member.display_name?.trim() || "Unnamed member";
+  }
+
+  function teamRoleLabel(role: TeamMemberRecord["role"]): string {
+    return ({ OWNER: "Owner", ADMIN: "Admin", SENIOR_AGENT: "Senior agent", AGENT: "Agent" })[role];
+  }
+
+  function teamKeyboard(actorId: number): InlineKeyboard {
+    const keyboard = new InlineKeyboard().text("Invite member", "team:invite").row();
+    for (const member of installation.listTeamMembers()) {
+      keyboard.text(`${teamRoleLabel(member.role)}: ${teamMemberLabel(member)}`, `team:member:${member.user_telegram_id}`).row();
+    }
+    if (installation.getMember(actorId)?.role === "OWNER") keyboard.text("Transfer ownership", "team:transfer").row();
+    return keyboard.text("Back", "dashboard:home");
+  }
+
+  async function showTeam(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+    const members = installation.listTeamMembers();
+    await renderPrivateScreen(ctx, ["Team", "", ...members.map((member) => `${teamRoleLabel(member.role)}: ${teamMemberLabel(member)}`)].join("\n"), teamKeyboard(ctx.from.id));
+  }
+
+  async function showTeamMember(ctx: Context, member: TeamMemberRecord): Promise<void> {
+    if (!ctx.from) return;
+    const actor = installation.getMember(ctx.from.id);
+    const keyboard = new InlineKeyboard();
+    const text = [
+      "Team member",
+      "",
+      `Member: ${teamMemberLabel(member)}`,
+      `Role: ${teamRoleLabel(member.role)}`,
+      "Staff workspace membership is required for access."
+    ];
+    if (member.role === "OWNER") {
+      text.push("", "The OWNER cannot be changed through ordinary team controls.");
+    } else if (actor?.role === "OWNER" || (actor?.role === "ADMIN" && member.role !== "ADMIN")) {
+      if (actor.role === "OWNER") keyboard.text("Make admin", `team:set:${member.user_telegram_id}:ADMIN`).row();
+      keyboard.text("Make senior agent", `team:set:${member.user_telegram_id}:SENIOR_AGENT`).row();
+      keyboard.text("Make agent", `team:set:${member.user_telegram_id}:AGENT`).row();
+    }
+    keyboard.text("Back to team", "team:list").row().text("Back to dashboard", "dashboard:home");
+    await renderPrivateScreen(ctx, text.join("\n"), keyboard);
+  }
+
   bot.command("start", async (ctx) => {
     if (!isPrivateChat(ctx)) { await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler); return; }
 
@@ -1160,14 +1243,14 @@ export function createBot(
       return;
     }
 
-    if (ctx.from && installation.getMember(ctx.from.id)) { await showDashboard(ctx, true); return; }
+    if (await enrollPrivateWorkspaceMember(ctx)) { await showDashboard(ctx, true); return; }
     if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet. Please try again later."); return; }
     await ctx.reply(START_TEXT);
   });
 
   bot.command("help", async (ctx) => {
     if (isPrivateChat(ctx)) {
-      if (ctx.from && installation.getMember(ctx.from.id)) await showDashboard(ctx);
+      if (await enrollPrivateWorkspaceMember(ctx)) await showDashboard(ctx);
       else await ctx.reply(installation.getState().setupState === "READY" ? USER_HELP_TEXT : "Support has not been configured yet.");
       return;
     }
@@ -1764,17 +1847,7 @@ export function createBot(
       }
       if (action === "team") {
         if (!await requirePrivatePermission(ctx, "MANAGE_TEAM")) return;
-        const actorRole = installation.getMember(ctx.from.id)?.role; const keyboard = new InlineKeyboard();
-        if (actorRole === "OWNER") keyboard.text("Invite admin", "team:invite:ADMIN").row();
-        keyboard.text("Invite senior agent", "team:invite:SENIOR_AGENT").text("Invite agent", "team:invite:AGENT").row();
-        for (const member of installation.listTeamMembers().filter((entry) => entry.role !== "OWNER")) {
-          if (actorRole === "ADMIN" && member.role === "ADMIN") continue;
-          if (actorRole === "OWNER") keyboard.text(`Admin ${member.user_telegram_id}`, `team:set:${member.user_telegram_id}:ADMIN`);
-          keyboard.text(`Senior ${member.user_telegram_id}`, `team:set:${member.user_telegram_id}:SENIOR_AGENT`).text(`Agent ${member.user_telegram_id}`, `team:set:${member.user_telegram_id}:AGENT`).text("Revoke", `team:revoke:${member.user_telegram_id}`).row();
-        }
-        if (actorRole === "OWNER") keyboard.text("Transfer ownership", "team:transfer").row().text("Review RBAC activation", "rbac:preview").row();
-        keyboard.text("Back", "dashboard:home");
-        await renderPrivateScreen(ctx, ["Team", ...installation.listTeamMembers().map((entry) => `${entry.role}: ${entry.username ? `@${entry.username}` : entry.user_telegram_id}`)].join("\n"), keyboard); return;
+        await showTeam(ctx); return;
       }
       if (action === "public") {
         if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) return;
@@ -1958,51 +2031,51 @@ export function createBot(
       if (!await requirePrivatePermission(ctx, "MANAGE_TEAM")) { await ctx.answerCallbackQuery({ text: "Your application role cannot manage the team.", show_alert: true }); return; }
       const [, action, value, roleValue] = data.split(":");
       try {
-        if (action === "transfer") { if (installation.getMember(ctx.from.id)?.role !== "OWNER") throw new Error("Only the OWNER can transfer ownership."); const token = installation.createOwnerRecoveryToken(); await ctx.answerCallbackQuery({ text: "Transfer link created." }); await ctx.reply(`One-use ownership transfer link (30 minutes):\nhttps://t.me/${bot.botInfo.username}?start=setup_${token}\n\nThe current OWNER remains active until the recipient confirms.`); return; }
-        if (action === "set") { installation.assignRole(ctx.from.id, Number(value), roleValue as "ADMIN" | "SENIOR_AGENT" | "AGENT"); await ctx.answerCallbackQuery({ text: "Role updated." }); return; }
-        if (action === "revoke") { installation.revokeMember(ctx.from.id, Number(value)); await ctx.answerCallbackQuery({ text: "Member revoked." }); return; }
-        const role = value as "ADMIN" | "SENIOR_AGENT" | "AGENT";
-        const token = installation.createTeamInvitation(ctx.from.id, role); await ctx.answerCallbackQuery({ text: "Invitation created." }); await ctx.reply(`One-use ${role} invitation (30 minutes):\nhttps://t.me/${bot.botInfo.username}?start=team_${token}`);
+        if (action === "list") { await ctx.answerCallbackQuery(); await showTeam(ctx); return; }
+        if (action === "member") {
+          const member = installation.getMember(Number(value));
+          if (!member) throw new Error("This team member is no longer active.");
+          await ctx.answerCallbackQuery();
+          await showTeamMember(ctx, member);
+          return;
+        }
+        if (action === "transfer") {
+          if (installation.getMember(ctx.from.id)?.role !== "OWNER") throw new Error("Only the OWNER can transfer ownership.");
+          const token = installation.createOwnerRecoveryToken();
+          await ctx.answerCallbackQuery({ text: "Transfer link created." });
+          await retirePrivateScreens(ctx);
+          await ctx.reply(`One-use ownership transfer link (30 minutes):\nhttps://t.me/${bot.botInfo.username}?start=setup_${token}\n\nThe current OWNER remains active until the recipient confirms.`);
+          await sendFreshPrivateScreen(ctx, "Team", teamKeyboard(ctx.from.id));
+          return;
+        }
+        if (action === "set") {
+          installation.assignRole(ctx.from.id, Number(value), roleValue as "ADMIN" | "SENIOR_AGENT" | "AGENT");
+          await ctx.answerCallbackQuery({ text: "Role updated." });
+          const member = installation.getMember(Number(value));
+          if (member) await showTeamMember(ctx, member);
+          return;
+        }
+        if (action === "revoke") {
+          installation.assignRole(ctx.from.id, Number(value), "AGENT");
+          await ctx.answerCallbackQuery({ text: "Member kept as an agent." });
+          const member = installation.getMember(Number(value));
+          if (member) await showTeamMember(ctx, member);
+          return;
+        }
+        const role = (value === "ADMIN" || value === "SENIOR_AGENT" || value === "AGENT") ? value : "AGENT";
+        const token = installation.createTeamInvitation(ctx.from.id, role);
+        await ctx.answerCallbackQuery({ text: "Invitation created." });
+        await retirePrivateScreens(ctx);
+        await ctx.reply(`One-use ${role} invitation (30 minutes):\nhttps://t.me/${bot.botInfo.username}?start=team_${token}`);
+        await sendFreshPrivateScreen(ctx, "Team", teamKeyboard(ctx.from.id));
       }
       catch (error) { await ctx.answerCallbackQuery({ text: error instanceof Error ? error.message : "Invitation denied.", show_alert: true }); }
       return;
     }
 
     if (namespace === "rbac") {
-      if (!isPrivateChat(ctx) || !ctx.from || installation.getMember(ctx.from.id)?.role !== "OWNER") { await ctx.answerCallbackQuery({ text: "OWNER access required.", show_alert: true }); return; }
-      if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
-      const action = data.split(":")[1];
-      if (action === "preview") {
-        const preview = installation.previewRoleBasedAccessActivation();
-        const retainedRoleLines = installation.listTeamMembers()
-          .map((member) => `- ${member.role}: ${member.username ? `@${member.username}` : `user_${member.user_telegram_id}`}`);
-        const retainedRoles = retainedRoleLines.join("\n");
-        const keyboard = new InlineKeyboard()
-          .text("Activate role-based access", `rbac:activate:${preview.confirmationToken}`)
-          .row()
-          .text("Cancel", "rbac:cancel");
-        const warning = "Unassigned staff-group participants will lose staff access.\nTelegram staff-workspace membership remains required after activation.\n\nPairing did not activate this mode. Confirm only after assigning the team.";
-        const message = `Role-based access cutover preview\n\nCurrent authorization: ${installation.getState().authorizationMode}\nAssigned application roles retained (${preview.activeRoleCount}):\n${retainedRoles}\n\n${warning}`;
-        await ctx.answerCallbackQuery();
-        if (message.length <= 4096) {
-          await renderPrivateScreen(ctx, message, keyboard);
-          return;
-        }
-        let roleChunk = "Assigned application roles retained:";
-        for (const line of retainedRoleLines) {
-          if (`${roleChunk}\n${line}`.length > 4096) {
-            await ctx.reply(roleChunk);
-            roleChunk = "Assigned application roles retained:";
-          }
-          roleChunk += `\n${line}`;
-        }
-        await ctx.reply(roleChunk);
-        await renderPrivateScreen(ctx, `Role-based access cutover preview\n\nCurrent authorization: ${installation.getState().authorizationMode}\nAssigned application roles retained (${preview.activeRoleCount}): listed above.\n\n${warning}`, keyboard);
-        return;
-      }
-      if (action === "activate") { try { installation.activateRoleBasedAccess(ctx.from.id, data.split(":")[2] ?? ""); await ctx.answerCallbackQuery({ text: "Role-based access activated." }); await showDashboard(ctx); } catch (error) { await ctx.answerCallbackQuery({ text: error instanceof Error ? error.message : "Activation failed.", show_alert: true }); } return; }
-      if (action === "cancel") installation.cancelRoleBasedAccessActivation();
-      await ctx.answerCallbackQuery({ text: "Activation cancelled." }); return;
+      await ctx.answerCallbackQuery({ text: "Role-based access is automatic for ready installations.", show_alert: true });
+      return;
     }
 
     if (namespace === "user") {
@@ -2068,8 +2141,17 @@ export function createBot(
     }
   });
 
+  bot.on("chat_member", async (ctx) => {
+    if (!isConfiguredStaffWorkspace(ctx)) return;
+    const member = ctx.chatMember.new_chat_member;
+    if (member.status === "left" || member.status === "kicked") return;
+    enrollBaselineStaffMember(member.user);
+  });
+
   bot.on("message", async (ctx) => {
-    if (isStaffChat(ctx)) {
+    if (isConfiguredStaffWorkspace(ctx)) {
+      enrollBaselineStaffMember(ctx.from);
+      if (!isStaffChat(ctx)) return;
       if (isTicketAnswerPackageDocument(ctx.message)) {
         if (typeof ctx.message.message_thread_id === "number") {
           await ctx.reply("Upload ticket answer packages outside ticket topics.");
@@ -2091,6 +2173,8 @@ export function createBot(
       await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler);
       return;
     }
+
+    if (ctx.from && !installation.getMember(ctx.from.id)) await enrollPrivateWorkspaceMember(ctx);
 
     if (ctx.from && installation.getMember(ctx.from.id) && getPendingPrivateBatchExport(ctx.from.id)) {
       if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) return;
@@ -4176,11 +4260,17 @@ function isPrivateChat(ctx: Context): boolean {
 }
 
 function isStaffChat(ctx: Context): boolean {
+  if (!isConfiguredStaffWorkspace(ctx)) return false;
   const installation = installationServicesByContext.get(ctx);
   const staffChatId = installation?.getStaffChatId();
-  if (staffChatId === null || staffChatId === undefined || ctx.chat?.id !== staffChatId) return false;
+  if (staffChatId === null || staffChatId === undefined) return false;
   if (!ctx.from) return false;
   return installation?.isStaffAuthorized(ctx.from.id, staffChatId) ?? false;
+}
+
+function isConfiguredStaffWorkspace(ctx: Context): boolean {
+  const staffChatId = installationServicesByContext.get(ctx)?.getStaffChatId();
+  return staffChatId !== null && staffChatId !== undefined && ctx.chat?.id === staffChatId;
 }
 
 function hasApplicationPermission(ctx: Context, permission: Permission): boolean {

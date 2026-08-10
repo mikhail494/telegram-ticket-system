@@ -32,6 +32,24 @@ async function main(): Promise<void> {
   const botInfo = await bot.api.getMe();
   bot.botInfo = botInfo;
   await runWorkspaceStartup(installationService, {
+    discoverStaffWorkspaceMembers: async () => {
+      const workspace = installationService.getActiveWorkspace();
+      if (!workspace) return;
+      try {
+        const administrators = await bot.api.getChatAdministrators(workspace.telegram_chat_id);
+        for (const administrator of administrators) {
+          if (administrator.user.is_bot) continue;
+          installationService.ensureBaselineAgent({
+            telegramId: administrator.user.id,
+            username: administrator.user.username,
+            firstName: administrator.user.first_name,
+            lastName: administrator.user.last_name
+          });
+        }
+      } catch (error) {
+        logger.warn({ err: error }, "Could not discover staff workspace administrators");
+      }
+    },
     initializeSupportLogs: () => initializeSupportLogsTopic(bot.api, db).then(() => undefined),
     recoverArchives: () => archiveClosedTicketsPendingUpload(bot.api, db).then(() => undefined),
     recoverModeration: () => processModerationRecovery(bot.api, db),
@@ -54,7 +72,7 @@ async function main(): Promise<void> {
   process.once("SIGTERM", shutdown);
 
   await bot.start({
-    allowed_updates: ["message", "callback_query"],
+    allowed_updates: ["message", "callback_query", "chat_member"],
     onStart: (botInfo) => {
       logger.info({ username: botInfo.username }, "Telegram support bot started");
     }

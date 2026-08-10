@@ -141,18 +141,36 @@ test("expired owner pairing token is rejected", () => {
   } finally { db.close(); }
 });
 
-test("pairing an owner does not activate role-based access", () => {
+test("a ready installation with an owner automatically activates role-based access", () => {
   const db = new SupportDatabase(":memory:");
   try {
     const service = new InstallationService(db);
     service.adoptLegacyInstallation(-10042);
     service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 10 });
-    assert.equal(service.getState().authorizationMode, "LEGACY_TRUSTED_GROUP");
-    const preview = service.previewRoleBasedAccessActivation();
-    assert.equal(preview.ownerCount, 1);
-    assert.equal(preview.activeRoleCount, 1);
-    service.activateRoleBasedAccess(10, preview.confirmationToken);
     assert.equal(service.getState().authorizationMode, "RBAC_ACTIVE");
+    assert.equal(service.activateReadyRoleBasedAccess(), false);
+    assert.equal(service.getState().authorizationMode, "RBAC_ACTIVE");
+  } finally { db.close(); }
+});
+
+test("automatic role-based access preserves elevated roles and enrolls only unknown staff as agents", () => {
+  const db = new SupportDatabase(":memory:");
+  try {
+    const service = new InstallationService(db);
+    service.adoptLegacyInstallation(-10042);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
+    service.assignRole(1, 2, "ADMIN");
+    service.assignRole(1, 3, "SENIOR_AGENT");
+
+    service.ensureBaselineAgent({ telegramId: 2, username: "admin" });
+    service.ensureBaselineAgent({ telegramId: 3, username: "senior" });
+    service.ensureBaselineAgent({ telegramId: 4, firstName: "New", lastName: "Member" });
+    service.activateReadyRoleBasedAccess();
+
+    assert.equal(service.getMember(1)?.role, "OWNER");
+    assert.equal(service.getMember(2)?.role, "ADMIN");
+    assert.equal(service.getMember(3)?.role, "SENIOR_AGENT");
+    assert.equal(service.getMember(4)?.role, "AGENT");
   } finally { db.close(); }
 });
 
