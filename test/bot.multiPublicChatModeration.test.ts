@@ -244,14 +244,15 @@ describe("multi-public-chat moderation", () => {
     await harness.bot.handleUpdate(privateText(OWNER_ID, "@synthetic_public", 2));
     assert.ok(harness.db.getManagedPublicChat(CHAT_A));
     assert.ok(harness.findApiCalls("getChat").some((call) => call.payload.chat_id === "@synthetic_public"));
+    const currentMessageId = harness.findApiCalls("sendMessage").at(-1)?.responseMessageId!;
 
     harness.db.deactivateManagedPublicChat(CHAT_A);
-    await harness.bot.handleUpdate(privateCallback(OWNER_ID, "public:add", 3));
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, "public:add", currentMessageId));
     await harness.bot.handleUpdate(privateText(OWNER_ID, "https://t.me/synthetic_public", 4));
     assert.ok(harness.db.getManagedPublicChat(CHAT_A));
 
     harness.db.deactivateManagedPublicChat(CHAT_A);
-    await harness.bot.handleUpdate(privateCallback(OWNER_ID, "public:add", 5));
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, "public:add", currentMessageId));
     await harness.bot.handleUpdate(privateText(OWNER_ID, "https://t.me/+syntheticInvite", 6));
     const guidance = harness.findApiCalls("sendMessage").at(-1);
     assert.match(String(guidance?.payload.text), /cannot inspect/i);
@@ -281,7 +282,7 @@ describe("multi-public-chat moderation", () => {
     assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.moderation_enabled, 0);
 
     setReachablePublicChat(harness, CHAT_A);
-    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:enable:${CHAT_A}`, 2));
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:enable:${CHAT_A}`, 1));
     assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.moderation_enabled, 1);
     assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.reaction_status, "UNAVAILABLE");
   });
@@ -292,7 +293,7 @@ describe("multi-public-chat moderation", () => {
     harness.db.upsertLanguageModerationUserState({ chat_id: CHAT_A, user_telegram_id: USER_ID, username: null, current_strikes: 2, sanction_tier: 1, first_strike_at: new Date().toISOString() });
     await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:remove:${CHAT_A}`, 1));
     assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.active, 1);
-    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:confirm-remove:${CHAT_A}`, 2));
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:confirm-remove:${CHAT_A}`, 1));
     assert.equal(harness.db.getManagedPublicChat(CHAT_A), undefined);
     assert.equal(harness.db.getLanguageModerationUserState(CHAT_A, USER_ID)?.sanction_tier, 1);
   });
@@ -303,7 +304,8 @@ describe("multi-public-chat moderation", () => {
     manage(harness, CHAT_B, false);
     await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:config-warning:${CHAT_A}`, 1));
     await harness.bot.handleUpdate(privateText(OWNER_ID, "Synthetic warning A", 2));
-    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:config-cooldown:${CHAT_A}`, 3));
+    const currentMessageId = harness.findApiCalls("sendMessage").at(-1)?.responseMessageId!;
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:config-cooldown:${CHAT_A}`, currentMessageId));
     await harness.bot.handleUpdate(privateText(OWNER_ID, "23", 4));
 
     assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.warning_text, "Synthetic warning A");

@@ -237,6 +237,7 @@ export function createBot(
     chatId: number;
     field: "warning" | "allowlist" | "cooldown" | "threshold" | "lookback";
   }>();
+  const privateOperatorCallbackNamespaces = new Set(["owner", "setup", "workspace", "dashboard", "batch-ui", "public", "team", "rbac"]);
   const pendingWorkspaceSelection = new Map<number, "SETUP" | "RECONFIGURE">();
   const privateUiMessages = new Map<number, { chatId: number; messageId: number }>();
   const workspacePickerPrompts = new Map<number, { chatId: number; messageId: number }>();
@@ -713,6 +714,11 @@ export function createBot(
     if (!ctx.from || message?.chat.type !== "private") return true;
     const current = persistedPrivateScreen(ctx.from.id);
     return current !== undefined && (current.chatId !== message.chat.id || current.messageId !== message.message_id);
+  }
+
+  function isObsoletePrivateOperatorCallback(ctx: Context, namespace: string): boolean {
+    if (!isPrivateChat(ctx) || !privateOperatorCallbackNamespaces.has(namespace)) return false;
+    return isObsoletePrivateBatchCallback(ctx);
   }
 
   async function renderPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard): Promise<void> {
@@ -1691,6 +1697,11 @@ export function createBot(
     const data = ctx.callbackQuery.data;
     const [namespace] = data.split(":");
 
+    if (isObsoletePrivateOperatorCallback(ctx, namespace ?? "")) {
+      await ctx.answerCallbackQuery({ text: "This screen is no longer active. Use /start.", show_alert: true });
+      return;
+    }
+
     if (namespace === "owner" && data === "owner:confirm-transfer") {
       if (!isPrivateChat(ctx) || !ctx.from || !db.hasPendingOwnerTransfer(ctx.from.id)) { await ctx.answerCallbackQuery({ text: "No pending owner transfer.", show_alert: true }); return; }
       if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
@@ -1781,10 +1792,6 @@ export function createBot(
     }
 
     if (namespace === "batch-ui") {
-      if (isObsoletePrivateBatchCallback(ctx)) {
-        await ctx.answerCallbackQuery({ text: "This batch screen is no longer active. Use /start.", show_alert: true });
-        return;
-      }
       if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) {
         await ctx.answerCallbackQuery({ text: "Batch operations require OWNER or ADMIN.", show_alert: true });
         return;
@@ -1903,9 +1910,10 @@ export function createBot(
       }
       if (action === "remove") {
         await ctx.answerCallbackQuery();
-        await ctx.reply(`Remove ${publicChatLabel(managed)} from managed public chats? Historical moderation records will be preserved.`, {
-          reply_markup: new InlineKeyboard().text("Confirm removal", `public:confirm-remove:${chatId}`).row().text("Cancel", `public:open:${chatId}`)
-        });
+        await renderPrivateScreen(ctx, `Remove ${publicChatLabel(managed)} from managed public chats? Historical moderation records will be preserved.`, new InlineKeyboard()
+          .text("Confirm removal", `public:confirm-remove:${chatId}`)
+          .row()
+          .text("Cancel", `public:open:${chatId}`));
         return;
       }
       if (action === "confirm-remove") {
@@ -1977,7 +1985,7 @@ export function createBot(
         const message = `Role-based access cutover preview\n\nCurrent authorization: ${installation.getState().authorizationMode}\nAssigned application roles retained (${preview.activeRoleCount}):\n${retainedRoles}\n\n${warning}`;
         await ctx.answerCallbackQuery();
         if (message.length <= 4096) {
-          await ctx.reply(message, { reply_markup: keyboard });
+          await renderPrivateScreen(ctx, message, keyboard);
           return;
         }
         let roleChunk = "Assigned application roles retained:";
@@ -1989,7 +1997,7 @@ export function createBot(
           roleChunk += `\n${line}`;
         }
         await ctx.reply(roleChunk);
-        await ctx.reply(`Role-based access cutover preview\n\nCurrent authorization: ${installation.getState().authorizationMode}\nAssigned application roles retained (${preview.activeRoleCount}): listed above.\n\n${warning}`, { reply_markup: keyboard });
+        await renderPrivateScreen(ctx, `Role-based access cutover preview\n\nCurrent authorization: ${installation.getState().authorizationMode}\nAssigned application roles retained (${preview.activeRoleCount}): listed above.\n\n${warning}`, keyboard);
         return;
       }
       if (action === "activate") { try { installation.activateRoleBasedAccess(ctx.from.id, data.split(":")[2] ?? ""); await ctx.answerCallbackQuery({ text: "Role-based access activated." }); await showDashboard(ctx); } catch (error) { await ctx.answerCallbackQuery({ text: error instanceof Error ? error.message : "Activation failed.", show_alert: true }); } return; }
