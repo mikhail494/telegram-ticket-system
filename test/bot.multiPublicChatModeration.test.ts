@@ -314,4 +314,34 @@ describe("multi-public-chat moderation", () => {
     assert.equal(harness.db.getManagedPublicChat(CHAT_B)?.warning_cooldown_minutes, 10);
   });
 
+  it("explains public-chat settings and returns one fresh settings screen after validated input", async () => {
+    const { harness } = createHarness();
+    manage(harness, CHAT_A, false);
+
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:config-cooldown:${CHAT_A}`, 1));
+    const prompt = harness.findApiCalls("sendMessage").at(-1)!;
+    assert.match(String(prompt.payload.text), /minimum time after a warning/i);
+    assert.match(String(prompt.payload.text), /Current value: 10 minutes/i);
+    assert.match(String(prompt.payload.text), /Example: 30/i);
+    assert.equal(harness.countApiCalls("deleteMessage"), 1);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateText(OWNER_ID, "0", 2));
+    assert.equal(harness.countApiCalls("sendMessage"), 0);
+    assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /whole number from 1 to 1440/i);
+    assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.warning_cooldown_minutes, 10);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateText(OWNER_ID, "30", 3));
+    assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.warning_cooldown_minutes, 30);
+    assert.equal(harness.countApiCalls("deleteMessage"), 1);
+    assert.equal(harness.countApiCalls("sendMessage"), 1);
+    assert.match(String(harness.findApiCalls("sendMessage")[0]?.payload.text), /Warning cooldown: 30 minutes/);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:config-warning:${CHAT_A}`, 1));
+    assert.match(String(harness.findApiCalls("answerCallbackQuery")[0]?.payload.text), /no longer active/i);
+    assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.warning_text, "Please use English in the main chat. Further violations may be reviewed by an authorized moderator under the current community policy.");
+  });
+
 });

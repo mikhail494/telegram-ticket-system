@@ -26,6 +26,15 @@ describe("public language moderation", () => {
   it("ignores another public chat", async () => { const value = makeHarness(); enable(value); await value.bot.handleUpdate(message(1, CYRILLIC, 1, -100778)); assert.equal(value.db.getLanguageModerationUserState(-100778, 1), undefined); });
   it("does not write private support bans", async () => { const value = makeHarness(); enable(value); await value.bot.handleUpdate(message(1, CYRILLIC)); assert.equal(value.db.getBannedUser(1), undefined); });
   it("keeps ordinary English messages harmless", async () => { const value = makeHarness(); enable(value); await value.bot.handleUpdate(message(1, "hello there normal message")); assert.equal(value.db.getLanguageModerationUserState(CHAT_ID, 1), undefined); });
+  it("routes confident Indonesian and Malay messages through the existing warning pipeline", async () => {
+    const value = makeHarness();
+    enable(value);
+    await value.bot.handleUpdate(message(1, "selamat pagi saya ingin bertanya tentang layanan ini", 1));
+    await value.bot.handleUpdate(message(2, "saya mahu bertanya tentang perkhidmatan ini sekarang", 2));
+    await processDue(value);
+    assert.equal(value.db.getLanguageModerationUserState(CHAT_ID, 1)?.current_strikes, 1);
+    assert.equal(value.db.getLanguageModerationUserState(CHAT_ID, 2)?.current_strikes, 1);
+  });
   it("keeps private messages outside moderation", async () => { const value = makeHarness(); enable(value); await value.bot.handleUpdate({ update_id: 1, message: { message_id: 1, date: 1, from: { id: 1, is_bot: false, first_name: "User" }, chat: { id: 1, type: "private", first_name: "User" }, text: CYRILLIC } }); assert.equal(value.db.getLanguageModerationUserState(CHAT_ID, 1), undefined); });
   it("preserves one first strike across repeat violations", async () => { const value = makeHarness(); enable(value); await value.bot.handleUpdate(message(1, CYRILLIC)); await value.bot.handleUpdate(message(2, CYRILLIC)); assert.equal(value.db.getLanguageModerationUserState(CHAT_ID, 1), undefined); await processDue(value); assert.equal(value.db.getLanguageModerationUserState(CHAT_ID, 1)?.current_strikes, 1); });
   it("counts target ordinary messages", async () => { const value = makeHarness(); enable(value); await value.bot.handleUpdate(message(1, "hello normal message")); assert.equal(value.db.getLanguageModerationChatState(CHAT_ID)?.ordinary_messages_since_warning, 1); });
