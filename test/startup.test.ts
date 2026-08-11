@@ -25,3 +25,23 @@ test("legacy workspace starts recoveries without creating onboarding noise", asy
     assert.deepEqual(calls, ["logs", "archives", "moderation", "batch"]);
   } finally { db.close(); }
 });
+
+test("ready startup automatically switches an adopted installation with an owner to role-based access", async () => {
+  const db = new SupportDatabase(":memory:");
+  try {
+    const service = new InstallationService(db);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1 });
+    service.adoptLegacyInstallation(-10042);
+    const task = async () => undefined;
+
+    await runWorkspaceStartup(service, {
+      initializeSupportLogs: task,
+      recoverArchives: task,
+      recoverModeration: task,
+      recoverBatch: task,
+      sendLegacyStaffOnboarding: task
+    });
+
+    assert.equal(service.getState().authorizationMode, "RBAC_ACTIVE");
+  } finally { db.close(); }
+});

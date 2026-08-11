@@ -6,12 +6,15 @@ export interface WorkspaceStartupTasks {
   recoverModeration(): Promise<void>;
   recoverBatch(): Promise<void>;
   sendLegacyStaffOnboarding(): Promise<void>;
+  discoverStaffWorkspaceMembers?(): Promise<void>;
 }
 
 export async function runWorkspaceStartup(installation: InstallationService, tasks: WorkspaceStartupTasks): Promise<"SETUP_REQUIRED" | "READY"> {
   const setupState = installation.getState().setupState;
   const workspace = installation.getActiveWorkspace();
   if (setupState !== "READY" || !workspace) return "SETUP_REQUIRED";
+  installation.activateReadyRoleBasedAccess();
+  await tasks.discoverStaffWorkspaceMembers?.();
   await tasks.initializeSupportLogs();
   await tasks.recoverArchives();
   await tasks.recoverModeration();
