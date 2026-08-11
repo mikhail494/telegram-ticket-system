@@ -265,6 +265,7 @@ export function createBot(
   const privateUiMessages = new Map<number, { chatId: number; messageId: number }>();
   const workspacePickerPrompts = new Map<number, { chatId: number; messageId: number }>();
   const publicChatPickerPrompts = new Map<number, { chatId: number; messageId: number }>();
+  const temporaryPrivateUiMessages = new Map<number, { chatId: number; messageId: number }>();
   let ticketBatchRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   let ticketBatchRecoveryTimerAt: number | undefined;
   let ticketBatchRecoveryQueue: Promise<void> = Promise.resolve();
@@ -774,18 +775,26 @@ export function createBot(
       ? { chatId: callbackMessage.chat.id, messageId: callbackMessage.message_id }
       : undefined;
     const target = (ctx.from ? privateUiMessages.get(ctx.from.id) : undefined) ?? (ctx.from ? persistedPrivateScreen(ctx.from.id) : undefined) ?? callbackTarget;
+    const temporaryTarget = ctx.from ? temporaryPrivateUiMessages.get(ctx.from.id) : undefined;
+    const isTemporaryTarget = target !== undefined && temporaryTarget?.chatId === target.chatId && temporaryTarget.messageId === target.messageId;
     if (target) {
       try {
         await ctx.api.editMessageText(target.chatId, target.messageId, text, { reply_markup: replyMarkup });
+        if (ctx.from && isTemporaryTarget) temporaryPrivateUiMessages.delete(ctx.from.id);
         rememberPrivateScreen(ctx, target);
         return;
       } catch (error) {
         if (error instanceof GrammyError && error.description.includes("message is not modified")) {
+          if (ctx.from && isTemporaryTarget) temporaryPrivateUiMessages.delete(ctx.from.id);
           rememberPrivateScreen(ctx, target);
           return;
         }
         logger.warn({ userId: ctx.from?.id }, "Could not replace private UI screen");
       }
+    }
+    if (target && isTemporaryTarget) {
+      await retirePrivateScreenTarget(ctx, target);
+      if (ctx.from) temporaryPrivateUiMessages.delete(ctx.from.id);
     }
     const sent = await ctx.reply(text, { reply_markup: replyMarkup });
     rememberPrivateScreen(ctx, { chatId: sent.chat.id, messageId: sent.message_id });
@@ -797,25 +806,31 @@ export function createBot(
       ? { chatId: callbackMessage.chat.id, messageId: callbackMessage.message_id }
       : undefined;
     const trackedTarget = ctx.from ? privateUiMessages.get(ctx.from.id) : undefined;
+    const temporaryTarget = ctx.from ? temporaryPrivateUiMessages.get(ctx.from.id) : undefined;
     const persistedTarget = ctx.from ? persistedPrivateScreen(ctx.from.id) : undefined;
-    return [callbackTarget, trackedTarget, persistedTarget].filter((target): target is { chatId: number; messageId: number } => Boolean(target))
+    return [callbackTarget, trackedTarget, temporaryTarget, persistedTarget].filter((target): target is { chatId: number; messageId: number } => Boolean(target))
       .filter((target, index, targets) => targets.findIndex((other) => other.chatId === target.chatId && other.messageId === target.messageId) === index);
+  }
+
+  async function retirePrivateScreenTarget(ctx: Context, target: { chatId: number; messageId: number }): Promise<void> {
+    try {
+      await ctx.api.deleteMessage(target.chatId, target.messageId);
+    } catch {
+      try {
+        await ctx.api.editMessageReplyMarkup(target.chatId, target.messageId, { reply_markup: { inline_keyboard: [] } });
+      } catch {
+        logger.warn({ userId: ctx.from?.id }, "Could not retire private UI screen");
+      }
+    }
   }
 
   async function retirePrivateScreens(ctx: Context): Promise<void> {
     for (const target of privateUiTargets(ctx)) {
-      try {
-        await ctx.api.deleteMessage(target.chatId, target.messageId);
-      } catch {
-        try {
-          await ctx.api.editMessageReplyMarkup(target.chatId, target.messageId, { reply_markup: { inline_keyboard: [] } });
-        } catch {
-          logger.warn({ userId: ctx.from?.id }, "Could not retire private UI screen");
-        }
-      }
+      await retirePrivateScreenTarget(ctx, target);
     }
     if (ctx.from) {
       privateUiMessages.delete(ctx.from.id);
+      temporaryPrivateUiMessages.delete(ctx.from.id);
       installation.setOnboardingPrimaryMessage(ctx.from.id, null, null);
     }
   }
@@ -868,8 +883,10 @@ export function createBot(
     const hadPrompt = publicChatPickerPrompts.has(ctx.from.id);
     await retirePublicChatPickerPrompt(ctx.from.id);
     if (!hadPendingSelection && !hadPrompt) return;
-    const sent = await ctx.reply("\u2063", { reply_markup: { remove_keyboard: true } });
-    rememberPrivateScreen(ctx, { chatId: sent.chat.id, messageId: sent.message_id });
+    const sent = await ctx.reply("Updating...", { reply_markup: { remove_keyboard: true } });
+    const target = { chatId: sent.chat.id, messageId: sent.message_id };
+    temporaryPrivateUiMessages.set(ctx.from.id, target);
+    rememberPrivateScreen(ctx, target);
   }
 
   function dashboardText(userId: number): string {
