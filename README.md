@@ -7,7 +7,7 @@ A Telegram-native support desk that turns private user messages into structured 
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-7A3E9D.svg)](LICENSE)
 
-Version: `1.2.7` (v1.3.0 phase 1 development branch)
+Version: `1.3.0`
 
 Users contact the bot in private chat, while staff work entirely in a dedicated Telegram forum supergroup. Each ticket receives its own topic, Quick Replies speed up routine responses, and closed conversations are archived as text transcripts in Support Logs.
 
@@ -205,7 +205,7 @@ Entity-notification controls are `/questnotify status`, `/questnotify target <ch
 
 Invitations are hashed, one-use, 30-minute private deep links. Invitees must also join the configured staff workspace. Before RBAC activation, a legacy installation keeps its current trusted-group behavior even after OWNER pairing. After explicit OWNER confirmation, both an assigned application role and staff-group membership are required. Private staff dashboards include `Open test ticket as user`; ordinary staff text cannot accidentally create tickets or change configuration.
 
-Phase 1 keeps public-chat management and batch delivery in their current group-command workflows. Multi-public-chat management, topic-aware public moderation, and moving batch operations fully into the private dashboard remain later work.
+OWNER and ADMIN batch operations and public-chat management are available through the private operator UI. Staff-group commands remain available where the active authorization mode permits them.
 
 ## Telegram Setup
 
@@ -278,7 +278,7 @@ npm test
 npm run build
 ```
 
-The current suite contains 220 automated tests covering ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, entity notifications, bootstrap configuration, owner pairing, onboarding, workspace validation, and role authorization.
+The automated suite covers ticket routing, Quick Replies, Support Logs safety, staff replies, ticket batches, public moderation, entity notifications, bootstrap configuration, owner pairing, onboarding, workspace validation, and role authorization.
 
 ## Project Structure
 
@@ -406,4 +406,4 @@ See [CHANGELOG.md](CHANGELOG.md) for release history and [LICENSE](LICENSE) for 
 
 Licensed under the PolyForm Noncommercial License 1.0.0.
 
-Commercial use is not permitted. See [LICENSE](LICENSE) for the complete terms.
+The source is publicly visible for evaluation, learning, and other noncommercial use under PolyForm Noncommercial. Commercial deployment or use requires separate permission or licensing; open an issue or contact the repository owner to discuss it. This is not an OSI-approved open-source license. See [LICENSE](LICENSE) for the complete terms.
