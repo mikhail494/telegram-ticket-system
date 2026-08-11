@@ -75,6 +75,8 @@ export interface TelegramUserFixture {
   lastName?: string;
 }
 
+export type TestStaffMembership = "administrator" | "member" | "left";
+
 export interface SeedTicketOptions {
   user?: TelegramUserFixture;
   staffChatId?: number;
@@ -136,6 +138,7 @@ export interface BotHarness {
   scheduledModerationCleanupJobIds: number[];
   cleanup(): void;
   seedTicket(options?: SeedTicketOptions): TicketWithUser;
+  setStaffMembership(userId: number, status?: TestStaffMembership): void;
   setApiResponseOverride(method: string, override: ApiResponseOverride): void;
   failNextApiCall(method: string, description?: string, errorCode?: number): void;
   clearApiOverrides(): void;
@@ -183,6 +186,7 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
   const apiCalls: RecordedApiCall[] = [];
   const responseOverrides = new Map<string, ApiResponseOverride>();
   const pendingFailures = new Map<string, ApiMockFailure[]>();
+  const staffMemberships = new Map<number, TestStaffMembership>();
   let nextMessageId = 1000;
   let closed = false;
 
@@ -198,7 +202,13 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
     }
     apiCalls.push(call);
 
-    const defaultResponse = createDefaultSuccessResponse(method, call.payload, nextMessageId, fileDownloads);
+    const defaultResponse = createDefaultSuccessResponse(
+      method,
+      call.payload,
+      nextMessageId,
+      fileDownloads,
+      (userId) => staffMemberships.get(userId) ?? (db.getTeamMember(userId) ? "member" : "left")
+    );
     if (usesGeneratedMessageId(method)) {
       call.responseMessageId = nextMessageId;
       nextMessageId += 1;
@@ -230,6 +240,9 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
       db.close();
     },
     seedTicket: (seedOptions = {}) => seedTicket(db, seedOptions),
+    setStaffMembership: (userId, status = "member") => {
+      staffMemberships.set(userId, status);
+    },
     setApiResponseOverride: (method, override) => {
       responseOverrides.set(method, override);
     },
@@ -465,7 +478,8 @@ function createDefaultSuccessResponse(
   method: string,
   payload: Record<string, unknown>,
   messageId: number,
-  fileDownloads: ReadonlyMap<string, { body: string | Uint8Array; status: number; filePath: string }>
+  fileDownloads: ReadonlyMap<string, { body: string | Uint8Array; status: number; filePath: string }>,
+  getStaffMembership: (userId: number) => TestStaffMembership
 ): ApiMockSuccess {
   if (method === "getMe") {
     return { ok: true, result: TEST_BOT_IDENTITY };
@@ -478,9 +492,14 @@ function createDefaultSuccessResponse(
 
   if (method === "getChatMember") {
     const userId = numericPayloadValue(payload, "user_id");
+    const membership = getStaffMembership(userId);
     return { ok: true, result: userId === TEST_BOT_IDENTITY.id
       ? { status: "administrator", user: TEST_BOT_IDENTITY, can_be_edited: false, is_anonymous: false, can_manage_chat: true, can_delete_messages: true, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: false, can_change_info: false, can_invite_users: true, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_post_messages: false, can_edit_messages: false, can_pin_messages: true, can_manage_topics: true }
-      : { status: "administrator", user: { id: userId, is_bot: false, first_name: "Owner" }, can_be_edited: true, is_anonymous: false, can_manage_chat: true, can_delete_messages: true, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: true, can_change_info: true, can_invite_users: true, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_post_messages: false, can_edit_messages: false, can_pin_messages: true, can_manage_topics: true } };
+      : membership === "administrator"
+        ? { status: "administrator", user: { id: userId, is_bot: false, first_name: "Test Staff" }, can_be_edited: true, is_anonymous: false, can_manage_chat: true, can_delete_messages: true, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: true, can_change_info: true, can_invite_users: true, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_post_messages: false, can_edit_messages: false, can_pin_messages: true, can_manage_topics: true }
+        : membership === "member"
+          ? { status: "member", user: { id: userId, is_bot: false, first_name: "Test Staff" } }
+          : { status: "left", user: { id: userId, is_bot: false, first_name: "Test User" } } };
   }
 
   if (method === "sendMessage" || method === "sendDocument") {

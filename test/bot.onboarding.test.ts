@@ -72,6 +72,7 @@ test("current staff members are enrolled as agents from private and workspace in
     return service;
   } });
   try {
+    harness.setStaffMembership(22);
     await harness.bot.handleUpdate(privateMessage(22, "/start", 22));
     assert.equal(service.getMember(22)?.role, "AGENT");
     assert.match(String(harness.findApiCalls("sendMessage")[0]?.payload.text), /AGENT dashboard/);
@@ -300,6 +301,7 @@ test("ChatShared stores workspace only after centralized validation", async () =
     service = new InstallationService(db); service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1 }); return service;
   } });
   try {
+    harness.setStaffMembership(1, "administrator");
     const update: Update = { update_id: 20, message: { message_id: 20, date: 1, from: { id: 1, is_bot: false, first_name: "Owner" }, chat: { id: 1, type: "private", first_name: "Owner" }, chat_shared: { request_id: 1300, chat_id: -100777, title: "Support", username: "support_team" } } };
     await harness.bot.handleUpdate(update);
     assert.equal(service.getStaffChatId(), -100777);
