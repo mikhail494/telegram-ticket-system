@@ -1707,7 +1707,7 @@ export class SupportDatabase {
     return this.db.prepare("SELECT * FROM onboarding_sessions WHERE user_telegram_id = ?").get(userId) as OnboardingSessionRecord | undefined;
   }
 
-  setOnboardingPrimaryMessage(userId: number, chatId: number, messageId: number): void {
+  setOnboardingPrimaryMessage(userId: number, chatId: number | null, messageId: number | null): void {
     this.db.prepare("UPDATE onboarding_sessions SET primary_message_chat_id = ?, primary_message_id = ?, updated_at = ? WHERE user_telegram_id = ?")
       .run(chatId, messageId, now(), userId);
   }

@@ -804,7 +804,10 @@ export function createBot(
         }
       }
     }
-    if (ctx.from) privateUiMessages.delete(ctx.from.id);
+    if (ctx.from) {
+      privateUiMessages.delete(ctx.from.id);
+      installation.setOnboardingPrimaryMessage(ctx.from.id, null, null);
+    }
   }
 
   async function sendFreshPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard) {
@@ -1052,12 +1055,12 @@ export function createBot(
       .row()
       .text("Check permissions", `public:check:${chat.chat_id}`)
       .row()
-      .text("Warning text", `public:config-warning:${chat.chat_id}`)
-      .text("Allowlist", `public:config-allowlist:${chat.chat_id}`)
+      .text("Warning message", `public:config-warning:${chat.chat_id}`)
+      .text("Allowed terms", `public:config-allowlist:${chat.chat_id}`)
       .row()
-      .text("Cooldown", `public:config-cooldown:${chat.chat_id}`)
-      .text("Threshold", `public:config-threshold:${chat.chat_id}`)
-      .text("Lookback", `public:config-lookback:${chat.chat_id}`)
+      .text("Warning cooldown", `public:config-cooldown:${chat.chat_id}`)
+      .text("Message threshold", `public:config-threshold:${chat.chat_id}`)
+      .text("Violation window", `public:config-lookback:${chat.chat_id}`)
       .row()
       .text("Remove chat", `public:remove:${chat.chat_id}`)
       .row()
@@ -1074,11 +1077,31 @@ export function createBot(
       `Permissions: ${chat.permission_status.toLowerCase()}`,
       `Reactions: ${chat.reaction_status.toLowerCase()} (advisory only)`,
       `Warning: ${chat.warning_text}`,
-      `Allowlist entries: ${chat.allowlist.length}`,
+      `Allowed terms: ${chat.allowlist.length}`,
       `Warning cooldown: ${chat.warning_cooldown_minutes} minutes`,
-      `Ordinary-message threshold: ${chat.warning_message_threshold}`,
-      `Lookback: ${chat.lookback_minutes} minutes`
+      `Message threshold: ${chat.warning_message_threshold} messages`,
+      `Violation window: ${chat.lookback_minutes} minutes`
     ].join("\n"), keyboard);
+  }
+
+  type PublicChatConfigurationField = "warning" | "allowlist" | "cooldown" | "threshold" | "lookback";
+
+  function publicChatConfigurationPrompt(chat: NonNullable<ReturnType<SupportDatabase["getManagedPublicChat"]>>, field: PublicChatConfigurationField, error?: string): string {
+    const details: Record<PublicChatConfigurationField, string> = {
+      warning: ["Warning message", "Shown when the bot sends a first-strike warning in this public chat.", `Current value: ${chat.warning_text}`, "Valid: 1-500 characters.", "Example: Please use English in this chat."].join("\n"),
+      allowlist: ["Allowed terms", "Terms removed before language analysis. Messages containing only these terms stay exempt.", `Current value: ${chat.allowlist.length ? chat.allowlist.join(", ") : "none"}`, "Valid: comma-separated terms, up to 100 terms of 80 characters each; send - to clear.", "Example: productname, ticker"].join("\n"),
+      cooldown: ["Warning cooldown", "Minimum time after a warning before another first-strike warning can appear. The message threshold must also be met.", `Current value: ${chat.warning_cooldown_minutes} minutes`, "Valid: whole number from 1 to 1440 minutes.", "Example: 30"].join("\n"),
+      threshold: ["Message threshold", "Incoming messages in this chat or topic after a warning before another first-strike warning can appear. All messages count.", `Current value: ${chat.warning_message_threshold} messages`, "Valid: whole number from 1 to 10000 messages.", "Example: 20"].join("\n"),
+      lookback: ["Violation window", "First violations in the same chat or topic during this window are grouped into one warning.", `Current value: ${chat.lookback_minutes} minutes`, "Valid: whole number from 1 to 1440 minutes.", "Example: 10"].join("\n")
+    };
+    return [details[field], "", error ? `Invalid: ${error}` : "Send the new value."].join("\n");
+  }
+
+  async function beginPublicChatConfiguration(ctx: Context, chat: NonNullable<ReturnType<SupportDatabase["getManagedPublicChat"]>>, field: PublicChatConfigurationField): Promise<void> {
+    if (!ctx.from) return;
+    pendingPublicChatConfiguration.set(ctx.from.id, { chatId: chat.chat_id, field });
+    await retirePrivateScreens(ctx);
+    await sendFreshPrivateScreen(ctx, publicChatConfigurationPrompt(chat, field), new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`));
   }
 
   async function sendPublicChatPicker(ctx: Context): Promise<void> {
@@ -1146,7 +1169,7 @@ export function createBot(
     const chat = db.getManagedPublicChat(pending.chatId);
     if (!chat) {
       pendingPublicChatConfiguration.delete(ctx.from.id);
-      await ctx.reply("This public chat is no longer managed.");
+      await renderPrivateScreen(ctx, "This public chat is no longer managed.", new InlineKeyboard().text("Back", "public:list"));
       return true;
     }
     let warningText = chat.warning_text;
@@ -1156,23 +1179,23 @@ export function createBot(
     let lookbackMinutes = chat.lookback_minutes;
     const trimmed = text.trim();
     if (pending.field === "warning") {
-      if (!trimmed || trimmed.length > 500) { await ctx.reply("Warning text must contain 1-500 characters."); return true; }
+      if (!trimmed || trimmed.length > 500) { await renderPrivateScreen(ctx, publicChatConfigurationPrompt(chat, pending.field, "use 1-500 characters."), new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)); return true; }
       warningText = trimmed;
     } else if (pending.field === "allowlist") {
       const entries = trimmed === "-" ? [] : [...new Set(trimmed.split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean))];
-      if (entries.length > 100 || entries.some((entry) => entry.length > 80)) { await ctx.reply("Use at most 100 allowlist terms, each up to 80 characters."); return true; }
+      if (entries.length > 100 || entries.some((entry) => entry.length > 80)) { await renderPrivateScreen(ctx, publicChatConfigurationPrompt(chat, pending.field, "use at most 100 terms, each up to 80 characters."), new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)); return true; }
       allowlist = entries;
     } else {
       const parsed = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
       const maximum = pending.field === "threshold" ? 10_000 : 1_440;
-      if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) { await ctx.reply(`Enter a whole number from 1 to ${maximum}.`); return true; }
+      if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) { await renderPrivateScreen(ctx, publicChatConfigurationPrompt(chat, pending.field, `enter a whole number from 1 to ${maximum}.`), new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)); return true; }
       if (pending.field === "cooldown") warningCooldownMinutes = parsed;
       if (pending.field === "threshold") warningMessageThreshold = parsed;
       if (pending.field === "lookback") lookbackMinutes = parsed;
     }
     db.updateManagedPublicChatConfig(chat.chat_id, { warningText, allowlist, warningCooldownMinutes, warningMessageThreshold, lookbackMinutes });
     pendingPublicChatConfiguration.delete(ctx.from.id);
-    await ctx.reply("Public chat moderation settings saved.");
+    await retirePrivateScreens(ctx);
     await showPublicChatSettings(ctx, chat.chat_id);
     return true;
   }
@@ -1939,6 +1962,7 @@ export function createBot(
         return;
       }
       if (action === "list") {
+        pendingPublicChatConfiguration.delete(ctx.from.id);
         await ctx.answerCallbackQuery();
         await showPublicChats(ctx);
         return;
@@ -1953,6 +1977,7 @@ export function createBot(
         return;
       }
       if (action === "open") {
+        pendingPublicChatConfiguration.delete(ctx.from.id);
         await ctx.answerCallbackQuery();
         await showPublicChatSettings(ctx, chatId);
         return;
@@ -1963,16 +1988,8 @@ export function createBot(
           await ctx.answerCallbackQuery({ text: "Unknown configuration field.", show_alert: true });
           return;
         }
-        pendingPublicChatConfiguration.set(ctx.from.id, { chatId, field: field as "warning" | "allowlist" | "cooldown" | "threshold" | "lookback" });
-        const prompts = {
-          warning: "Send the warning text (1-500 characters).",
-          allowlist: "Send comma-separated allowlist terms, or send a single dash to clear it.",
-          cooldown: "Send the warning cooldown in minutes (1-1440).",
-          threshold: "Send the ordinary-message threshold (1-10000).",
-          lookback: "Send the violation lookback in minutes (1-1440)."
-        } as const;
         await ctx.answerCallbackQuery();
-        await ctx.reply(prompts[field as keyof typeof prompts]);
+        await beginPublicChatConfiguration(ctx, managed, field as PublicChatConfigurationField);
         return;
       }
       if (action === "disable") {

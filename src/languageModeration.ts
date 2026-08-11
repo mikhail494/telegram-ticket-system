@@ -1,6 +1,7 @@
 
 import { normalizeTelegramDeliveryError } from "./deliveryDiagnostics.js";
 import { logger } from "./logger.js";
+import { francAll } from "franc-min";
 
 export const DEFAULT_MODERATION_WARNING = "Please use English in the main chat. Further violations may be reviewed by an authorized moderator under the current community policy.";
 
@@ -15,6 +16,11 @@ export interface LanguageModerationConfig {
 }
 
 export type LanguageClassification = "violation" | "ignored";
+export type ModerationLanguage = "english" | "non_english" | "uncertain";
+
+const MIN_LATIN_LANGUAGE_LETTERS = 24;
+const MIN_LATIN_LANGUAGE_WORDS = 5;
+const MIN_LANGUAGE_CONFIDENCE_GAP = 0.08;
 
 const scheduledCleanupJobs = new Set<number>();
 
@@ -28,16 +34,28 @@ export type ModerationCleanupScheduler = (
 export type ModerationTimerFactory = (callback: () => void, delayMs: number) => { unref?: () => void };
 
 export function classifyEnglishOnlyMessage(text: string, allowlist: readonly string[] = []): LanguageClassification {
+  return classifyModerationLanguage(text, allowlist) === "non_english" ? "violation" : "ignored";
+}
+
+export function classifyModerationLanguage(text: string, allowlist: readonly string[] = []): ModerationLanguage {
   const normalized = preprocessModerationText(text, allowlist);
-  if (!normalized) return "ignored";
+  if (!normalized) return "uncertain";
 
   const letters = normalized.match(/\p{L}/gu) ?? [];
   const cyrillic = normalized.match(/\p{Script=Cyrillic}/gu) ?? [];
   const nonLatin = normalized.match(/[\p{Script=Arabic}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu) ?? [];
-  if (letters.length < 5 || isKeyboardMash(normalized)) return "ignored";
-  if (cyrillic.length >= 5 && cyrillic.length / letters.length >= 0.55) return "violation";
-  if (nonLatin.length >= 5 && nonLatin.length / letters.length >= 0.55) return "violation";
-  return "ignored";
+  if (letters.length < 5 || isKeyboardMash(normalized)) return "uncertain";
+  if (cyrillic.length >= 5 && cyrillic.length / letters.length >= 0.55) return "non_english";
+  if (nonLatin.length >= 5 && nonLatin.length / letters.length >= 0.55) return "non_english";
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (letters.length < MIN_LATIN_LANGUAGE_LETTERS || words.length < MIN_LATIN_LANGUAGE_WORDS) return "uncertain";
+  const candidates = francAll(normalized, { minLength: MIN_LATIN_LANGUAGE_LETTERS });
+  const [language, score] = candidates[0] ?? ["und", 0];
+  if (language === "und") return "uncertain";
+  if (language === "eng") return "english";
+  const englishScore = candidates.find(([candidate]) => candidate === "eng")?.[1] ?? 0;
+  return score - englishScore >= MIN_LANGUAGE_CONFIDENCE_GAP ? "non_english" : "uncertain";
 }
 
 export function preprocessModerationText(text: string, allowlist: readonly string[] = []): string {

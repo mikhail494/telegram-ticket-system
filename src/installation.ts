@@ -184,7 +184,7 @@ export class InstallationService {
 
   saveOnboardingStage(userId: number, stage: OnboardingStage, state = "ACTIVE"): void { this.db.saveOnboardingSession(userId, stage, state); }
   getOnboardingSession(userId: number): OnboardingSessionRecord | null { return this.db.getOnboardingSession(userId) ?? null; }
-  setOnboardingPrimaryMessage(userId: number, chatId: number, messageId: number): void { this.db.setOnboardingPrimaryMessage(userId, chatId, messageId); }
+  setOnboardingPrimaryMessage(userId: number, chatId: number | null, messageId: number | null): void { this.db.setOnboardingPrimaryMessage(userId, chatId, messageId); }
   listTokenMetadata(): Array<{ kind: string; expiresAt: string }> { return this.db.listUnconsumedTokens().map((row) => ({ kind: row.kind, expiresAt: row.expires_at })); }
 
   private mayAssign(actorId: number, role: Exclude<TeamRole, "OWNER">): boolean {
