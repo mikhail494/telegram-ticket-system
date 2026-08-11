@@ -219,6 +219,11 @@ test("staff explicitly enables one-message test-ticket mode", async () => {
     harness.clearApiCalls();
     await harness.bot.handleUpdate(privateMessage(1, "Harmless test ticket", 11));
     assert.equal(harness.db.listTicketsForUser(1, TEST_STAFF_CHAT_ID).length, 1);
+    assert.equal(harness.db.getSetting("staff_test_ticket_mode:1"), "false");
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateMessage(1, "Normal staff text", 12));
+    assert.equal(harness.db.listTicketsForUser(1, TEST_STAFF_CHAT_ID).length, 1);
+    assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /Owner dashboard/);
   } finally { harness.cleanup(); }
 });
 

@@ -830,6 +830,13 @@ export function createBot(
     return sendFreshPrivateScreen(ctx, text, replyMarkup);
   }
 
+  function clearStaffTestTicketMode(userId: number | undefined): void {
+    if (userId === undefined) return;
+    if (db.getSetting(`staff_test_ticket_mode:${userId}`) === "true") {
+      db.setSetting(`staff_test_ticket_mode:${userId}`, "false");
+    }
+  }
+
   async function retireWorkspacePickerPrompt(userId: number | undefined): Promise<void> {
     if (userId === undefined) return;
     const prompt = workspacePickerPrompts.get(userId);
@@ -1377,14 +1384,14 @@ export function createBot(
       return;
     }
 
-    if (await enrollPrivateWorkspaceMember(ctx)) { await showDashboard(ctx, true); return; }
+    if (await enrollPrivateWorkspaceMember(ctx)) { clearStaffTestTicketMode(ctx.from?.id); await showDashboard(ctx, true); return; }
     if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet. Please try again later."); return; }
     await ctx.reply(START_TEXT);
   });
 
   bot.command("help", async (ctx) => {
     if (isPrivateChat(ctx)) {
-      if (await enrollPrivateWorkspaceMember(ctx)) await showDashboard(ctx);
+      if (await enrollPrivateWorkspaceMember(ctx)) { clearStaffTestTicketMode(ctx.from?.id); await showDashboard(ctx); }
       else await ctx.reply(installation.getState().setupState === "READY" ? USER_HELP_TEXT : "Support has not been configured yet.");
       return;
     }
@@ -1919,6 +1926,10 @@ export function createBot(
       return;
     }
 
+    if (isPrivateChat(ctx) && ctx.from && installation.getMember(ctx.from.id) && privateOperatorCallbackNamespaces.has(namespace ?? "") && data !== "dashboard:test-ticket") {
+      clearStaffTestTicketMode(ctx.from.id);
+    }
+
     if (namespace === "owner" && data === "owner:confirm-transfer") {
       if (!isPrivateChat(ctx) || !ctx.from || !db.hasPendingOwnerTransfer(ctx.from.id)) { await ctx.answerCallbackQuery({ text: "No pending owner transfer.", show_alert: true }); return; }
       if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
@@ -1967,7 +1978,11 @@ export function createBot(
       if (!isPrivateChat(ctx) || !ctx.from || !installation.getMember(ctx.from.id)) { await ctx.answerCallbackQuery({ text: "Staff access required.", show_alert: true }); return; }
       if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
       const action = data.split(":")[1]; await ctx.answerCallbackQuery();
-      if (action === "test-ticket") { db.setSetting(`staff_test_ticket_mode:${ctx.from.id}`, "true"); await ctx.reply("Test-ticket mode enabled for your next message. Send harmless test content now."); return; }
+      if (action === "test-ticket") {
+        db.setSetting(`staff_test_ticket_mode:${ctx.from.id}`, "true");
+        await refreshPrivateScreen(ctx, "Test-ticket mode enabled for your next message. Send harmless test content now.", new InlineKeyboard().text("Cancel", "dashboard:home"));
+        return;
+      }
       if (action === "status") { await showSystemStatus(ctx); return; }
       if (action === "workspace") {
         if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) return;
@@ -2472,7 +2487,7 @@ export function createBot(
       }
       await showDashboard(ctx); return;
     }
-    if (ctx.from && db.getSetting(`staff_test_ticket_mode:${ctx.from.id}`) === "true") db.setSetting(`staff_test_ticket_mode:${ctx.from.id}`, "false");
+    clearStaffTestTicketMode(ctx.from?.id);
     if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet. Please try again later."); return; }
     if (await replyIfBanned(db, ctx)) {
       return;

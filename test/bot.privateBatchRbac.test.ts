@@ -284,16 +284,32 @@ test("restart still renders a fresh dashboard when retiring the persisted batch 
   }
 });
 
-test("armed test-ticket mode does not consume /start", async () => {
+test("staff /start disarms test-ticket mode and retires its prompt", async () => {
   const { harness } = createReadyHarness({ role: "ADMIN", rbac: true });
 
   await harness.bot.handleUpdate(privateCallback(2, "dashboard:test-ticket", 70));
+  const testTicketPromptId = harness.findApiCalls("sendMessage").at(-1)?.responseMessageId;
+  assert.ok(testTicketPromptId);
   harness.clearApiCalls();
   await harness.bot.handleUpdate(privateCommand(2, "/start", 71));
 
   assert.equal(harness.db.listTicketsForUser(2, TEST_STAFF_CHAT_ID).length, 0);
-  assert.equal(harness.db.getSetting("staff_test_ticket_mode:2"), "true");
+  assert.equal(harness.db.getSetting("staff_test_ticket_mode:2"), "false");
+  assert.equal(harness.findApiCalls("deleteMessage")[0]?.payload.message_id, testTicketPromptId);
   assert.match(String(harness.findApiCalls("sendMessage").at(-1)?.payload.text), /ADMIN dashboard/);
+});
+
+test("staff navigation clears test-ticket mode before opening another operator screen", async () => {
+  const { harness } = createReadyHarness({ role: "ADMIN", rbac: true });
+
+  await harness.bot.handleUpdate(privateCallback(2, "dashboard:test-ticket", 75));
+  const promptId = harness.findApiCalls("sendMessage").at(-1)?.responseMessageId;
+  assert.ok(promptId);
+  harness.clearApiCalls();
+  await harness.bot.handleUpdate(privateCallback(2, "dashboard:public", promptId));
+
+  assert.equal(harness.db.getSetting("staff_test_ticket_mode:2"), "false");
+  assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /Public chats/);
 });
 
 test("batch help is vendor-neutral and returns to the pending workflow", async () => {
