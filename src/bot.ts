@@ -2409,13 +2409,9 @@ export function createBot(
 
     if (ctx.from && !installation.getMember(ctx.from.id)) await enrollPrivateWorkspaceMember(ctx);
 
-    if (ctx.from && installation.getMember(ctx.from.id) && getPendingPrivateBatchExport(ctx.from.id)) {
+    if (ctx.from && installation.getMember(ctx.from.id) && getPendingPrivateBatchExport(ctx.from.id) && isTicketAnswerPackageDocument(ctx.message)) {
       if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) return;
       const exportId = getPendingPrivateBatchExport(ctx.from.id)!;
-      if (!isTicketAnswerPackageDocument(ctx.message)) {
-        await showPrivateBatchWaiting(ctx, exportId, true, "That file is not an answer package for this workflow.");
-        return;
-      }
       const filename = ctx.message.document?.file_name ?? "";
       if (filename.toLowerCase() !== `ticket-answers_${exportId}.json`.toLowerCase()) {
         await showPrivateBatchWaiting(ctx, exportId, true, "This answer package belongs to a different export.");
