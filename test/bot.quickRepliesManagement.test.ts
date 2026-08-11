@@ -64,6 +64,19 @@ function currentScreenId(harness: BotHarness, userId: number): number {
   return messageId;
 }
 
+function exportIdFromCaption(harness: BotHarness): string {
+  const caption = String(harness.findApiCalls("sendDocument")[0]?.payload.caption);
+  const match = /^Export: (export_[a-f0-9]+)$/m.exec(caption);
+  if (!match) throw new Error("Missing private batch export ID.");
+  return match[1]!;
+}
+
+async function beginPendingPrivateBatch(harness: BotHarness, userId: number): Promise<string> {
+  harness.seedTicket();
+  await harness.bot.handleUpdate(privateCallback(userId, "batch-ui:export"));
+  return exportIdFromCaption(harness);
+}
+
 test("OWNER and ADMIN can open private Quick Replies management", async () => {
   for (const [role, userId] of [["OWNER", 1], ["ADMIN", 2]] as const) {
     const harness = createReadyHarness(role);
@@ -130,6 +143,48 @@ test("invalid input and Back leave no mutation or competing management prompt", 
 
   await harness.bot.handleUpdate(privateCallback(2, "quick:list", currentScreenId(harness, 2)));
   assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /^Quick replies/m);
+});
+
+test("pending Batch waits for files without hijacking Quick Reply or moderation editor text", async () => {
+  const harness = createReadyHarness("OWNER");
+  const exportId = await beginPendingPrivateBatch(harness, 1);
+
+  await harness.bot.handleUpdate(privateCallback(1, "dashboard:quick", currentScreenId(harness, 1)));
+  await harness.bot.handleUpdate(privateCallback(1, "quick:edit-name:ask_uid", currentScreenId(harness, 1)));
+  await harness.bot.handleUpdate(privateMessage(1, "Checking", 70));
+  assert.equal(harness.registry.findTemplate("ask_uid")?.title, "Checking");
+
+  await harness.bot.handleUpdate(privateCallback(1, "quick:edit-text:ask_uid", currentScreenId(harness, 1)));
+  await harness.bot.handleUpdate(privateMessage(1, "We are checking.", 71));
+  assert.equal(harness.registry.findTemplate("ask_uid")?.text, "We are checking.");
+
+  await harness.bot.handleUpdate(privateCallback(1, "quick:add", currentScreenId(harness, 1)));
+  await harness.bot.handleUpdate(privateCallback(1, "quick:add-category:status", currentScreenId(harness, 1)));
+  await harness.bot.handleUpdate(privateMessage(1, "Escalated", 72));
+  await harness.bot.handleUpdate(privateMessage(1, "We have escalated this request.", 73));
+  assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /New Quick reply/);
+  await harness.bot.handleUpdate(privateCallback(1, "quick:list", currentScreenId(harness, 1)));
+
+  const workspaceId = harness.db.getActiveWorkspace()!.id;
+  harness.db.upsertManagedPublicChat({ chatId: -100710, workspaceId, title: "Synthetic public chat", isForum: false });
+  await harness.bot.handleUpdate(privateCallback(1, "public:config-warning:-100710", currentScreenId(harness, 1)));
+  await harness.bot.handleUpdate(privateMessage(1, "Synthetic moderation warning.", 74));
+  assert.equal(harness.db.getManagedPublicChat(-100710)?.warning_text, "Synthetic moderation warning.");
+
+  assert.equal(harness.db.getSetting("private_batch_export:1"), exportId);
+  assert.equal(harness.findApiCalls("sendMessage").some((call) => String(call.payload.text).includes("That file is not an answer package")), false);
+});
+
+test("pending Batch ignores arbitrary private text but still leaves its export resumable", async () => {
+  const harness = createReadyHarness("OWNER");
+  const exportId = await beginPendingPrivateBatch(harness, 1);
+  harness.clearApiCalls();
+
+  await harness.bot.handleUpdate(privateMessage(1, "Checking", 80));
+
+  assert.equal(harness.db.getSetting("private_batch_export:1"), exportId);
+  assert.equal(harness.db.listTicketBatchAnswerItems("private_answers_1").length, 0);
+  assert.equal(harness.findApiCalls("sendMessage").some((call) => String(call.payload.text).includes("That file is not an answer package")), false);
 });
 
 test("Add persists only after preview confirmation and Delete requires confirmation", async () => {
