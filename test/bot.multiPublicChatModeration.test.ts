@@ -251,7 +251,7 @@ describe("multi-public-chat moderation", () => {
     assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /Connected: yes/);
   });
 
-  it("replaces the public-chat picker with one fresh settings screen after a shared chat", async () => {
+  it("reuses the visible keyboard-removal message as the public-chat settings screen after a shared chat", async () => {
     const { harness } = createHarness();
     setReachablePublicChat(harness, CHAT_A);
     await harness.bot.handleUpdate(privateCallback(OWNER_ID, "public:add", 100));
@@ -265,11 +265,32 @@ describe("multi-public-chat moderation", () => {
     const keyboardRemoval = harness.findApiCalls("sendMessage");
     assert.equal(keyboardRemoval.length, 1);
     assert.equal((keyboardRemoval[0]?.payload.reply_markup as { remove_keyboard?: boolean }).remove_keyboard, true);
+    assert.equal(keyboardRemoval[0]?.payload.text, "Updating...");
     assert.doesNotMatch(String(keyboardRemoval[0]?.payload.text), /Public chat saved/i);
     const settings = harness.findApiCalls("editMessageText");
     assert.equal(settings.length, 1);
+    assert.equal(settings[0]?.payload.message_id, keyboardRemoval[0]?.responseMessageId);
     assert.match(String(settings[0]?.payload.text), /Public chat settings/);
     assert.match(String(settings[0]?.payload.text), /Public chat saved\. Moderation remains disabled/);
+  });
+
+  it("retires a failed temporary keyboard-removal message before sending fresh public-chat settings", async () => {
+    const { harness } = createHarness();
+    setReachablePublicChat(harness, CHAT_A);
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, "public:add", 100));
+    harness.clearApiCalls();
+    harness.failNextApiCall("editMessageText");
+
+    await harness.bot.handleUpdate({ update_id: 2, message: { message_id: 2, date: 1, from: { id: OWNER_ID, is_bot: false, first_name: "Owner" }, chat: { id: OWNER_ID, type: "private", first_name: "Owner" }, chat_shared: { request_id: 1400, chat_id: CHAT_A, title: "Synthetic Public Chat", username: "synthetic_public" } } });
+
+    const sent = harness.findApiCalls("sendMessage");
+    const temporary = sent.find((call) => call.payload.text === "Updating...");
+    const settings = sent.find((call) => String(call.payload.text).includes("Public chat settings"));
+    assert.ok(temporary);
+    assert.ok(settings);
+    assert.ok(harness.findApiCalls("deleteMessage").some((call) => call.payload.message_id === temporary.responseMessageId));
+    assert.equal(harness.findApiCalls("editMessageText").length, 1);
+    assert.equal(sent.filter((call) => String(call.payload.text).includes("Public chat settings")).length, 1);
   });
 
   it("resolves public usernames and links while guiding private invite links back to the picker", async () => {
