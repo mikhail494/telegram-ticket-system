@@ -21,6 +21,59 @@ export type ModerationLanguage = "english" | "non_english" | "uncertain";
 const MIN_LATIN_LANGUAGE_LETTERS = 24;
 const MIN_LATIN_LANGUAGE_WORDS = 5;
 const MIN_LANGUAGE_CONFIDENCE_GAP = 0.08;
+const DISTINCTIVE_CHAT_SIGNAL_SCORE = 4;
+const CORROBORATED_CHAT_SIGNAL_SCORE = 4;
+
+const INDONESIAN_MALAY_CHAT_NORMALIZATIONS: Readonly<Record<string, readonly string[]>> = {
+  yg: ["yang"],
+  gk: ["tidak"],
+  ga: ["tidak"],
+  gak: ["tidak"],
+  gatau: ["tidak", "tahu"],
+  skarang: ["sekarang"],
+  udh: ["sudah"],
+  udah: ["sudah"],
+  klo: ["kalau"],
+  kalo: ["kalau"],
+  klian: ["kalian"],
+  bhs: ["bahasa"],
+  mlah: ["malah"],
+  bkin: ["bikin"],
+  gimna: ["gimana"],
+  gausah: ["tidak", "usah"],
+  yauda: ["yaudah"],
+  emng: ["emang"]
+};
+
+const INDONESIAN_MALAY_CHAT_SIGNAL_WEIGHTS: Readonly<Record<string, number>> = {
+  setuju: 4,
+  maksud: 4,
+  maksudnya: 4,
+  nunggu: 4,
+  emang: 4,
+  gimana: 4,
+  ngetik: 4,
+  apaan: 4,
+  kocak: 4,
+  cepu: 3,
+  tunggu: 3,
+  banyak: 2,
+  yang: 2,
+  mana: 2,
+  sekarang: 2,
+  sudah: 2,
+  kalau: 2,
+  kalian: 2,
+  bahasa: 2,
+  malah: 2,
+  bikin: 2,
+  yaudah: 2,
+  tidak: 1,
+  tahu: 1,
+  usah: 1,
+  lu: 1,
+  gw: 1
+};
 
 const scheduledCleanupJobs = new Set<number>();
 
@@ -49,13 +102,19 @@ export function classifyModerationLanguage(text: string, allowlist: readonly str
   if (nonLatin.length >= 5 && nonLatin.length / letters.length >= 0.55) return "non_english";
 
   const words = normalized.split(/\s+/).filter(Boolean);
-  if (letters.length < MIN_LATIN_LANGUAGE_LETTERS || words.length < MIN_LATIN_LANGUAGE_WORDS) return "uncertain";
-  const candidates = francAll(normalized, { minLength: MIN_LATIN_LANGUAGE_LETTERS });
-  const [language, score] = candidates[0] ?? ["und", 0];
-  if (language === "und") return "uncertain";
-  if (language === "eng") return "english";
-  const englishScore = candidates.find(([candidate]) => candidate === "eng")?.[1] ?? 0;
-  return score - englishScore >= MIN_LANGUAGE_CONFIDENCE_GAP ? "non_english" : "uncertain";
+  const normalizedChatTokens = normalizeIndonesianMalayChatTokens(words);
+  const normalizedChatText = normalizedChatTokens.join(" ");
+  if (letters.length >= MIN_LATIN_LANGUAGE_LETTERS && words.length >= MIN_LATIN_LANGUAGE_WORDS) {
+    const candidates = francAll(normalizedChatText, { minLength: MIN_LATIN_LANGUAGE_LETTERS });
+    const [language, score] = candidates[0] ?? ["und", 0];
+    if (language === "eng") return "english";
+    if (language !== "und") {
+      const englishScore = candidates.find(([candidate]) => candidate === "eng")?.[1] ?? 0;
+      if (score - englishScore >= MIN_LANGUAGE_CONFIDENCE_GAP) return "non_english";
+    }
+  }
+
+  return hasIndonesianMalayChatSignals(normalizedChatTokens) ? "non_english" : "uncertain";
 }
 
 export function preprocessModerationText(text: string, allowlist: readonly string[] = []): string {
@@ -237,6 +296,24 @@ function isKeyboardMash(value: string): boolean {
   if (!/[a-zа-яё]/i.test(compact)) return false;
   const vowels = (compact.match(/[aeiouyаеёиоуыэюя]/g) ?? []).length;
   return vowels / compact.length < 0.08;
+}
+
+function normalizeIndonesianMalayChatTokens(tokens: readonly string[]): string[] {
+  return tokens.flatMap((token) => INDONESIAN_MALAY_CHAT_NORMALIZATIONS[token.toLowerCase()] ?? [token.toLowerCase()]);
+}
+
+function hasIndonesianMalayChatSignals(tokens: readonly string[]): boolean {
+  const matchedSignals = new Map<string, number>();
+  for (const token of tokens) {
+    const weight = INDONESIAN_MALAY_CHAT_SIGNAL_WEIGHTS[token];
+    if (weight !== undefined) matchedSignals.set(token, weight);
+  }
+
+  const score = [...matchedSignals.values()].reduce((total, weight) => total + weight, 0);
+  // One distinctive chat word is sufficient; otherwise require corroborating whole-token signals.
+  return matchedSignals.size === 1
+    ? score >= DISTINCTIVE_CHAT_SIGNAL_SCORE
+    : score >= CORROBORATED_CHAT_SIGNAL_SCORE;
 }
 
 function escapeRegExp(value: string): string {
