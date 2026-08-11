@@ -23,7 +23,7 @@
   "dependencies": {
     "better-sqlite3": "^11.9.1",
     "dotenv": "^16.4.7",
-    "fflate": "^0.8.2",
+    "fflate": "^0.8.3",
     "franc-min": "^6.2.0",
     "grammy": "^1.35.0",
     "pino": "^9.6.0",
