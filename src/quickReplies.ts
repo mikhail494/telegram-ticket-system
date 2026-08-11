@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import type { SupportDatabase } from "./db.js";
 
 const SLUG_PATTERN = /^[a-z0-9_]+$/;
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
@@ -88,6 +90,17 @@ export interface QuickRepliesRegistry {
   findTemplate(templateId: string): QuickReplyTemplate | undefined;
 }
 
+export type QuickReplyDeleteResult = "DELETED" | "NOT_FOUND" | "LAST_TEMPLATE";
+
+export interface QuickRepliesManager {
+  listCategories(): readonly QuickReplyCategory[];
+  listTemplates(categoryId: string): readonly QuickReplyTemplate[];
+  findTemplate(templateId: string): QuickReplyTemplate | undefined;
+  updateTemplate(templateId: string, input: { title?: string; text?: string }): QuickReplyTemplate | undefined;
+  createTemplate(input: { categoryId: string; title: string; text: string }): QuickReplyTemplate;
+  deleteTemplate(templateId: string): QuickReplyDeleteResult;
+}
+
 export class QuickRepliesConfigError extends Error {
   public constructor(configPath: string, problem: string, correction: string) {
     super(`Quick Replies configuration error in ${configPath}: ${problem}. Correct ${correction}.`);
@@ -134,6 +147,83 @@ export function loadQuickRepliesRegistry(
     listTemplates: (categoryId: string) => categoryById.get(categoryId)?.templates ?? EMPTY_TEMPLATES,
     findTemplate: (templateId: string) => templateById.get(templateId)
   });
+}
+
+export function createPersistentQuickRepliesRegistry(
+  db: SupportDatabase,
+  defaults: QuickRepliesRegistry
+): QuickRepliesRegistry & QuickRepliesManager {
+  const manager = createQuickRepliesManager(db, defaults);
+
+  return Object.freeze({
+    listCategories: manager.listCategories,
+    findCategory: (categoryId: string) => manager.listCategories().find((category) => category.id === categoryId),
+    listTemplates: manager.listTemplates,
+    findTemplate: manager.findTemplate,
+    updateTemplate: manager.updateTemplate,
+    createTemplate: manager.createTemplate,
+    deleteTemplate: manager.deleteTemplate
+  });
+}
+
+export function createQuickRepliesManager(
+  db: SupportDatabase,
+  defaults: QuickRepliesRegistry
+): QuickRepliesManager {
+  db.seedQuickReplies(defaults.listCategories());
+
+  const listCategories = (): readonly QuickReplyCategory[] => Object.freeze(
+    db.listQuickReplyCategories().map((category) => Object.freeze({
+      id: category.id,
+      title: category.title,
+      templates: Object.freeze(db.listQuickReplyTemplates(category.id).map(toQuickReplyTemplate))
+    }))
+  );
+  const listTemplates = (categoryId: string): readonly QuickReplyTemplate[] => Object.freeze(
+    db.listQuickReplyTemplates(categoryId).map(toQuickReplyTemplate)
+  );
+  const findTemplate = (templateId: string): QuickReplyTemplate | undefined => {
+    const template = db.getQuickReplyTemplate(templateId);
+    return template ? toQuickReplyTemplate(template) : undefined;
+  };
+
+  return Object.freeze({
+    listCategories,
+    listTemplates,
+    findTemplate,
+    updateTemplate: (templateId: string, input: { title?: string; text?: string }) => {
+      const existing = db.getQuickReplyTemplate(templateId);
+      if (!existing) return undefined;
+      const validated = templateSchema.parse({
+        id: existing.id,
+        title: input.title ?? existing.title,
+        text: input.text ?? existing.text
+      });
+      const updated = db.updateQuickReplyTemplate(templateId, {
+        title: validated.title,
+        text: validated.text
+      });
+      return updated ? toQuickReplyTemplate(updated) : undefined;
+    },
+    createTemplate: (input: { categoryId: string; title: string; text: string }) => {
+      const validated = templateSchema.parse({
+        id: `custom_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+        title: input.title,
+        text: input.text
+      });
+      return toQuickReplyTemplate(db.createQuickReplyTemplate({
+        id: validated.id,
+        categoryId: input.categoryId,
+        title: validated.title,
+        text: validated.text
+      }));
+    },
+    deleteTemplate: (templateId: string) => db.deleteQuickReplyTemplate(templateId)
+  });
+}
+
+function toQuickReplyTemplate(template: { id: string; title: string; text: string }): QuickReplyTemplate {
+  return Object.freeze({ id: template.id, title: template.title, text: template.text });
 }
 
 function parseConfigFile(configPath: string): ValidatedQuickRepliesConfig {

@@ -3,13 +3,14 @@ import { SupportDatabase } from "./db.js";
 import { createBot, sendStaffOnboardingIfNeeded, setBotCommands } from "./bot.js";
 import { logger } from "./logger.js";
 import { archiveClosedTicketsPendingUpload, initializeSupportLogsTopic } from "./archive.js";
-import { loadQuickRepliesRegistry } from "./quickReplies.js";
+import { createPersistentQuickRepliesRegistry, loadQuickRepliesRegistry } from "./quickReplies.js";
 import { processModerationRecovery } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
 import { InstallationService } from "./installation.js";
 import { runWorkspaceStartup } from "./startup.js";
 
-const quickRepliesRegistry = loadQuickRepliesRegistry();
+const db = new SupportDatabase(config.databaseUrl);
+const quickRepliesRegistry = createPersistentQuickRepliesRegistry(db, loadQuickRepliesRegistry());
 const quickReplyCategories = quickRepliesRegistry.listCategories();
 
 logger.info(
@@ -20,7 +21,6 @@ logger.info(
   "Quick Replies loaded successfully"
 );
 
-const db = new SupportDatabase(config.databaseUrl);
 const installationService = new InstallationService(db);
 if (hostConfig.staffChatId !== null) installationService.adoptLegacyInstallation(hostConfig.staffChatId);
 setRuntimeStaffChatId(installationService.getStaffChatId());

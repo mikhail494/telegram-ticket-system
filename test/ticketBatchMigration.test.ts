@@ -12,7 +12,7 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-it("upgrades a v1.2.1 ticket batch schema through migration 21 without changing legacy exports", async () => {
+it("upgrades a v1.2.1 ticket batch schema through migration 22 without changing legacy exports", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "telegram-ticket-batch-migration-"));
   temporaryDirectories.push(directory);
   const databasePath = path.join(directory, "support.db");
@@ -62,7 +62,7 @@ it("upgrades a v1.2.1 ticket batch schema through migration 21 without changing 
 
     const itemColumns = inspected.prepare("PRAGMA table_info(ticket_batch_answer_items)").all() as Array<{ name: string }>;
     const ticketColumns = inspected.prepare("PRAGMA table_info(tickets)").all() as Array<{ name: string }>;
-    assert.deepEqual(migrationIds.map((row) => row.id), Array.from({ length: 21 }, (_, index) => index + 1));
+    assert.deepEqual(migrationIds.map((row) => row.id), Array.from({ length: 22 }, (_, index) => index + 1));
     assert.ok(inspected.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'installation_state'").get());
     assert.ok(inspected.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_members'").get());
     assert.deepEqual(exportColumns.map((column) => column.name).filter((name) => name.startsWith("delivery_") || name === "delivered_at" || name === "last_error"), ["delivery_state", "delivery_message_id", "delivered_at", "last_error"]);

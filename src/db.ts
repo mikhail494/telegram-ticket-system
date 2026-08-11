@@ -333,6 +333,24 @@ export interface EntityNotificationPublication {
   last_error: string | null;
 }
 
+export interface QuickReplyCategoryRecord {
+  id: string;
+  title: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface QuickReplyTemplateRecord {
+  id: string;
+  category_id: string;
+  title: string;
+  text: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
 interface TableColumnInfo {
   name: string;
 }
@@ -1481,6 +1499,61 @@ export class SupportDatabase {
       .run(key, value, now());
   }
 
+  seedQuickReplies(categories: ReadonlyArray<{ id: string; title: string; templates: ReadonlyArray<{ id: string; title: string; text: string }> }>): void {
+    if (this.getSetting("quick_replies:seeded") === "true") return;
+    const seed = this.db.transaction(() => {
+      const timestamp = now();
+      const insertCategory = this.db.prepare(`INSERT OR IGNORE INTO quick_reply_categories (id, title, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`);
+      const insertTemplate = this.db.prepare(`INSERT OR IGNORE INTO quick_reply_templates (id, category_id, title, text, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      for (const [categoryOrder, category] of categories.entries()) {
+        insertCategory.run(category.id, category.title, categoryOrder, timestamp, timestamp);
+        for (const [templateOrder, template] of category.templates.entries()) {
+          insertTemplate.run(template.id, category.id, template.title, template.text, templateOrder, timestamp, timestamp);
+        }
+      }
+      this.db.prepare(`INSERT INTO settings (key, value, updated_at) VALUES ('quick_replies:seeded', 'true', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`).run(timestamp);
+    });
+    seed();
+  }
+
+  listQuickReplyCategories(): QuickReplyCategoryRecord[] {
+    return this.db.prepare(`SELECT id, title, sort_order, created_at, updated_at FROM quick_reply_categories ORDER BY sort_order, id`).all() as QuickReplyCategoryRecord[];
+  }
+
+  listQuickReplyTemplates(categoryId: string): QuickReplyTemplateRecord[] {
+    return this.db.prepare(`SELECT id, category_id, title, text, sort_order, created_at, updated_at FROM quick_reply_templates WHERE category_id = ? ORDER BY sort_order, id`).all(categoryId) as QuickReplyTemplateRecord[];
+  }
+
+  getQuickReplyTemplate(templateId: string): QuickReplyTemplateRecord | undefined {
+    return this.db.prepare(`SELECT id, category_id, title, text, sort_order, created_at, updated_at FROM quick_reply_templates WHERE id = ?`).get(templateId) as QuickReplyTemplateRecord | undefined;
+  }
+
+  updateQuickReplyTemplate(templateId: string, input: { title: string; text: string }): QuickReplyTemplateRecord | undefined {
+    const timestamp = now();
+    const updated = this.db.prepare(`UPDATE quick_reply_templates SET title = ?, text = ?, updated_at = ? WHERE id = ?`).run(input.title, input.text, timestamp, templateId);
+    return updated.changes === 1 ? this.getQuickReplyTemplate(templateId) : undefined;
+  }
+
+  createQuickReplyTemplate(input: { id: string; categoryId: string; title: string; text: string }): QuickReplyTemplateRecord {
+    const category = this.db.prepare(`SELECT COALESCE(MAX(sort_order), -1) AS maximum FROM quick_reply_templates WHERE category_id = ?`).get(input.categoryId) as { maximum: number };
+    const timestamp = now();
+    this.db.prepare(`INSERT INTO quick_reply_templates (id, category_id, title, text, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(input.id, input.categoryId, input.title, input.text, category.maximum + 1, timestamp, timestamp);
+    return this.getQuickReplyTemplate(input.id)!;
+  }
+
+  deleteQuickReplyTemplate(templateId: string): "DELETED" | "NOT_FOUND" | "LAST_TEMPLATE" {
+    const remove = this.db.transaction(() => {
+      const existing = this.getQuickReplyTemplate(templateId);
+      if (!existing) return "NOT_FOUND" as const;
+      const count = this.db.prepare(`SELECT COUNT(*) AS count FROM quick_reply_templates WHERE category_id = ?`).get(existing.category_id) as { count: number };
+      if (count.count <= 1) return "LAST_TEMPLATE" as const;
+      this.db.prepare(`DELETE FROM quick_reply_templates WHERE id = ?`).run(templateId);
+      return "DELETED" as const;
+    });
+    return remove();
+  }
+
   getInstallationState(): InstallationStateRecord {
     return this.db.prepare("SELECT setup_state, authorization_mode, active_workspace_id, updated_at FROM installation_state WHERE id = 1")
       .get() as InstallationStateRecord;
@@ -2467,6 +2540,33 @@ export class SupportDatabase {
               .run(legacy.enabled ? 1 : 0, legacy.warningText, JSON.stringify(legacy.allowlist), legacy.warningCooldownMinutes,
                 legacy.warningMessageThreshold, legacy.lookbackMinutes, now(), target);
           }
+        }
+      },
+      {
+        id: 22,
+        name: "add_persistent_quick_replies",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS quick_reply_categories (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 32),
+              sort_order INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS quick_reply_templates (
+              id TEXT PRIMARY KEY,
+              category_id TEXT NOT NULL,
+              title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 32),
+              text TEXT NOT NULL CHECK(length(trim(text)) BETWEEN 1 AND 3500),
+              sort_order INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(category_id) REFERENCES quick_reply_categories(id) ON DELETE RESTRICT
+            );
+            CREATE INDEX IF NOT EXISTS idx_quick_reply_templates_category_order
+              ON quick_reply_templates(category_id, sort_order, id);
+          `);
         }
       }
     ];

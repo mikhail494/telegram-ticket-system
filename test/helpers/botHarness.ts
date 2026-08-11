@@ -17,7 +17,7 @@ process.env.STAFF_CHAT_ID = "-100900";
 process.env.DATABASE_URL = ":memory:";
 process.env.LOG_LEVEL = "silent";
 
-const [{ SupportDatabase }, { loadQuickRepliesRegistry }, { createBot }] = await Promise.all([
+const [{ SupportDatabase }, { createPersistentQuickRepliesRegistry, loadQuickRepliesRegistry }, { createBot }] = await Promise.all([
   import("../../src/db.js"),
   import("../../src/quickReplies.js"),
   import("../../src/bot.js")
@@ -152,7 +152,7 @@ export interface BotHarness {
 
 export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
   const db = new SupportDatabase(options.databasePath ?? ":memory:");
-  const registry = options.quickRepliesRegistry ?? loadQuickRepliesRegistry();
+  const registry = createPersistentQuickRepliesRegistry(db, options.quickRepliesRegistry ?? loadQuickRepliesRegistry());
   let downloadResponse: { body: string | Uint8Array; status: number } = { body: "{}", status: 200 };
   const fileDownloads = new Map<string, { body: string | Uint8Array; status: number; filePath: string }>();
   const scheduledModerationCleanupJobIds: number[] = [];
