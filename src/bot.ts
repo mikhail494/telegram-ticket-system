@@ -37,7 +37,7 @@ import {
   truncate
 } from "./format.js";
 import { logger } from "./logger.js";
-import type { QuickRepliesRegistry } from "./quickReplies.js";
+import { createQuickRepliesManager, type QuickRepliesRegistry } from "./quickReplies.js";
 import {
   TicketBatchValidationError,
   buildAnswerPackagePreview,
@@ -194,6 +194,13 @@ interface QuickRepliesCallbackTarget {
   messageThreadId: number;
 }
 
+type PendingQuickReplyInput =
+  | { kind: "EDIT_TITLE"; templateId: string }
+  | { kind: "EDIT_TEXT"; templateId: string }
+  | { kind: "ADD_TITLE"; categoryId: string }
+  | { kind: "ADD_TEXT"; categoryId: string; title: string }
+  | { kind: "ADD_PREVIEW"; categoryId: string; title: string; text: string };
+
 type DeliverAndRecordStaffTextReply = (
   ticket: TicketWithUser,
   text: string,
@@ -251,7 +258,9 @@ export function createBot(
     chatId: number;
     field: "warning" | "allowlist" | "cooldown" | "threshold" | "lookback";
   }>();
-  const privateOperatorCallbackNamespaces = new Set(["owner", "setup", "workspace", "dashboard", "batch-ui", "public", "team", "rbac"]);
+  const pendingQuickReplyInput = new Map<number, PendingQuickReplyInput>();
+  const quickRepliesManager = createQuickRepliesManager(db, quickRepliesRegistry);
+  const privateOperatorCallbackNamespaces = new Set(["owner", "setup", "workspace", "dashboard", "batch-ui", "public", "quick", "team", "rbac"]);
   const pendingWorkspaceSelection = new Map<number, "SETUP" | "RECONFIGURE">();
   const privateUiMessages = new Map<number, { chatId: number; messageId: number }>();
   const workspacePickerPrompts = new Map<number, { chatId: number; messageId: number }>();
@@ -877,7 +886,7 @@ export function createBot(
     if (role === "OWNER" || role === "ADMIN") {
       if (installation.getState().setupState !== "READY") keyboard.text("Continue setup", "setup:resume").row();
       const pendingExport = getPendingPrivateBatchExport(userId);
-      keyboard.text("Staff workspace", "dashboard:workspace").row().text("Public chats", "dashboard:public").text("Team", "dashboard:team").row().text("Moderation", "dashboard:moderation").row().text(pendingExport ? "Continue batch" : "Export tickets", pendingExport ? "batch-ui:continue" : "batch-ui:export").text("Batch status", "batch-ui:recent").row().text("System status", "dashboard:status").row();
+      keyboard.text("Staff workspace", "dashboard:workspace").row().text("Public chats", "dashboard:public").text("Team", "dashboard:team").row().text("Moderation", "dashboard:moderation").text("Quick replies", "dashboard:quick").row().text(pendingExport ? "Continue batch" : "Export tickets", pendingExport ? "batch-ui:continue" : "batch-ui:export").text("Batch status", "batch-ui:recent").row().text("System status", "dashboard:status").row();
     }
     return keyboard.text("Open test ticket as user", "dashboard:test-ticket");
   }
@@ -927,6 +936,108 @@ export function createBot(
     const unhealthy = chats.filter((chat) => chat.permission_status === "UNHEALTHY").length;
     const text = ["Moderation", "", `Managed public chats: ${chats.length}`, `Enabled: ${enabled}`, `Needs attention: ${unhealthy}`, "", "Manage each public chat's moderation settings and permission health."].join("\n");
     await renderPrivateScreen(ctx, text, new InlineKeyboard().text("Manage public chats", "dashboard:public").row().text("Back", "dashboard:home"));
+  }
+
+  function quickReplyManagementKeyboard(): InlineKeyboard {
+    const keyboard = new InlineKeyboard();
+    for (const category of quickRepliesManager.listCategories()) {
+      for (const template of category.templates) {
+        keyboard.text(template.title, `quick:view:${template.id}`).row();
+      }
+    }
+    return keyboard.text("Add reply", "quick:add").row().text("Back", "dashboard:home");
+  }
+
+  async function showQuickRepliesManagement(ctx: Context): Promise<void> {
+    const categories = quickRepliesManager.listCategories();
+    const count = categories.reduce((total, category) => total + category.templates.length, 0);
+    await renderPrivateScreen(ctx, ["Quick replies", "", `${count} replies configured.`].join("\n"), quickReplyManagementKeyboard());
+  }
+
+  async function showQuickReplyDetail(ctx: Context, templateId: string, notice?: string): Promise<void> {
+    const template = quickRepliesManager.findTemplate(templateId);
+    if (!template) {
+      await renderPrivateScreen(ctx, "This Quick Reply is no longer available.", new InlineKeyboard().text("Back", "quick:list"));
+      return;
+    }
+    await renderPrivateScreen(ctx, ["Quick reply", "", `Name: ${template.title}`, "", "Text:", template.text, ...(notice ? ["", notice] : [])].join("\n"), new InlineKeyboard()
+      .text("Edit name", `quick:edit-name:${template.id}`)
+      .text("Edit text", `quick:edit-text:${template.id}`)
+      .row()
+      .text("Delete", `quick:delete:${template.id}`)
+      .row()
+      .text("Back", "quick:list"));
+  }
+
+  function quickReplyInputPrompt(pending: Exclude<PendingQuickReplyInput, { kind: "ADD_PREVIEW" }>, error?: string): string {
+    const prompt = pending.kind === "EDIT_TITLE" ? "Send the new reply name (1-32 characters)."
+      : pending.kind === "EDIT_TEXT" ? "Send the new reply text (1-3500 characters)."
+        : pending.kind === "ADD_TITLE" ? "Send the new reply name (1-32 characters)."
+          : "Send the reply text (1-3500 characters).";
+    return ["Quick replies", "", ...(error ? [`Invalid: ${error}`, ""] : []), prompt].join("\n");
+  }
+
+  async function beginQuickReplyInput(ctx: Context, pending: Exclude<PendingQuickReplyInput, { kind: "ADD_PREVIEW" }>): Promise<void> {
+    if (!ctx.from) return;
+    pendingQuickReplyInput.set(ctx.from.id, pending);
+    await retirePrivateScreens(ctx);
+    await sendFreshPrivateScreen(ctx, quickReplyInputPrompt(pending), new InlineKeyboard().text("Back", "quick:list"));
+  }
+
+  async function showQuickReplyCategoryPicker(ctx: Context): Promise<void> {
+    const categories = quickRepliesManager.listCategories();
+    const keyboard = new InlineKeyboard();
+    for (const category of categories) keyboard.text(category.title, `quick:add-category:${category.id}`).row();
+    keyboard.text("Back", "quick:list");
+    await renderPrivateScreen(ctx, "Add Quick Reply\n\nChoose a category.", keyboard);
+  }
+
+  async function savePendingQuickReplyInput(ctx: Context, text: string): Promise<boolean> {
+    if (!ctx.from) return false;
+    const pending = pendingQuickReplyInput.get(ctx.from.id);
+    if (!pending) return false;
+    if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) return true;
+    const trimmed = text.trim();
+    const invalid = (maximum: number): string | undefined => !trimmed ? "value cannot be empty." : trimmed.length > maximum ? `use at most ${maximum} characters.` : undefined;
+    if (pending.kind === "EDIT_TITLE" || pending.kind === "ADD_TITLE") {
+      const error = invalid(32);
+      if (error) {
+        await renderPrivateScreen(ctx, quickReplyInputPrompt(pending, error), new InlineKeyboard().text("Back", "quick:list"));
+        return true;
+      }
+      if (pending.kind === "EDIT_TITLE") {
+        const updated = quickRepliesManager.updateTemplate(pending.templateId, { title: trimmed });
+        pendingQuickReplyInput.delete(ctx.from.id);
+        await retirePrivateScreens(ctx);
+        await showQuickReplyDetail(ctx, updated?.id ?? pending.templateId);
+      } else {
+        const next: PendingQuickReplyInput = { kind: "ADD_TEXT", categoryId: pending.categoryId, title: trimmed };
+        pendingQuickReplyInput.set(ctx.from.id, next);
+        await renderPrivateScreen(ctx, quickReplyInputPrompt(next), new InlineKeyboard().text("Back", "quick:list"));
+      }
+      return true;
+    }
+    if (pending.kind === "EDIT_TEXT" || pending.kind === "ADD_TEXT") {
+      const error = invalid(3500);
+      if (error) {
+        await renderPrivateScreen(ctx, quickReplyInputPrompt(pending, error), new InlineKeyboard().text("Back", "quick:list"));
+        return true;
+      }
+      if (pending.kind === "EDIT_TEXT") {
+        const updated = quickRepliesManager.updateTemplate(pending.templateId, { text: trimmed });
+        pendingQuickReplyInput.delete(ctx.from.id);
+        await retirePrivateScreens(ctx);
+        await showQuickReplyDetail(ctx, updated?.id ?? pending.templateId);
+      } else {
+        const next: PendingQuickReplyInput = { kind: "ADD_PREVIEW", categoryId: pending.categoryId, title: pending.title, text: trimmed };
+        pendingQuickReplyInput.set(ctx.from.id, next);
+        await renderPrivateScreen(ctx, ["New Quick reply", "", `Name: ${next.title}`, "", "Text:", next.text].join("\n"), new InlineKeyboard()
+          .text("Save", "quick:add-save")
+          .text("Cancel", "quick:list"));
+      }
+      return true;
+    }
+    return true;
   }
 
   async function showStaffWorkspaceSettings(ctx: Context, notice?: string, refresh = false): Promise<void> {
@@ -1877,6 +1988,12 @@ export function createBot(
         await showPublicChats(ctx);
         return;
       }
+      if (action === "quick") {
+        if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) return;
+        pendingQuickReplyInput.delete(ctx.from.id);
+        await showQuickRepliesManagement(ctx);
+        return;
+      }
       if (action === "batch") {
         if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) return;
         const exportId = getPendingPrivateBatchExport(ctx.from.id);
@@ -2040,6 +2157,105 @@ export function createBot(
         return;
       }
       await ctx.answerCallbackQuery({ text: "Unknown public chat action.", show_alert: true });
+      return;
+    }
+
+    if (namespace === "quick") {
+      if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) {
+        await ctx.answerCallbackQuery({ text: "Quick Replies management requires OWNER or ADMIN.", show_alert: true });
+        return;
+      }
+      if (!ctx.from) return;
+      const [, action, value] = data.split(":");
+      if (action === "list") {
+        pendingQuickReplyInput.delete(ctx.from.id);
+        await ctx.answerCallbackQuery();
+        await showQuickRepliesManagement(ctx);
+        return;
+      }
+      if (action === "view" && value) {
+        pendingQuickReplyInput.delete(ctx.from.id);
+        await ctx.answerCallbackQuery();
+        await showQuickReplyDetail(ctx, value);
+        return;
+      }
+      if (action === "edit-name" && value) {
+        if (!quickRepliesManager.findTemplate(value)) {
+          await ctx.answerCallbackQuery({ text: "This Quick Reply is no longer available.", show_alert: true });
+          return;
+        }
+        await ctx.answerCallbackQuery();
+        await beginQuickReplyInput(ctx, { kind: "EDIT_TITLE", templateId: value });
+        return;
+      }
+      if (action === "edit-text" && value) {
+        if (!quickRepliesManager.findTemplate(value)) {
+          await ctx.answerCallbackQuery({ text: "This Quick Reply is no longer available.", show_alert: true });
+          return;
+        }
+        await ctx.answerCallbackQuery();
+        await beginQuickReplyInput(ctx, { kind: "EDIT_TEXT", templateId: value });
+        return;
+      }
+      if (action === "add") {
+        await ctx.answerCallbackQuery();
+        const categories = quickRepliesManager.listCategories();
+        if (categories.length === 1) await beginQuickReplyInput(ctx, { kind: "ADD_TITLE", categoryId: categories[0]!.id });
+        else await showQuickReplyCategoryPicker(ctx);
+        return;
+      }
+      if (action === "add-category" && value) {
+        if (!quickRepliesManager.listCategories().some((category) => category.id === value)) {
+          await ctx.answerCallbackQuery({ text: "This category is no longer available.", show_alert: true });
+          return;
+        }
+        await ctx.answerCallbackQuery();
+        await beginQuickReplyInput(ctx, { kind: "ADD_TITLE", categoryId: value });
+        return;
+      }
+      if (action === "add-save") {
+        const pending = pendingQuickReplyInput.get(ctx.from.id);
+        if (!pending || pending.kind !== "ADD_PREVIEW") {
+          await ctx.answerCallbackQuery({ text: "This reply draft is no longer active.", show_alert: true });
+          return;
+        }
+        const template = quickRepliesManager.createTemplate(pending);
+        pendingQuickReplyInput.delete(ctx.from.id);
+        await ctx.answerCallbackQuery({ text: "Quick Reply saved." });
+        await retirePrivateScreens(ctx);
+        await showQuickReplyDetail(ctx, template.id);
+        return;
+      }
+      if (action === "delete" && value) {
+        const template = quickRepliesManager.findTemplate(value);
+        if (!template) {
+          await ctx.answerCallbackQuery({ text: "This Quick Reply is no longer available.", show_alert: true });
+          return;
+        }
+        await ctx.answerCallbackQuery();
+        await renderPrivateScreen(ctx, `Delete \"${template.title}\"?`, new InlineKeyboard()
+          .text("Delete", `quick:confirm-delete:${template.id}`)
+          .row()
+          .text("Cancel", `quick:view:${template.id}`));
+        return;
+      }
+      if (action === "confirm-delete" && value) {
+        const result = quickRepliesManager.deleteTemplate(value);
+        if (result === "LAST_TEMPLATE") {
+          await ctx.answerCallbackQuery({ text: "Keep at least one reply in this category.", show_alert: true });
+          await showQuickReplyDetail(ctx, value);
+          return;
+        }
+        if (result === "NOT_FOUND") {
+          await ctx.answerCallbackQuery({ text: "This Quick Reply is no longer available.", show_alert: true });
+          await showQuickRepliesManagement(ctx);
+          return;
+        }
+        await ctx.answerCallbackQuery({ text: "Quick Reply deleted." });
+        await showQuickRepliesManagement(ctx);
+        return;
+      }
+      await ctx.answerCallbackQuery({ text: "Unknown Quick Replies action.", show_alert: true });
       return;
     }
 
@@ -2211,6 +2427,7 @@ export function createBot(
 
     if (ctx.from && installation.getMember(ctx.from.id) && db.getSetting(`staff_test_ticket_mode:${ctx.from.id}`) !== "true") {
       const text = ctx.message && "text" in ctx.message ? ctx.message.text : "";
+      if (text && await savePendingQuickReplyInput(ctx, text)) return;
       if (text && await savePendingPublicChatConfiguration(ctx, text)) return;
       if (pendingPublicChatSelection.has(ctx.from.id) && text) {
         if (isPrivateInviteLink(text)) {

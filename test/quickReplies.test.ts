@@ -6,8 +6,10 @@ import { join } from "node:path";
 import {
   QUICK_REPLIES_CONFIG_PATH,
   QuickRepliesConfigError,
+  createPersistentQuickRepliesRegistry,
   loadQuickRepliesRegistry
 } from "../src/quickReplies.js";
+import { SupportDatabase } from "../src/db.js";
 
 const temporaryDirectories = new Set<string>();
 
@@ -296,5 +298,40 @@ describe("Quick Replies configuration loader", () => {
     );
     assert.equal(registry.findCategory("request_details")?.title, "Request details");
     assert.equal(registry.findTemplate("ask_uid")?.text, "Please send your AgentOn UID so we can check your account.");
+  });
+
+  it("seeds configuration once and preserves edits, deletions, and additions after restart", () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-quick-replies-db-"));
+    temporaryDirectories.add(directory);
+    const databasePath = join(directory, "support.sqlite");
+    const defaults = loadQuickRepliesRegistry();
+    const first = new SupportDatabase(databasePath);
+    const managed = createPersistentQuickRepliesRegistry(first, defaults);
+    managed.updateTemplate("ask_uid", { title: "Account reference", text: "Please share your account reference." });
+    assert.equal(managed.deleteTemplate("ask_wallet"), "DELETED");
+    const added = managed.createTemplate({
+      categoryId: "status",
+      title: "Custom status",
+      text: "This is a custom persisted response."
+    });
+    first.close();
+
+    const restarted = new SupportDatabase(databasePath);
+    const persisted = createPersistentQuickRepliesRegistry(restarted, defaults);
+    assert.equal(restarted.getSetting("quick_replies:seeded"), "true");
+    assert.equal(persisted.findTemplate("ask_uid")?.title, "Account reference");
+    assert.equal(persisted.findTemplate("ask_uid")?.text, "Please share your account reference.");
+    assert.equal(persisted.findTemplate("ask_wallet"), undefined);
+    assert.deepEqual(persisted.findTemplate(added.id), added);
+    assert.equal(persisted.listCategories().reduce((count, category) => count + category.templates.length, 0), 5);
+    restarted.close();
+
+    const restartedAgain = new SupportDatabase(databasePath);
+    const persistedAgain = createPersistentQuickRepliesRegistry(restartedAgain, defaults);
+    assert.equal(restartedAgain.getSetting("quick_replies:seeded"), "true");
+    assert.equal(persistedAgain.findTemplate("ask_wallet"), undefined);
+    assert.deepEqual(persistedAgain.findTemplate(added.id), added);
+    assert.equal(persistedAgain.listCategories().reduce((count, category) => count + category.templates.length, 0), 5);
+    restartedAgain.close();
   });
 });
