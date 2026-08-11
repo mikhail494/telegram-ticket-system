@@ -26,6 +26,7 @@ outputs/
 # Logs and temporary files
 *.log
 npm-debug.log*
+coverage/
 *.tmp
 *.temp
 
