@@ -40,6 +40,13 @@ function privateMessage(userId: number, text: string, messageId = 20): Update {
   };
 }
 
+function privateCommand(userId: number, text: string, messageId = 20): Update {
+  const update = privateMessage(userId, text, messageId);
+  if (!update.message) throw new Error("Expected private message update.");
+  update.message.entities = [{ type: "bot_command", offset: 0, length: text.split(/\s+/, 1)[0]!.length }];
+  return update;
+}
+
 function privateCallback(userId: number, data: string, messageId = 10): Update {
   return {
     update_id: messageId,
@@ -173,6 +180,21 @@ test("pending Batch waits for files without hijacking Quick Reply or moderation 
 
   assert.equal(harness.db.getSetting("private_batch_export:1"), exportId);
   assert.equal(harness.findApiCalls("sendMessage").some((call) => String(call.payload.text).includes("That file is not an answer package")), false);
+});
+
+test("staff navigation disarms test-ticket mode before Quick Reply title input", async () => {
+  const harness = createReadyHarness("OWNER");
+
+  await harness.bot.handleUpdate(privateCallback(1, "dashboard:test-ticket", 75));
+  await harness.bot.handleUpdate(privateCommand(1, "/start", 76));
+  assert.equal(harness.db.getSetting("staff_test_ticket_mode:1"), "false");
+
+  await harness.bot.handleUpdate(privateCallback(1, "dashboard:quick", currentScreenId(harness, 1)));
+  await harness.bot.handleUpdate(privateCallback(1, "quick:edit-name:ask_uid", currentScreenId(harness, 1)));
+  await harness.bot.handleUpdate(privateMessage(1, "Checking", 77));
+
+  assert.equal(harness.registry.findTemplate("ask_uid")?.title, "Checking");
+  assert.equal(harness.db.listTicketsForUser(1, TEST_STAFF_CHAT_ID).length, 0);
 });
 
 test("pending Batch ignores arbitrary private text but still leaves its export resumable", async () => {
