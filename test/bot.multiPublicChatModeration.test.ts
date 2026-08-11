@@ -75,6 +75,10 @@ function privateText(userId: number, text: string, messageId = 1): Update {
   return { update_id: messageId, message: { message_id: messageId, date: 1, from: { id: userId, is_bot: false, first_name: "Synthetic Staff" }, chat: { id: userId, type: "private", first_name: "Synthetic Staff" }, text } };
 }
 
+function privateStart(userId: number, messageId = 1): Update {
+  return { update_id: messageId, message: { message_id: messageId, date: 1, from: { id: userId, is_bot: false, first_name: "Synthetic Staff" }, chat: { id: userId, type: "private", first_name: "Synthetic Staff" }, text: "/start", entities: [{ type: "bot_command", offset: 0, length: 6 }] } };
+}
+
 function healthyBotMember(): ApiMockSuccess {
   return { ok: true, result: { status: "administrator", user: TEST_BOT_IDENTITY, can_manage_chat: true, can_delete_messages: true, can_restrict_members: true } };
 }
@@ -223,6 +227,16 @@ describe("multi-public-chat moderation", () => {
     assert.equal(picker.keyboard?.[0]?.[0]?.request_chat?.chat_is_forum, undefined);
   });
 
+  it("retires the active private screen before opening the public-chat picker", async () => {
+    const { harness } = createHarness();
+
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, "public:add", 100));
+
+    assert.equal(harness.findApiCalls("deleteMessage")[0]?.payload.message_id, 100);
+    assert.equal(harness.countApiCalls("sendMessage"), 1);
+    assert.match(String(harness.findApiCalls("sendMessage")[0]?.payload.text), /Choose a public supergroup/);
+  });
+
   it("adds a native-picker chat disabled and records advisory reaction health", async () => {
     const { harness } = createHarness();
     setReachablePublicChat(harness, CHAT_A);
@@ -234,7 +248,28 @@ describe("multi-public-chat moderation", () => {
     assert.equal(chat?.permission_status, "HEALTHY");
     assert.equal(chat?.reaction_status, "UNAVAILABLE");
     assert.equal(chat?.connection_status, "CONNECTED");
-    assert.match(String(harness.findApiCalls("sendMessage").at(-1)?.payload.text), /Connected: yes/);
+    assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /Connected: yes/);
+  });
+
+  it("replaces the public-chat picker with one fresh settings screen after a shared chat", async () => {
+    const { harness } = createHarness();
+    setReachablePublicChat(harness, CHAT_A);
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, "public:add", 100));
+    const pickerPromptId = harness.findApiCalls("sendMessage")[0]!.responseMessageId!;
+    harness.clearApiCalls();
+
+    await harness.bot.handleUpdate({ update_id: 2, message: { message_id: 2, date: 1, from: { id: OWNER_ID, is_bot: false, first_name: "Owner" }, chat: { id: OWNER_ID, type: "private", first_name: "Owner" }, chat_shared: { request_id: 1400, chat_id: CHAT_A, title: "Synthetic Public Chat", username: "synthetic_public" } } });
+
+    assert.ok(harness.db.getManagedPublicChat(CHAT_A));
+    assert.equal(harness.findApiCalls("deleteMessage")[0]?.payload.message_id, pickerPromptId);
+    const keyboardRemoval = harness.findApiCalls("sendMessage");
+    assert.equal(keyboardRemoval.length, 1);
+    assert.equal((keyboardRemoval[0]?.payload.reply_markup as { remove_keyboard?: boolean }).remove_keyboard, true);
+    assert.doesNotMatch(String(keyboardRemoval[0]?.payload.text), /Public chat saved/i);
+    const settings = harness.findApiCalls("editMessageText");
+    assert.equal(settings.length, 1);
+    assert.match(String(settings[0]?.payload.text), /Public chat settings/);
+    assert.match(String(settings[0]?.payload.text), /Public chat saved\. Moderation remains disabled/);
   });
 
   it("resolves public usernames and links while guiding private invite links back to the picker", async () => {
@@ -244,17 +279,18 @@ describe("multi-public-chat moderation", () => {
     await harness.bot.handleUpdate(privateText(OWNER_ID, "@synthetic_public", 2));
     assert.ok(harness.db.getManagedPublicChat(CHAT_A));
     assert.ok(harness.findApiCalls("getChat").some((call) => call.payload.chat_id === "@synthetic_public"));
-    const currentMessageId = harness.findApiCalls("sendMessage").at(-1)?.responseMessageId!;
+    let currentMessageId = Number(harness.findApiCalls("editMessageText").at(-1)?.payload.message_id);
 
     harness.db.deactivateManagedPublicChat(CHAT_A);
     await harness.bot.handleUpdate(privateCallback(OWNER_ID, "public:add", currentMessageId));
     await harness.bot.handleUpdate(privateText(OWNER_ID, "https://t.me/synthetic_public", 4));
     assert.ok(harness.db.getManagedPublicChat(CHAT_A));
+    currentMessageId = Number(harness.findApiCalls("editMessageText").at(-1)?.payload.message_id);
 
     harness.db.deactivateManagedPublicChat(CHAT_A);
     await harness.bot.handleUpdate(privateCallback(OWNER_ID, "public:add", currentMessageId));
     await harness.bot.handleUpdate(privateText(OWNER_ID, "https://t.me/+syntheticInvite", 6));
-    const guidance = harness.findApiCalls("sendMessage").at(-1);
+    const guidance = harness.findApiCalls("editMessageText").at(-1);
     assert.match(String(guidance?.payload.text), /cannot inspect/i);
     assert.doesNotMatch(String(guidance?.payload.text), /enter.*chat id/i);
   });
@@ -270,6 +306,54 @@ describe("multi-public-chat moderation", () => {
     assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.connection_status, "UNREACHABLE");
     assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.permission_status, "UNHEALTHY");
     assert.equal(harness.db.getManagedPublicChat(CHAT_B)?.moderation_enabled, 1);
+  });
+
+  it("keeps permission checks and enablement inside the managed settings screen", async () => {
+    const { harness } = createHarness();
+    manage(harness, CHAT_A, false);
+    setReachablePublicChat(harness, CHAT_A);
+
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:check:${CHAT_A}`, 100));
+    assert.equal(harness.countApiCalls("sendMessage"), 0);
+    assert.equal(harness.countApiCalls("editMessageText"), 1);
+    assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /Permissions checked: healthy\./);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:enable:${CHAT_A}`, 100));
+    assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.moderation_enabled, 1);
+    assert.equal(harness.countApiCalls("sendMessage"), 0);
+    assert.equal(harness.countApiCalls("editMessageText"), 1);
+    assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /Moderation enabled\. Permissions are healthy\./);
+  });
+
+  it("cancels a public-chat picker without leaving its keyboard or pending selection active", async () => {
+    const { harness } = createHarness();
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, "public:add", 100));
+    const pickerPromptId = harness.findApiCalls("sendMessage")[0]!.responseMessageId!;
+    harness.clearApiCalls();
+
+    await harness.bot.handleUpdate(privateText(OWNER_ID, "Cancel public chat selection", 2));
+
+    assert.equal(harness.findApiCalls("deleteMessage")[0]?.payload.message_id, pickerPromptId);
+    assert.equal((harness.findApiCalls("sendMessage")[0]?.payload.reply_markup as { remove_keyboard?: boolean }).remove_keyboard, true);
+    assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /Public chats/);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateText(OWNER_ID, "@synthetic_public", 3));
+    assert.equal(harness.countApiCalls("getChat"), 0);
+  });
+
+  it("cleans a pending public-chat picker before rendering a fresh dashboard for /start", async () => {
+    const { harness } = createHarness();
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, "public:add", 100));
+    const pickerPromptId = harness.findApiCalls("sendMessage")[0]!.responseMessageId!;
+    harness.clearApiCalls();
+
+    await harness.bot.handleUpdate(privateStart(OWNER_ID, 2));
+
+    assert.equal(harness.findApiCalls("deleteMessage")[0]?.payload.message_id, pickerPromptId);
+    assert.equal((harness.findApiCalls("sendMessage")[0]?.payload.reply_markup as { remove_keyboard?: boolean }).remove_keyboard, true);
+    assert.match(String(harness.findApiCalls("sendMessage").at(-1)?.payload.text), /Owner dashboard/);
   });
 
   it("prevents enablement until core permissions recover, regardless of reactions", async () => {

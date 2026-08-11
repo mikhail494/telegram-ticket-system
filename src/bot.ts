@@ -264,6 +264,7 @@ export function createBot(
   const pendingWorkspaceSelection = new Map<number, "SETUP" | "RECONFIGURE">();
   const privateUiMessages = new Map<number, { chatId: number; messageId: number }>();
   const workspacePickerPrompts = new Map<number, { chatId: number; messageId: number }>();
+  const publicChatPickerPrompts = new Map<number, { chatId: number; messageId: number }>();
   let ticketBatchRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   let ticketBatchRecoveryTimerAt: number | undefined;
   let ticketBatchRecoveryQueue: Promise<void> = Promise.resolve();
@@ -849,6 +850,28 @@ export function createBot(
     }
   }
 
+  async function retirePublicChatPickerPrompt(userId: number | undefined): Promise<void> {
+    if (userId === undefined) return;
+    const prompt = publicChatPickerPrompts.get(userId);
+    publicChatPickerPrompts.delete(userId);
+    if (!prompt) return;
+    try {
+      await bot.api.deleteMessage(prompt.chatId, prompt.messageId);
+    } catch {
+      logger.warn({ userId }, "Could not delete public chat picker prompt");
+    }
+  }
+
+  async function clearPublicChatPicker(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+    const hadPendingSelection = pendingPublicChatSelection.delete(ctx.from.id);
+    const hadPrompt = publicChatPickerPrompts.has(ctx.from.id);
+    await retirePublicChatPickerPrompt(ctx.from.id);
+    if (!hadPendingSelection && !hadPrompt) return;
+    const sent = await ctx.reply("\u2063", { reply_markup: { remove_keyboard: true } });
+    rememberPrivateScreen(ctx, { chatId: sent.chat.id, messageId: sent.message_id });
+  }
+
   function dashboardText(userId: number): string {
     const member = installation.getMember(userId);
     const counts = db.getInstallationOperationalCounts();
@@ -1144,7 +1167,7 @@ export function createBot(
     return "unknown";
   }
 
-  async function showPublicChats(ctx: Context): Promise<void> {
+  async function showPublicChats(ctx: Context, notice?: string): Promise<void> {
     const chats = db.listManagedPublicChats();
     const keyboard = new InlineKeyboard().text("Add public chat", "public:add").row();
     for (const chat of chats) {
@@ -1162,10 +1185,10 @@ export function createBot(
         `Reactions: ${chat.reaction_status.toLowerCase()} (advisory)`
       ])
       : ["", "No public chats are configured."];
-    await renderPrivateScreen(ctx, ["Public chats", ...lines].join("\n"), keyboard);
+    await renderPrivateScreen(ctx, ["Public chats", ...(notice ? ["", notice] : []), ...lines].join("\n"), keyboard);
   }
 
-  async function showPublicChatSettings(ctx: Context, chatId: number): Promise<void> {
+  async function showPublicChatSettings(ctx: Context, chatId: number, notice?: string): Promise<void> {
     const chat = db.getManagedPublicChat(chatId);
     if (!chat) { await renderPrivateScreen(ctx, "This public chat is not managed.", new InlineKeyboard().text("Back", "public:list")); return; }
     const keyboard = new InlineKeyboard()
@@ -1186,6 +1209,7 @@ export function createBot(
     await renderPrivateScreen(ctx, [
       "Public chat settings",
       "",
+      ...(notice ? [notice, ""] : []),
       `Title: ${chat.title ?? "unknown"}`,
       `Username: ${chat.username ? `@${chat.username}` : "not available"}`,
       `Chat ID: ${chat.chat_id}`,
@@ -1224,6 +1248,9 @@ export function createBot(
 
   async function sendPublicChatPicker(ctx: Context): Promise<void> {
     if (!ctx.from) return;
+    await retirePrivateScreens(ctx);
+    pendingPublicChatSelection.delete(ctx.from.id);
+    await retirePublicChatPickerPrompt(ctx.from.id);
     pendingPublicChatSelection.add(ctx.from.id);
     const rights = {
       is_anonymous: false,
@@ -1250,14 +1277,19 @@ export function createBot(
       request_photo: false,
       bot_administrator_rights: rights,
       user_administrator_rights: rights
-    }).resized().oneTime();
-    await ctx.reply("Choose a public supergroup. You may also paste its public @username or t.me link.", { reply_markup: keyboard });
+    }).text("Cancel public chat selection").resized().oneTime();
+    const prompt = await ctx.reply("Choose a public supergroup. You may also paste its public @username or t.me link.", { reply_markup: keyboard });
+    publicChatPickerPrompts.set(ctx.from.id, { chatId: prompt.chat.id, messageId: prompt.message_id });
   }
 
   async function inspectAndSavePublicChat(ctx: Context, chatId: number, shared?: { title?: string; username?: string }): Promise<void> {
     if (!ctx.from || !bot.botInfo) return;
     const workspace = installation.getActiveWorkspace();
-    if (!workspace) { await ctx.reply("Configure the staff workspace first."); return; }
+    if (!workspace) {
+      await clearPublicChatPicker(ctx);
+      await showPublicChats(ctx, "Configure the staff workspace first.");
+      return;
+    }
     const result = await validatePublicModerationChat(ctx.api, chatId, bot.botInfo.id);
     db.upsertManagedPublicChat({
       chatId: result.chatId,
@@ -1275,9 +1307,11 @@ export function createBot(
       username: result.username ?? shared?.username,
       isForum: result.isForum
     });
-    pendingPublicChatSelection.delete(ctx.from.id);
-    await ctx.reply(`Public chat saved. Moderation remains disabled until enabled explicitly.\n${formatPublicChatPermissionChecklist(result)}`);
-    await showPublicChatSettings(ctx, result.chatId);
+    await clearPublicChatPicker(ctx);
+    const notice = result.valid
+      ? "Public chat saved. Moderation remains disabled until enabled explicitly."
+      : `Public chat saved, but moderation needs attention:\n${formatPublicChatPermissionChecklist(result)}`;
+    await showPublicChatSettings(ctx, result.chatId, notice);
   }
 
   async function savePendingPublicChatConfiguration(ctx: Context, text: string): Promise<boolean> {
@@ -1384,6 +1418,7 @@ export function createBot(
       return;
     }
 
+    if (ctx.from && installation.getMember(ctx.from.id)) await clearPublicChatPicker(ctx);
     if (await enrollPrivateWorkspaceMember(ctx)) { clearStaffTestTicketMode(ctx.from?.id); await showDashboard(ctx, true); return; }
     if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet. Please try again later."); return; }
     await ctx.reply(START_TEXT);
@@ -2162,12 +2197,17 @@ export function createBot(
             text: action === "enable" && result.valid ? "Moderation enabled." : result.valid ? "Permissions are healthy." : "Required permissions are missing.",
             show_alert: !result.valid
           });
-          await ctx.reply(formatPublicChatPermissionChecklist(result));
-          await showPublicChatSettings(ctx, chatId);
+          const notice = action === "enable" && result.valid
+            ? "Moderation enabled. Permissions are healthy."
+            : result.valid
+              ? "Permissions checked: healthy."
+              : `Permissions need attention:\n${formatPublicChatPermissionChecklist(result)}`;
+          await showPublicChatSettings(ctx, chatId, notice);
         } catch (error) {
           db.recordManagedPublicChatUnreachable(chatId);
           logger.warn({ chatId, err: error }, "Could not validate managed public chat permissions");
           await ctx.answerCallbackQuery({ text: "The public chat could not be inspected.", show_alert: true });
+          await showPublicChatSettings(ctx, chatId, "The public chat could not be inspected. Check the bot membership and permissions, then try again.");
         }
         return;
       }
@@ -2373,7 +2413,8 @@ export function createBot(
         await inspectAndSavePublicChat(ctx, shared.chat_id, { title: shared.title, username: shared.username });
       } catch (error) {
         logger.warn({ chatId: shared.chat_id, err: error }, "Could not add selected public chat");
-        await ctx.reply("The selected public chat could not be inspected. Add the bot as an administrator, then retry.");
+        await clearPublicChatPicker(ctx);
+        await showPublicChats(ctx, "The selected public chat could not be inspected. Add the bot as an administrator, then retry.");
       }
       return;
     }
@@ -2441,8 +2482,14 @@ export function createBot(
       if (text && await savePendingQuickReplyInput(ctx, text)) return;
       if (text && await savePendingPublicChatConfiguration(ctx, text)) return;
       if (pendingPublicChatSelection.has(ctx.from.id) && text) {
+        if (text === "Cancel public chat selection") {
+          await clearPublicChatPicker(ctx);
+          await showPublicChats(ctx, "Public chat selection cancelled.");
+          return;
+        }
         if (isPrivateInviteLink(text)) {
-          await ctx.reply("The Bot API cannot inspect an inaccessible private invite link. Add the bot to the group, then use the Telegram public-chat picker. You do not need a numeric chat ID.");
+          await clearPublicChatPicker(ctx);
+          await showPublicChats(ctx, "The Bot API cannot inspect an inaccessible private invite link. Add the bot to the group, then use the Telegram public-chat picker. You do not need a numeric chat ID.");
           return;
         }
         const reference = parsePublicSupergroupReference(text);
@@ -2452,7 +2499,8 @@ export function createBot(
             await inspectAndSavePublicChat(ctx, chat.id);
           } catch (error) {
             logger.warn({ err: error }, "Could not resolve public chat reference");
-            await ctx.reply("That public supergroup could not be validated. Check its public username and the bot permissions, or use the Telegram picker.");
+            await clearPublicChatPicker(ctx);
+            await showPublicChats(ctx, "That public supergroup could not be validated. Check its public username and the bot permissions, or use the Telegram picker.");
           }
           return;
         }
