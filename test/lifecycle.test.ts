@@ -137,3 +137,19 @@ test("normal polling completion drains resources without stopping an already-end
   assert.equal(stops, 0);
   assert.equal(closes, 1);
 });
+
+test("lifecycle keeps readiness in shutdown before closing the operational listener", async () => {
+  const events: string[] = [];
+  const lifecycle = new ApplicationLifecycle({
+    stopPolling: () => undefined,
+    pollingCompletion: () => null,
+    backgroundTasks: new BackgroundTaskRegistry(),
+    closeDatabase: () => events.push("db-close"),
+    closeOperationalServer: async () => { events.push("server-close"); }
+  });
+  const shutdown = lifecycle.shutdown();
+  assert.equal(lifecycle.getState(), "SHUTTING_DOWN");
+  await shutdown;
+  assert.deepEqual(events, ["db-close", "server-close"]);
+  assert.equal(lifecycle.getState(), "STOPPED");
+});

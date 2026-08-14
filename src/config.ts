@@ -12,7 +12,10 @@ const hostSchema = z.object({
   BACKUP_ENABLED: z.string().trim().toLowerCase().pipe(z.enum(["true", "false", "1", "0"])).default("true"),
   BACKUP_DIR: z.string().trim().transform((value) => value || undefined).optional(),
   BACKUP_INTERVAL_HOURS: z.coerce.number().int().min(1).max(8760).default(24),
-  BACKUP_RETENTION_COUNT: z.coerce.number().int().min(1).max(365).default(14)
+  BACKUP_RETENTION_COUNT: z.coerce.number().int().min(1).max(365).default(14),
+  OPS_HTTP_ENABLED: z.string().trim().toLowerCase().pipe(z.enum(["true", "false", "1", "0"])).default("false"),
+  OPS_HTTP_HOST: z.string().trim().min(1, "OPS_HTTP_HOST must not be empty").default("127.0.0.1"),
+  OPS_HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(3000)
 });
 
 export interface HostConfig {
@@ -25,6 +28,9 @@ export interface HostConfig {
   backupDir: string | null;
   backupIntervalHours: number;
   backupRetentionCount: number;
+  opsHttpEnabled: boolean;
+  opsHttpHost: string;
+  opsHttpPort: number;
 }
 
 export function loadHostConfig(options: { env?: NodeJS.ProcessEnv; envFile?: string | false } = {}): HostConfig {
@@ -47,7 +53,10 @@ export function loadHostConfig(options: { env?: NodeJS.ProcessEnv; envFile?: str
     backupEnabled: parsed.data.BACKUP_ENABLED === "true" || parsed.data.BACKUP_ENABLED === "1",
     backupDir: parsed.data.BACKUP_DIR || null,
     backupIntervalHours: parsed.data.BACKUP_INTERVAL_HOURS,
-    backupRetentionCount: parsed.data.BACKUP_RETENTION_COUNT
+    backupRetentionCount: parsed.data.BACKUP_RETENTION_COUNT,
+    opsHttpEnabled: parsed.data.OPS_HTTP_ENABLED === "true" || parsed.data.OPS_HTTP_ENABLED === "1",
+    opsHttpHost: parsed.data.OPS_HTTP_HOST,
+    opsHttpPort: parsed.data.OPS_HTTP_PORT
   };
 }
 
@@ -63,6 +72,9 @@ export const config = {
   backupDir: hostConfig.backupDir,
   backupIntervalHours: hostConfig.backupIntervalHours,
   backupRetentionCount: hostConfig.backupRetentionCount,
+  opsHttpEnabled: hostConfig.opsHttpEnabled,
+  opsHttpHost: hostConfig.opsHttpHost,
+  opsHttpPort: hostConfig.opsHttpPort,
   get staffChatId(): number {
     if (runtimeStaffChatId === null) throw new Error("Staff workspace is not configured yet.");
     return runtimeStaffChatId;

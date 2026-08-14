@@ -51,6 +51,10 @@ npm run dev
 
 Explicit process environment variables take precedence over `.env`; existing `.env` deployments remain compatible. For owner recovery, run `npm run owner:recover` locally. The current OWNER remains active until the transfer is explicitly confirmed in the private bot UI.
 
+## Operations
+
+Native and PM2 deployments keep the operational HTTP listener disabled by default. When explicitly enabled, it binds to `127.0.0.1:3000` and exposes `/healthz`, `/readyz`, and `/metrics`; see [docs/OPERATIONS.md](docs/OPERATIONS.md) for safe network exposure guidance. The Docker image enables these endpoints, runs as the non-root `node` user, and stores the SQLite database and local backups under `/data`; persist that volume for durable deployments.
+
 ## Ticket Workflow
 
 The configured staff workspace must be a Telegram supergroup with Topics enabled. `STAFF_CHAT_ID` remains an optional legacy import value.

@@ -439,6 +439,11 @@ export class SupportDatabase {
     this.db.close();
   }
 
+  ping(): boolean {
+    this.db.prepare("SELECT 1").get();
+    return true;
+  }
+
   backupTo(destination: string): Promise<Database.BackupMetadata> {
     return this.db.backup(destination);
   }

@@ -1,5 +1,29 @@
 # Operations
 
+## Operational HTTP endpoints
+
+Native and PM2 deployments leave the operational listener disabled by default. Enable it explicitly when a local reverse proxy or monitoring agent needs probes:
+
+```env
+OPS_HTTP_ENABLED=true
+OPS_HTTP_HOST=127.0.0.1
+OPS_HTTP_PORT=3000
+```
+
+`GET /healthz` returns `200` while the process is alive. `GET /readyz` returns `200` only after Telegram polling has started and a lightweight SQLite `SELECT 1` succeeds; setup-required installations can still be ready. During graceful shutdown readiness becomes `503` before SQLite closes. `GET /metrics` provides only low-cardinality process and SQLite readiness gauges.
+
+```bash
+curl http://127.0.0.1:3000/healthz
+curl http://127.0.0.1:3000/readyz
+curl http://127.0.0.1:3000/metrics
+```
+
+These endpoints have no authentication. Keep the native listener on loopback by default and do not expose `/metrics` directly to the public internet without network controls or an appropriate reverse-proxy policy.
+
+## Docker runtime
+
+The Docker image enables the operational listener on `0.0.0.0:3000`, runs as the non-root `node` user, and defaults `DATABASE_URL` to `file:/data/support.db`. Docker declares `/data` as a volume, so durable deployments must mount or otherwise persist `/data`; otherwise the database and its local backups disappear with an ephemeral container. The image healthcheck uses `/readyz`. `EXPOSE 3000` does not publish a host port by itself.
+
 ## SQLite backups
 
 The bot creates verified SQLite online backups by default every 24 hours and keeps the newest 14. `BACKUP_DIR` overrides the default directory; otherwise it is `backups` beside the configured SQLite database. Set `BACKUP_ENABLED=false` to disable scheduled backups. `BACKUP_DIR=` intentionally selects the default directory. Use `npm run db:backup` for an on-demand verified backup and `npm run db:restore:verify -- <backup-path>` to validate a backup without touching the live database.
