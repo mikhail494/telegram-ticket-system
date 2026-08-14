@@ -34,7 +34,7 @@ export interface ApplicationLifecycleDependencies {
   backgroundTasks: BackgroundTaskTracker;
   stopAndDrainBackups?(): Promise<void>;
   closeDatabase(): void;
-  onDrainFailure?(stage: "polling" | "background" | "backup", error: unknown): void;
+  onDrainFailure?(stage: "polling" | "background" | "backup" | "database", error: unknown): void;
 }
 
 export class ApplicationLifecycle {
@@ -49,21 +49,31 @@ export class ApplicationLifecycle {
   }
 
   shutdown(): Promise<void> {
+    return this.finish(true);
+  }
+
+  completeAfterPolling(): Promise<void> {
+    return this.finish(false);
+  }
+
+  private finish(stopPolling: boolean): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
-    this.shutdownPromise = this.shutdownInternal();
+    this.shutdownPromise = this.finishInternal(stopPolling);
     return this.shutdownPromise;
   }
 
-  private async shutdownInternal(): Promise<void> {
+  private async finishInternal(stopPolling: boolean): Promise<void> {
     this.state = "SHUTTING_DOWN";
     this.dependencies.backgroundTasks.stopAccepting();
     this.dependencies.stopBackgroundWork?.();
     const backupDrain = this.dependencies.stopAndDrainBackups?.();
     const polling = this.dependencies.pollingCompletion();
-    try {
-      this.dependencies.stopPolling();
-    } catch (error) {
-      this.dependencies.onDrainFailure?.("polling", error);
+    if (stopPolling) {
+      try {
+        this.dependencies.stopPolling();
+      } catch (error) {
+        this.dependencies.onDrainFailure?.("polling", error);
+      }
     }
     await this.drain("polling", async () => { if (polling) await polling; });
     await this.drain("background", () => this.dependencies.backgroundTasks.drain());
@@ -87,6 +97,18 @@ export class ApplicationLifecycle {
   private closeDatabase(): void {
     if (this.closed) return;
     this.closed = true;
-    this.dependencies.closeDatabase();
+    try {
+      this.dependencies.closeDatabase();
+    } catch (error) {
+      this.dependencies.onDrainFailure?.("database", error);
+    }
   }
+}
+
+export async function awaitApplicationCompletion(
+  polling: Promise<void>,
+  lifecycle: ApplicationLifecycle
+): Promise<void> {
+  await polling;
+  await lifecycle.completeAfterPolling();
 }

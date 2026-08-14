@@ -15,6 +15,7 @@ export interface BackupOptions {
   enabled: boolean;
   rename?: typeof rename;
   remove?: typeof rm;
+  removeTemporary?: typeof rm;
 }
 
 export interface BackupResult {
@@ -24,6 +25,7 @@ export interface BackupResult {
   sha256: string;
   retentionDeleted: number;
   retentionFailed: number;
+  tempCleanupFailed: number;
 }
 
 export interface RestoreVerificationResult {
@@ -75,11 +77,13 @@ export class BackupService {
   private readonly directory: string;
   private readonly move: typeof rename;
   private readonly remove: typeof rm;
+  private readonly removeTemporary: typeof rm;
 
   constructor(private readonly database: SupportDatabase, private readonly options: BackupOptions, private readonly now = () => new Date()) {
     this.directory = backupDirectory(database, options.directory);
     this.move = options.rename ?? rename;
     this.remove = options.remove ?? rm;
+    this.removeTemporary = options.removeTemporary ?? rm;
   }
 
   async createBackup(): Promise<BackupResult> {
@@ -122,13 +126,13 @@ export class BackupService {
       let retention: Pick<BackupResult, "retentionDeleted" | "retentionFailed">;
       try { retention = await this.applyRetention(); }
       catch { retention = { retentionDeleted: 0, retentionFailed: 1 }; }
-      await Promise.all([
-        rm(temporary, { force: true }),
-        rm(temporaryMetadata, { force: true }),
-        rm(`${temporary}-wal`, { force: true }),
-        rm(`${temporary}-shm`, { force: true })
+      const tempCleanupFailed = await this.cleanupTemporaryArtifacts([
+        temporary,
+        temporaryMetadata,
+        `${temporary}-wal`,
+        `${temporary}-shm`
       ]);
-      return { path: finalPath, basename, size, sha256: digest, ...retention };
+      return { path: finalPath, basename, size, sha256: digest, ...retention, tempCleanupFailed };
     } catch (error) {
       await Promise.allSettled([
         this.remove(temporary, { force: true }),
@@ -140,6 +144,11 @@ export class BackupService {
       ]);
       throw error;
     }
+  }
+
+  private async cleanupTemporaryArtifacts(paths: string[]): Promise<number> {
+    const cleanup = await Promise.allSettled(paths.map((file) => this.removeTemporary(file, { force: true })));
+    return cleanup.filter((result) => result.status === "rejected").length;
   }
 
   private async applyRetention(): Promise<Pick<BackupResult, "retentionDeleted" | "retentionFailed">> {

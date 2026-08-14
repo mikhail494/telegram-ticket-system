@@ -9,7 +9,7 @@ import type { EntityNotificationProviderRegistry } from "./entityNotifications.j
 import { InstallationService } from "./installation.js";
 import { runWorkspaceStartup } from "./startup.js";
 import { createAutomaticBackupScheduler } from "./backups.js";
-import { ApplicationLifecycle, BackgroundTaskRegistry } from "./lifecycle.js";
+import { ApplicationLifecycle, awaitApplicationCompletion, BackgroundTaskRegistry } from "./lifecycle.js";
 
 const db = new SupportDatabase(config.databaseUrl);
 const quickRepliesRegistry = createPersistentQuickRepliesRegistry(db, loadQuickRepliesRegistry());
@@ -34,7 +34,11 @@ const backupScheduler = createAutomaticBackupScheduler(
   db,
   backupOptions,
   (error) => logger.warn({ err: error }, "Automatic SQLite backups are unavailable; support bot startup will continue"),
-  (result) => logger.info({ backup: result.basename, size: result.size, sha256: result.sha256, retentionDeleted: result.retentionDeleted, retentionFailed: result.retentionFailed }, "Automatic SQLite backup completed")
+  (result) => {
+    const details = { backup: result.basename, size: result.size, sha256: result.sha256, retentionDeleted: result.retentionDeleted, retentionFailed: result.retentionFailed, tempCleanupFailed: result.tempCleanupFailed };
+    if (result.tempCleanupFailed) logger.warn(details, "Automatic SQLite backup completed with temporary cleanup failures");
+    else logger.info(details, "Automatic SQLite backup completed");
+  }
 );
 let polling: Promise<void> | null = null;
 const lifecycle = new ApplicationLifecycle({
@@ -84,7 +88,7 @@ async function main(): Promise<void> {
 
   const shutdown = (signal: NodeJS.Signals) => {
     logger.info({ signal }, "Stopping bot");
-    void lifecycle.shutdown();
+    return lifecycle.shutdown();
   };
 
   process.once("SIGINT", shutdown);
@@ -96,7 +100,7 @@ async function main(): Promise<void> {
       logger.info({ username: botInfo.username }, "Telegram support bot started");
     }
   });
-  await polling;
+  await awaitApplicationCompletion(polling, lifecycle);
 }
 
 main().catch(async (error) => {
