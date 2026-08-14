@@ -5,6 +5,7 @@ import { strFromU8, unzipSync } from "fflate";
 import {
   TicketBatchValidationError,
   buildAnswerPackagePreview,
+  buildAnswerPackageInstructions,
   buildTicketBatchPreviewPages,
   buildTicketBatchExportSnapshot,
   cleanupTicketBatchZip,
@@ -300,6 +301,119 @@ describe("ticket batch export contract", () => {
     } finally {
       await cleanupTicketBatchZip(zip);
     }
+  });
+
+  it("keeps a known oversized Telegram attachment as unavailable while embedding the rest", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "USER_TO_STAFF",
+      sourceChatId: ticket.user_telegram_id,
+      sourceMessageId: 100,
+      mediaType: "document",
+      filename: "small.pdf",
+      fileId: "small"
+    });
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "USER_TO_STAFF",
+      sourceChatId: ticket.user_telegram_id,
+      sourceMessageId: 101,
+      mediaType: "video",
+      filename: "evidence.mp4",
+      fileId: "large"
+    });
+    const snapshot = buildTicketBatchExportSnapshot({
+      exportId: "export_mixed_media",
+      createdAt: "2026-08-14T00:00:00.000Z",
+      staffChatId: -100900,
+      tickets: [{ ticket: harness.db.getTicketWithUser(ticket.id)!, messages: harness.db.listMessagesChronological(ticket.id) }]
+    });
+
+    const zip = await createTicketBatchZip(snapshot, async (source) => source.fileId === "large"
+      ? {
+          unavailable: true,
+          failureCategory: "TELEGRAM_FILE_TOO_LARGE",
+          failureReason: "Attachment exceeds the hosted Telegram Bot API download limit."
+        }
+      : { bytes: new Uint8Array([1, 2, 3]), telegramFilePath: "files/small.pdf" });
+    try {
+      const entries = unzipSync(await readFile(zip.filePath));
+      const manifest = JSON.parse(strFromU8(entries["manifest.json"]!));
+      const mediaIndex = JSON.parse(strFromU8(entries["media-index.json"]!)) as Array<Record<string, unknown>>;
+      const record = JSON.parse(strFromU8(entries["tickets.jsonl"]!).trim()) as { messages: Array<{ attachments: Array<Record<string, unknown>> }> };
+      const unavailable = mediaIndex.find((attachment) => attachment.embedded === false);
+
+      assert.equal(manifest.attachment_count, 2);
+      assert.equal(manifest.embedded_attachment_count, 1);
+      assert.equal(manifest.failed_attachment_count, 1);
+      assert.equal(mediaIndex.length, 2);
+      assert.deepEqual(unavailable, {
+        ticket_id: ticket.id,
+        database_message_id: harness.db.listMessagesChronological(ticket.id)[1]!.id,
+        source_telegram_message_id: 101,
+        timestamp: harness.db.listMessagesChronological(ticket.id)[1]!.created_at,
+        direction: "USER_TO_STAFF",
+        media_type: "video",
+        mime_type: null,
+        original_filename: "evidence.mp4",
+        embedded: false,
+        failure_category: "TELEGRAM_FILE_TOO_LARGE",
+        failure_reason: "Attachment exceeds the hosted Telegram Bot API download limit."
+      });
+      assert.equal(record.messages[1]?.attachments[0]?.embedded, false);
+      assert.equal(record.messages[1]?.attachments[0]?.failure_category, "TELEGRAM_FILE_TOO_LARGE");
+      assert.equal(Object.values(entries).some((value) => value.byteLength === 0), false);
+      assert.equal(Object.keys(entries).some((name) => name.includes("evidence.mp4")), false);
+      assert.match(strFromU8(entries["tickets.md"]!), /Video: evidence\.mp4\n  Status: unavailable\n  Reason: exceeds the hosted Telegram Bot API download limit/);
+    } finally {
+      await cleanupTicketBatchZip(zip);
+    }
+  });
+
+  it("keeps unexpected attachment download failures strict", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    harness.db.addMessage({ ticketId: ticket.id, direction: "USER_TO_STAFF", mediaType: "document", fileId: "file" });
+    const snapshot = buildTicketBatchExportSnapshot({
+      exportId: "export_strict_media",
+      createdAt: "2026-08-14T00:00:00.000Z",
+      staffChatId: -100900,
+      tickets: [{ ticket: harness.db.getTicketWithUser(ticket.id)!, messages: harness.db.listMessagesChronological(ticket.id) }]
+    });
+
+    await assert.rejects(() => createTicketBatchZip(snapshot, async () => {
+      throw new Error("network failed");
+    }));
+  });
+
+  it("keeps empty attachment downloads strict", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    harness.db.addMessage({ ticketId: ticket.id, direction: "USER_TO_STAFF", mediaType: "document", fileId: "file" });
+    const snapshot = buildTicketBatchExportSnapshot({
+      exportId: "export_empty_media",
+      createdAt: "2026-08-14T00:00:00.000Z",
+      staffChatId: -100900,
+      tickets: [{ ticket: harness.db.getTicketWithUser(ticket.id)!, messages: harness.db.listMessagesChronological(ticket.id) }]
+    });
+
+    await assert.rejects(() => createTicketBatchZip(snapshot, async () => ({
+      bytes: new Uint8Array(),
+      telegramFilePath: "files/empty.pdf"
+    })));
+  });
+
+  it("instructs assistants to request only material unavailable-attachment review", () => {
+    const instructions = buildAnswerPackageInstructions("export_attachment_guidance");
+
+    assert.match(instructions, /Do not invent or hallucinate unavailable attachment contents/);
+    assert.match(instructions, /ask the human operator to inspect it in Telegram/);
+    assert.match(instructions, /explicit operator instructions.*take precedence/i);
+    assert.match(instructions, /Do not ask for manual review when the remaining ticket context is sufficient/);
+    assert.match(instructions, /short professional response and .*reply_and_close/);
+    assert.doesNotMatch(instructions, /ChatGPT|Codex|OpenAI|Anthropic|Claude/i);
   });
 });
 
