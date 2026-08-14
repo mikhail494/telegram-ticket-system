@@ -114,7 +114,7 @@ The configuration is validated during startup. A missing, malformed, or invalid 
 
 Run `/exporttickets` in the configured staff group's main topic to export every active ticket into one self-contained ZIP document. The ZIP contains ticket text, captions, metadata, and stored downloadable media. Each attachment is embedded with matching entries in `tickets.jsonl`, `tickets.md`, and `media-index.json`; no attachments are copied separately into the staff chat.
 
-The export is delivered only after the complete archive has been built and validated. If any stored attachment cannot be embedded, the bot sends no ZIP and reports one concise failure. Only one export can run per staff chat at a time.
+The export is delivered only after the complete archive has been built and validated. Normally downloadable attachments are embedded. For the known hosted Telegram Bot API oversized-file limitation, an attachment is recorded as unavailable metadata and the ZIP still succeeds; its content must not be inferred. Unexpected or transient attachment failures remain strict and abort the export. Only one export can run per staff chat at a time.
 
 Operator workflow:
 
@@ -205,7 +205,7 @@ Entity-notification controls are `/questnotify status`, `/questnotify target <ch
 
 Invitations are hashed, one-use, 30-minute private deep links. Invitees must also join the configured staff workspace. Before RBAC activation, a legacy installation keeps its current trusted-group behavior even after OWNER pairing. After explicit OWNER confirmation, both an assigned application role and staff-group membership are required. Private staff dashboards include `Open test ticket as user`; ordinary staff text cannot accidentally create tickets or change configuration.
 
-OWNER and ADMIN batch operations and public-chat management are available through the private operator UI. Staff-group commands remain available where the active authorization mode permits them.
+OWNER and ADMIN batch operations, public-chat management, and the expected response-time text shown when a new ticket is created are available through the private operator UI. Staff-group commands remain available where the active authorization mode permits them.
 
 ## Telegram Setup
 

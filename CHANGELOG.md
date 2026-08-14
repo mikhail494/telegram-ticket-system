@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+### Changed
+
+- Ticket Batch exports now represent the known hosted Telegram Bot API oversized-file limitation as explicit unavailable attachment metadata instead of aborting the whole archive.
+- OWNER and ADMIN can configure the expected response-time text shown in new-ticket acknowledgements.
+
 ## [1.3.0] - 2026-08-09
 
 ### Added
