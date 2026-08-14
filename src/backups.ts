@@ -68,6 +68,21 @@ export async function verifySqlite(file: string): Promise<void> {
   } finally { database?.close(); }
 }
 
+async function withTemporarySqliteCopy<T>(source: string, prefix: string, operation: (copy: string) => Promise<T>): Promise<T> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), prefix));
+  const copy = path.join(directory, path.basename(source));
+  try {
+    await copyFile(source, copy);
+    return await operation(copy);
+  } finally {
+    await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+export async function verifyFinalizedSqliteBackup(file: string): Promise<void> {
+  await withTemporarySqliteCopy(file, "ticket-backup-verify-", verifySqlite);
+}
+
 async function secure(file: string): Promise<void> {
   if (process.platform !== "win32") await chmod(file, 0o600);
 }
@@ -165,7 +180,9 @@ export class BackupService {
         retentionFailed += 1;
         continue;
       }
-      try { await this.remove(path.join(this.directory, `${name}.sha256`), { force: true }); } catch { retentionFailed += 1; }
+      for (const companion of [`${name}.sha256`, `${name}-wal`, `${name}-shm`, `${name}-journal`]) {
+        try { await this.remove(path.join(this.directory, companion), { force: true }); } catch { retentionFailed += 1; }
+      }
     }
     return { retentionDeleted, retentionFailed };
   }
@@ -176,7 +193,7 @@ export class BackupService {
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
     for (const name of entries) {
       const candidate = path.join(this.directory, name);
-      try { await verifyBackupChecksum(candidate, { requireMetadata: true }); await verifySqlite(candidate); return candidate; } catch { /* examine older backup */ }
+      try { await verifyBackupChecksum(candidate, { requireMetadata: true }); await verifyFinalizedSqliteBackup(candidate); return candidate; } catch { /* examine older backup */ }
     }
     return null;
   }
@@ -247,14 +264,11 @@ export async function verifyRestoreCandidate(backupPath: string, liveDatabasePat
   const resolved = path.resolve(backupPath);
   if (resolved === path.resolve(liveDatabasePath)) throw new Error("Restore verification refuses the configured live database path.");
   const checksum = await verifyBackupChecksum(resolved);
-  const directory = await mkdtemp(path.join(os.tmpdir(), "ticket-restore-"));
-  const copy = path.join(directory, path.basename(resolved));
-  try {
-    await copyFile(resolved, copy);
+  return withTemporarySqliteCopy(resolved, "ticket-restore-", async (copy) => {
     await verifySqlite(copy);
     const database = new SupportDatabase(`file:${copy}`);
     try { database.getInstallationState(); } finally { database.close(); }
     await verifySqlite(copy);
     return { path: resolved, checksum: checksum.metadata === "verified" ? "verified" : "metadata absent", sqliteIntegrity: "ok", applicationCompatibility: "ok" };
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  });
 }
