@@ -10,6 +10,7 @@ import { InstallationService } from "./installation.js";
 import { runWorkspaceStartup } from "./startup.js";
 import { createAutomaticBackupScheduler } from "./backups.js";
 import { ApplicationLifecycle, awaitApplicationCompletion, BackgroundTaskRegistry } from "./lifecycle.js";
+import { OperationalServer, type OperationalRuntimeState } from "./operationsHttp.js";
 
 const db = new SupportDatabase(config.databaseUrl);
 const quickRepliesRegistry = createPersistentQuickRepliesRegistry(db, loadQuickRepliesRegistry());
@@ -41,6 +42,8 @@ const backupScheduler = createAutomaticBackupScheduler(
   }
 );
 let polling: Promise<void> | null = null;
+let operationalState: OperationalRuntimeState = "STARTING";
+let operationalServer: OperationalServer | null = null;
 const lifecycle = new ApplicationLifecycle({
   stopPolling: () => bot.stop(),
   pollingCompletion: () => polling,
@@ -48,10 +51,28 @@ const lifecycle = new ApplicationLifecycle({
   backgroundTasks,
   stopAndDrainBackups: () => backupScheduler?.stopAndDrain() ?? Promise.resolve(),
   closeDatabase: () => db.close(),
+  closeOperationalServer: () => operationalServer?.stop() ?? Promise.resolve(),
   onDrainFailure: (stage, error) => logger.warn({ err: error, stage }, "Graceful shutdown drain failed")
 });
 
+function getOperationalRuntimeState(): OperationalRuntimeState {
+  const lifecycleState = lifecycle.getState();
+  if (lifecycleState === "SHUTTING_DOWN") return "SHUTTING_DOWN";
+  if (lifecycleState === "STOPPED") return "STOPPED";
+  return operationalState;
+}
+
 async function main(): Promise<void> {
+  if (config.opsHttpEnabled) {
+    operationalServer = new OperationalServer({
+      host: config.opsHttpHost,
+      port: config.opsHttpPort,
+      getState: getOperationalRuntimeState,
+      checkDatabase: () => db.ping()
+    });
+    await operationalServer.start();
+    logger.info({ host: config.opsHttpHost, port: config.opsHttpPort }, "Operational HTTP server started");
+  }
   await bot.api.deleteWebhook({ drop_pending_updates: false });
   const botInfo = await bot.api.getMe();
   bot.botInfo = botInfo;
@@ -97,6 +118,7 @@ async function main(): Promise<void> {
   polling = bot.start({
     allowed_updates: ["message", "callback_query", "chat_member"],
     onStart: (botInfo) => {
+      operationalState = "READY";
       logger.info({ username: botInfo.username }, "Telegram support bot started");
     }
   });

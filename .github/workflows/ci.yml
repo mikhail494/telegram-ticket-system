@@ -44,3 +44,13 @@ jobs:
 
       - name: Verify Docker image build
         run: docker build -t telegram-ticket-system-ci .
+
+      - name: Verify Docker runtime invariants
+        run: |
+          test "$(docker image inspect telegram-ticket-system-ci --format '{{.Config.User}}')" = "node"
+          test "$(docker image inspect telegram-ticket-system-ci --format '{{json .Config.Healthcheck}}')" != "null"
+          docker image inspect telegram-ticket-system-ci --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx 'DATABASE_URL=file:/data/support.db'
+          docker image inspect telegram-ticket-system-ci --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx 'OPS_HTTP_ENABLED=true'
+          docker image inspect telegram-ticket-system-ci --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx 'OPS_HTTP_HOST=0.0.0.0'
+          docker image inspect telegram-ticket-system-ci --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx 'OPS_HTTP_PORT=3000'
+          docker run --rm --entrypoint node telegram-ticket-system-ci -e "import { accessSync, constants } from 'node:fs'; if (process.getuid() === 0) process.exit(1); accessSync('/data', constants.W_OK);"

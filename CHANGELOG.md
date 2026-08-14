@@ -10,6 +10,7 @@ All notable changes to this project are documented in this file. This project fo
 - Secret-safe runtime logging and an explicit interactive OWNER pairing command.
 - Graceful shutdown lifecycle draining for Telegram polling, tracked durable background work, and active SQLite backups.
 - In-memory per-customer private-message anti-flood protection that keeps legitimate support bursts permissive without creating bans or durable abuse records.
+- Lightweight operational HTTP health, readiness, and process metrics endpoints with native opt-in configuration.
 
 ### Fixed
 
@@ -22,6 +23,7 @@ All notable changes to this project are documented in this file. This project fo
 - Ticket Batch exports now represent the known hosted Telegram Bot API oversized-file limitation as explicit unavailable attachment metadata instead of aborting the whole archive.
 - OWNER and ADMIN can configure the expected response-time text and complete new-ticket acknowledgement shown when a ticket is created.
 - Test-ticket mode now retires its prompt after consumption and returns the operator to a fresh dashboard after a test ticket closes.
+- Docker runtime now runs as the non-root `node` user with persistent `/data` defaults and readiness-based health checking.
 
 ## [1.3.0] - 2026-08-09
 

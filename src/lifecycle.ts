@@ -34,7 +34,8 @@ export interface ApplicationLifecycleDependencies {
   backgroundTasks: BackgroundTaskTracker;
   stopAndDrainBackups?(): Promise<void>;
   closeDatabase(): void;
-  onDrainFailure?(stage: "polling" | "background" | "backup" | "database", error: unknown): void;
+  closeOperationalServer?(): Promise<void>;
+  onDrainFailure?(stage: "polling" | "background" | "backup" | "database" | "server", error: unknown): void;
 }
 
 export class ApplicationLifecycle {
@@ -79,6 +80,7 @@ export class ApplicationLifecycle {
     await this.drain("background", () => this.dependencies.backgroundTasks.drain());
     await this.drain("backup", async () => { await backupDrain; });
     this.closeDatabase();
+    await this.drain("server", async () => { await this.dependencies.closeOperationalServer?.(); });
     this.state = "STOPPED";
   }
 
@@ -86,7 +88,7 @@ export class ApplicationLifecycle {
     await this.shutdown();
   }
 
-  private async drain(stage: "polling" | "background" | "backup", operation: () => Promise<void>): Promise<void> {
+  private async drain(stage: "polling" | "background" | "backup" | "server", operation: () => Promise<void>): Promise<void> {
     try {
       await operation();
     } catch (error) {
