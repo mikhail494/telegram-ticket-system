@@ -11,15 +11,17 @@ export const START_TEXT =
   "Hi! Please describe your issue in one message. Include your AgentOn UID, wallet address, quest link, screenshots or transaction hash if relevant.";
 
 export const DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME = "1-7 business days";
+export const SUPPORT_RESPONSE_TIME_PLACEHOLDER = "{{response_time}}";
+export const DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE = [
+  "Thanks, your request has been received.",
+  "",
+  `Expected response time: ${SUPPORT_RESPONSE_TIME_PLACEHOLDER}.`,
+  "",
+  "You can continue sending messages in this chat until your ticket is closed."
+].join("\n");
 
-export function formatTicketReceived(expectedResponseTime: string): string {
-  return [
-    "Thanks, your request has been received.",
-    "",
-    `Expected response time: ${expectedResponseTime}.`,
-    "",
-    "You can continue sending messages in this chat until your ticket is closed."
-  ].join("\n");
+export function formatTicketReceived(template: string, expectedResponseTime: string): string {
+  return template.replaceAll(SUPPORT_RESPONSE_TIME_PLACEHOLDER, expectedResponseTime);
 }
 
 export const CLOSED_TEXT =

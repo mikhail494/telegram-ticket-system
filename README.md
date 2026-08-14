@@ -205,7 +205,7 @@ Entity-notification controls are `/questnotify status`, `/questnotify target <ch
 
 Invitations are hashed, one-use, 30-minute private deep links. Invitees must also join the configured staff workspace. Before RBAC activation, a legacy installation keeps its current trusted-group behavior even after OWNER pairing. After explicit OWNER confirmation, both an assigned application role and staff-group membership are required. Private staff dashboards include `Open test ticket as user`; ordinary staff text cannot accidentally create tickets or change configuration.
 
-OWNER and ADMIN batch operations, public-chat management, and the expected response-time text shown when a new ticket is created are available through the private operator UI. Staff-group commands remain available where the active authorization mode permits them.
+OWNER and ADMIN batch operations, public-chat management, and Support settings are available through the private operator UI. Support settings control the expected response time and the complete new-ticket acknowledgement; use `{{response_time}}` in the acknowledgement wherever the configured response time should appear. Staff-group commands remain available where the active authorization mode permits them.
 
 ## Telegram Setup
 

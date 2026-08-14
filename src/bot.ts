@@ -24,6 +24,7 @@ import {
 import {
   CLOSED_TEXT,
   DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME,
+  DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE,
   formatTicketReceived,
   START_TEXT,
   formatPinnedTicketSummary,
@@ -35,6 +36,7 @@ import {
   formatTicketUpdate,
   formatWhois,
   formatUserTicketList,
+  SUPPORT_RESPONSE_TIME_PLACEHOLDER,
   truncate
 } from "./format.js";
 import { logger } from "./logger.js";
@@ -86,6 +88,10 @@ const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
 const MODERATION_SETTING_PREFIX = "language_moderation";
 const ENTITY_NOTIFICATION_SETTING_PREFIX = "entity_notifications";
 const STAFF_OPERATION_NO_RETRY_AT = "9999-12-31T23:59:59.999Z";
+const SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY = "support_expected_response_time";
+const SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY = "support_ticket_received_template";
+const STAFF_TEST_TICKET_MODE_SETTING_PREFIX = "staff_test_ticket_mode:";
+const STAFF_TEST_TICKET_ID_SETTING_PREFIX = "staff_test_ticket_id:";
 const pendingWarningTimers = new Map<string, ReturnType<typeof setTimeout>>();
 type ModerationReactionEmoji = "\u{1F440}" | "\u{1F621}";
 const MODERATION_STRIKE_REACTION: ModerationReactionEmoji = "\u{1F440}";
@@ -203,6 +209,8 @@ type PendingQuickReplyInput =
   | { kind: "ADD_TEXT"; categoryId: string; title: string }
   | { kind: "ADD_PREVIEW"; categoryId: string; title: string; text: string };
 
+type PendingSupportSettingsInput = "RESPONSE_TIME" | "ACKNOWLEDGEMENT";
+
 type DeliverAndRecordStaffTextReply = (
   ticket: TicketWithUser,
   text: string,
@@ -261,7 +269,7 @@ export function createBot(
     field: "warning" | "allowlist" | "cooldown" | "threshold" | "lookback";
   }>();
   const pendingQuickReplyInput = new Map<number, PendingQuickReplyInput>();
-  const pendingSupportResponseTimeInput = new Set<number>();
+  const pendingSupportSettingsInput = new Map<number, PendingSupportSettingsInput>();
   const quickRepliesManager = createQuickRepliesManager(db, quickRepliesRegistry);
   const privateOperatorCallbackNamespaces = new Set(["owner", "setup", "workspace", "dashboard", "batch-ui", "public", "quick", "support", "team", "rbac"]);
   const pendingWorkspaceSelection = new Map<number, "SETUP" | "RECONFIGURE">();
@@ -838,6 +846,20 @@ export function createBot(
     }
   }
 
+  async function retireTrackedPrivateScreens(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+    const targets = [
+      privateUiMessages.get(ctx.from.id),
+      temporaryPrivateUiMessages.get(ctx.from.id),
+      persistedPrivateScreen(ctx.from.id)
+    ].filter((target): target is { chatId: number; messageId: number } => Boolean(target))
+      .filter((target, index, all) => all.findIndex((other) => other.chatId === target.chatId && other.messageId === target.messageId) === index);
+    for (const target of targets) await retirePrivateScreenTarget(ctx, target);
+    privateUiMessages.delete(ctx.from.id);
+    temporaryPrivateUiMessages.delete(ctx.from.id);
+    installation.setOnboardingPrimaryMessage(ctx.from.id, null, null);
+  }
+
   async function sendFreshPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard) {
     const sent = await ctx.reply(text, { reply_markup: replyMarkup });
     rememberPrivateScreen(ctx, { chatId: sent.chat.id, messageId: sent.message_id });
@@ -851,9 +873,18 @@ export function createBot(
 
   function clearStaffTestTicketMode(userId: number | undefined): void {
     if (userId === undefined) return;
-    if (db.getSetting(`staff_test_ticket_mode:${userId}`) === "true") {
-      db.setSetting(`staff_test_ticket_mode:${userId}`, "false");
+    if (db.getSetting(`${STAFF_TEST_TICKET_MODE_SETTING_PREFIX}${userId}`) === "true") {
+      db.setSetting(`${STAFF_TEST_TICKET_MODE_SETTING_PREFIX}${userId}`, "false");
     }
+  }
+
+  function staffTestTicketId(userId: number): number | undefined {
+    const ticketId = Number(db.getSetting(`${STAFF_TEST_TICKET_ID_SETTING_PREFIX}${userId}`));
+    return Number.isInteger(ticketId) && ticketId > 0 ? ticketId : undefined;
+  }
+
+  function setStaffTestTicketId(userId: number, ticketId: number | undefined): void {
+    db.setSetting(`${STAFF_TEST_TICKET_ID_SETTING_PREFIX}${userId}`, ticketId === undefined ? "" : String(ticketId));
   }
 
   async function retireWorkspacePickerPrompt(userId: number | undefined): Promise<void> {
@@ -975,6 +1006,14 @@ export function createBot(
     await render(ctx, dashboardText(ctx.from.id), dashboardKeyboard(ctx.from.id, member.role));
   }
 
+  async function showDashboardAfterStaffTestTicketClose(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+    const member = installation.getMember(ctx.from.id);
+    if (!member) return;
+    await retireTrackedPrivateScreens(ctx);
+    await sendFreshPrivateScreen(ctx, dashboardText(ctx.from.id), dashboardKeyboard(ctx.from.id, member.role));
+  }
+
   async function showSystemStatus(ctx: Context): Promise<void> {
     if (!ctx.from) return;
     await renderPrivateScreen(ctx, systemStatusText(ctx.from.id), new InlineKeyboard().text("Back", "dashboard:home"));
@@ -1005,7 +1044,15 @@ export function createBot(
   }
 
   function supportExpectedResponseTime(): string {
-    return db.getSetting("support_expected_response_time")?.trim() || DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME;
+    return db.getSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME;
+  }
+
+  function supportTicketReceivedTemplate(): string {
+    return db.getSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE;
+  }
+
+  function supportAcknowledgementPreview(): string {
+    return truncate(formatTicketReceived(supportTicketReceivedTemplate(), supportExpectedResponseTime()), 1200);
   }
 
   function supportSettingsText(notice?: string): string {
@@ -1016,6 +1063,9 @@ export function createBot(
       "Expected response time:",
       supportExpectedResponseTime(),
       "",
+      "New-ticket acknowledgement preview:",
+      supportAcknowledgementPreview(),
+      "",
       "Shown to users when a new support ticket is created."
     ].join("\n");
   }
@@ -1024,7 +1074,10 @@ export function createBot(
     return new InlineKeyboard()
       .text("Edit response time", "support:edit")
       .row()
-      .text("Reset to default", "support:reset")
+      .text("Edit acknowledgement", "support:edit-acknowledgement")
+      .row()
+      .text("Reset response time", "support:reset-response-time")
+      .text("Reset acknowledgement", "support:reset-acknowledgement")
       .row()
       .text("Back", "dashboard:home");
   }
@@ -1056,23 +1109,78 @@ export function createBot(
     return { value: trimmed };
   }
 
+  function supportAcknowledgementPrompt(error?: string): string {
+    return [
+      "New-ticket acknowledgement",
+      "",
+      ...(error ? [`Invalid: ${error}`, ""] : []),
+      `Use ${SUPPORT_RESPONSE_TIME_PLACEHOLDER} anywhere you want the response time to appear.`,
+      "Messages without this placeholder are allowed and will be sent exactly as written.",
+      "",
+      "Current template:",
+      truncate(supportTicketReceivedTemplate(), 2600),
+      "",
+      "Send the complete new acknowledgement."
+    ].join("\n");
+  }
+
+  function normalizeSupportTicketReceivedTemplate(value: string): { value?: string; error?: string } {
+    const normalized = value.replaceAll("\r\n", "\n").replaceAll("\r", "\n").trim();
+    if (!normalized) return { error: "message cannot be empty." };
+    if (normalized.length > 3500) return { error: "use at most 3500 characters." };
+    if (/[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/.test(normalized)) return { error: "remove unsafe control characters." };
+    if (formatTicketReceived(normalized, supportExpectedResponseTime()).length > 4096) return { error: "the rendered message must fit within Telegram's 4096-character limit." };
+    return { value: normalized };
+  }
+
   async function beginSupportResponseTimeInput(ctx: Context): Promise<void> {
     if (!ctx.from) return;
-    pendingSupportResponseTimeInput.add(ctx.from.id);
+    pendingSupportSettingsInput.set(ctx.from.id, "RESPONSE_TIME");
     await renderPrivateScreen(ctx, supportResponseTimePrompt(), new InlineKeyboard().text("Back", "support:back"));
   }
 
-  async function savePendingSupportResponseTimeInput(ctx: Context, text: string): Promise<boolean> {
-    if (!ctx.from || !pendingSupportResponseTimeInput.has(ctx.from.id)) return false;
+  async function beginSupportAcknowledgementInput(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+    pendingSupportSettingsInput.set(ctx.from.id, "ACKNOWLEDGEMENT");
+    await renderPrivateScreen(ctx, supportAcknowledgementPrompt(), new InlineKeyboard().text("Back", "support:back"));
+  }
+
+  async function deleteConsumedSupportSettingsInput(ctx: Context): Promise<void> {
+    if (!ctx.chat || !ctx.message) return;
+    try {
+      await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id);
+    } catch {
+      logger.warn({ userId: ctx.from?.id, messageId: ctx.message.message_id }, "Could not delete consumed support settings input");
+    }
+  }
+
+  async function savePendingSupportSettingsInput(ctx: Context, text: string): Promise<boolean> {
+    if (!ctx.from) return false;
+    const pending = pendingSupportSettingsInput.get(ctx.from.id);
+    if (!pending) return false;
+    await deleteConsumedSupportSettingsInput(ctx);
     if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) return true;
-    const normalized = normalizeSupportExpectedResponseTime(text);
-    if (!normalized.value) {
-      await renderPrivateScreen(ctx, supportResponseTimePrompt(normalized.error), new InlineKeyboard().text("Back", "support:back"));
+
+    if (pending === "RESPONSE_TIME") {
+      const normalized = normalizeSupportExpectedResponseTime(text);
+      if (!normalized.value) {
+        await renderPrivateScreen(ctx, supportResponseTimePrompt(normalized.error), new InlineKeyboard().text("Back", "support:back"));
+        return true;
+      }
+      db.setSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY, normalized.value);
+      pendingSupportSettingsInput.delete(ctx.from.id);
+      await showSupportSettings(ctx, "Expected response time saved.");
       return true;
     }
-    db.setSetting("support_expected_response_time", normalized.value);
-    pendingSupportResponseTimeInput.delete(ctx.from.id);
-    await showSupportSettings(ctx, "Expected response time saved.");
+
+    const normalized = normalizeSupportTicketReceivedTemplate(text);
+    if (!normalized.value) {
+      await renderPrivateScreen(ctx, supportAcknowledgementPrompt(normalized.error), new InlineKeyboard().text("Back", "support:back"));
+      return true;
+    }
+    db.setSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY, normalized.value);
+    pendingSupportSettingsInput.delete(ctx.from.id);
+    await showSupportSettings(ctx, "Acknowledgement saved.");
     return true;
   }
 
@@ -1493,7 +1601,7 @@ export function createBot(
   bot.command("start", async (ctx) => {
     if (!isPrivateChat(ctx)) { await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler); return; }
 
-    pendingSupportResponseTimeInput.delete(ctx.from?.id ?? -1);
+    pendingSupportSettingsInput.delete(ctx.from?.id ?? -1);
     persistUserFromContext(db, ctx);
     const startParameter = ctx.match.trim();
     if (startParameter.startsWith("setup_") && ctx.from) {
@@ -1519,7 +1627,7 @@ export function createBot(
 
   bot.command("help", async (ctx) => {
     if (isPrivateChat(ctx)) {
-      pendingSupportResponseTimeInput.delete(ctx.from?.id ?? -1);
+      pendingSupportSettingsInput.delete(ctx.from?.id ?? -1);
       if (await enrollPrivateWorkspaceMember(ctx)) { clearStaffTestTicketMode(ctx.from?.id); await showDashboard(ctx); }
       else await ctx.reply(installation.getState().setupState === "READY" ? USER_HELP_TEXT : "Support has not been configured yet.");
       return;
@@ -2071,7 +2179,7 @@ export function createBot(
       clearStaffTestTicketMode(ctx.from.id);
     }
     if (isPrivateChat(ctx) && ctx.from && namespace !== "support") {
-      pendingSupportResponseTimeInput.delete(ctx.from.id);
+      pendingSupportSettingsInput.delete(ctx.from.id);
     }
 
     if (namespace === "owner" && data === "owner:confirm-transfer") {
@@ -2123,7 +2231,8 @@ export function createBot(
       if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
       const action = data.split(":")[1]; await ctx.answerCallbackQuery();
       if (action === "test-ticket") {
-        db.setSetting(`staff_test_ticket_mode:${ctx.from.id}`, "true");
+        setStaffTestTicketId(ctx.from.id, undefined);
+        db.setSetting(`${STAFF_TEST_TICKET_MODE_SETTING_PREFIX}${ctx.from.id}`, "true");
         await refreshPrivateScreen(ctx, "Test-ticket mode enabled for your next message. Send harmless test content now.", new InlineKeyboard().text("Cancel", "dashboard:home"));
         return;
       }
@@ -2440,14 +2549,24 @@ export function createBot(
         await beginSupportResponseTimeInput(ctx);
         return;
       }
-      if (action === "reset") {
-        db.setSetting("support_expected_response_time", "");
-        pendingSupportResponseTimeInput.delete(ctx.from.id);
+      if (action === "edit-acknowledgement") {
+        await beginSupportAcknowledgementInput(ctx);
+        return;
+      }
+      if (action === "reset-response-time") {
+        db.setSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY, "");
+        pendingSupportSettingsInput.delete(ctx.from.id);
         await showSupportSettings(ctx, "Expected response time reset to default.");
         return;
       }
+      if (action === "reset-acknowledgement") {
+        db.setSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY, "");
+        pendingSupportSettingsInput.delete(ctx.from.id);
+        await showSupportSettings(ctx, "Acknowledgement reset to default.");
+        return;
+      }
       if (action === "back") {
-        pendingSupportResponseTimeInput.delete(ctx.from.id);
+        pendingSupportSettingsInput.delete(ctx.from.id);
         await showDashboard(ctx);
         return;
       }
@@ -2508,7 +2627,11 @@ export function createBot(
     }
 
     if (namespace === "user") {
-      await handleUserCallback(db, ctx, data);
+      await handleUserCallback(db, ctx, data, async (ticketId) => {
+        if (!ctx.from || staffTestTicketId(ctx.from.id) !== ticketId) return;
+        setStaffTestTicketId(ctx.from.id, undefined);
+        await showDashboardAfterStaffTestTicketClose(ctx);
+      });
       return;
     }
 
@@ -2621,7 +2744,7 @@ export function createBot(
     if (ctx.from && installation.getMember(ctx.from.id) && db.getSetting(`staff_test_ticket_mode:${ctx.from.id}`) !== "true") {
       const text = ctx.message && "text" in ctx.message ? ctx.message.text : "";
       if (text && await savePendingQuickReplyInput(ctx, text)) return;
-      if (text && await savePendingSupportResponseTimeInput(ctx, text)) return;
+      if (text && await savePendingSupportSettingsInput(ctx, text)) return;
       if (text && await savePendingPublicChatConfiguration(ctx, text)) return;
       if (pendingPublicChatSelection.has(ctx.from.id) && text) {
         if (text === "Cancel public chat selection") {
@@ -2677,6 +2800,7 @@ export function createBot(
       }
       await showDashboard(ctx); return;
     }
+    const staffTestTicketMode = Boolean(ctx.from && installation.getMember(ctx.from.id) && db.getSetting(`${STAFF_TEST_TICKET_MODE_SETTING_PREFIX}${ctx.from.id}`) === "true");
     clearStaffTestTicketMode(ctx.from?.id);
     if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet. Please try again later."); return; }
     if (await replyIfBanned(db, ctx)) {
@@ -2688,7 +2812,16 @@ export function createBot(
       return;
     }
 
+    if (staffTestTicketMode) await retireTrackedPrivateScreens(ctx);
     await handlePrivateUserMessage(db, ctx);
+    if (staffTestTicketMode && ctx.from) {
+      const activeTicket = db.findActiveTicketForUser(ctx.from.id, config.staffChatId);
+      if (activeTicket) {
+        setStaffTestTicketId(ctx.from.id, activeTicket.id);
+      } else {
+        await showDashboardAfterStaffTestTicketClose(ctx);
+      }
+    }
   });
 
   async function handleTicketAnswerPackageUpload(ctx: Context, privateWorkflowExportId?: string): Promise<void> {
@@ -3640,7 +3773,10 @@ async function createFreshTicketFromUserMessage(db: SupportDatabase, ctx: Contex
 
   db.closeOtherActiveTicketsForUserInStaffChat(ctx.from.id, config.staffChatId, ticket.id);
   await maybeCopyOriginalMessageToStaff(db, ctx, ticketWithTopic, content.shouldCopyOriginal);
-  await ctx.reply(formatTicketReceived(db.getSetting("support_expected_response_time")?.trim() || DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME), {
+  await ctx.reply(formatTicketReceived(
+    db.getSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE,
+    db.getSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME
+  ), {
     reply_markup: userTicketKeyboard(ticket.id)
   });
 }
@@ -3808,7 +3944,12 @@ async function handleStaffGroupMessage(
   }
 }
 
-async function handleUserCallback(db: SupportDatabase, ctx: Context, data: string): Promise<void> {
+async function handleUserCallback(
+  db: SupportDatabase,
+  ctx: Context,
+  data: string,
+  onStaffTestTicketClosed?: (ticketId: number) => Promise<void>
+): Promise<void> {
   if (!isPrivateChat(ctx) || !ctx.from) {
     await ctx.answerCallbackQuery({
       text: "This action is only available in private chat.",
@@ -3851,6 +3992,7 @@ async function handleUserCallback(db: SupportDatabase, ctx: Context, data: strin
 
   await ctx.answerCallbackQuery({ text: "Ticket closed." });
   await ctx.reply(CLOSED_TEXT);
+  await onStaffTestTicketClosed?.(ticket.id);
 }
 
 async function handleStaffCallback(db: SupportDatabase, ctx: Context, data: string): Promise<void> {

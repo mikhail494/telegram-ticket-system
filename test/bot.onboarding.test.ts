@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { Update } from "grammy/types";
 import packageMetadata from "../package.json" with { type: "json" };
+import { CLOSED_TEXT } from "../src/format.js";
 import { InstallationService } from "../src/installation.js";
 import { createBotHarness, TEST_STAFF_CHAT_ID } from "./helpers/botHarness.js";
 
@@ -223,7 +224,55 @@ test("staff explicitly enables one-message test-ticket mode", async () => {
     harness.clearApiCalls();
     await harness.bot.handleUpdate(privateMessage(1, "Normal staff text", 12));
     assert.equal(harness.db.listTicketsForUser(1, TEST_STAFF_CHAT_ID).length, 1);
-    assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /Owner dashboard/);
+    assert.match(String(harness.findApiCalls("sendMessage").at(-1)?.payload.text), /Owner dashboard/);
+  } finally { harness.cleanup(); }
+});
+
+test("a staff test ticket retires its prompt and returns only its owner to a fresh dashboard after close", async () => {
+  let service!: InstallationService;
+  const harness = createBotHarness({ installationServiceFactory: (db) => {
+    service = new InstallationService(db); service.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1 }); return service;
+  } });
+  try {
+    await harness.bot.handleUpdate(privateCallback(1, "dashboard:test-ticket", 10));
+    const promptMessageId = harness.findApiCalls("sendMessage").at(-1)?.responseMessageId;
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateMessage(1, "Harmless test ticket", 11));
+    const ticket = harness.db.findActiveTicketForUser(1, TEST_STAFF_CHAT_ID)!;
+    const acknowledgement = harness.findApiCalls("sendMessage").find((call) => call.payload.chat_id === 1 && String(call.payload.text).startsWith("Thanks, your request"))!;
+    assert.equal(harness.findApiCalls("deleteMessage").some((call) => call.payload.message_id === promptMessageId), true);
+    assert.equal(harness.findApiCalls("deleteMessage").some((call) => call.payload.message_id === 11), false);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(1, `user:close:${ticket.id}`, acknowledgement.responseMessageId));
+    assert.equal(harness.findApiCalls("deleteMessage").some((call) => call.payload.message_id === acknowledgement.responseMessageId), false);
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === 1 && call.payload.text === CLOSED_TEXT), true);
+    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === 1 && /Owner dashboard/.test(String(call.payload.text))).length, 1);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(1, `user:close:${ticket.id}`, acknowledgement.responseMessageId));
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => /Owner dashboard/.test(String(call.payload.text))), false);
+  } finally { harness.cleanup(); }
+});
+
+test("a failed staff test-ticket creation clears its prompt and restores the dashboard without deleting the test content", async () => {
+  let service!: InstallationService;
+  const harness = createBotHarness({ installationServiceFactory: (db) => {
+    service = new InstallationService(db); service.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
+    service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 1 }); return service;
+  } });
+  try {
+    await harness.bot.handleUpdate(privateCallback(1, "dashboard:test-ticket", 10));
+    const promptMessageId = harness.findApiCalls("sendMessage").at(-1)?.responseMessageId;
+    harness.failNextApiCall("createForumTopic");
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateMessage(1, "Harmless failed test ticket", 11));
+    assert.equal(harness.db.findActiveTicketForUser(1, TEST_STAFF_CHAT_ID), undefined);
+    assert.equal(harness.findApiCalls("deleteMessage").some((call) => call.payload.message_id === promptMessageId), true);
+    assert.equal(harness.findApiCalls("deleteMessage").some((call) => call.payload.message_id === 11), false);
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => /Sorry, we could not create a support topic/.test(String(call.payload.text))), true);
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => /Owner dashboard/.test(String(call.payload.text))), true);
   } finally { harness.cleanup(); }
 });
 
