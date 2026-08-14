@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { InlineKeyboard } from "grammy";
 import type { Context } from "grammy";
-import { SupportDatabase } from "../src/db.js";
-import { InstallationService } from "../src/installation.js";
-import { PrivateControlPlane } from "../src/privateControlPlane.js";
+
+process.env.BOT_TOKEN ??= "123456:TEST_PRIVATE_CONTROL_PLANE_TOKEN";
+const { SupportDatabase } = await import("../src/db.js");
+const { InstallationService } = await import("../src/installation.js");
+const { PrivateControlPlane } = await import("../src/privateControlPlane.js");
 
 test("private control plane keeps one authoritative screen and rejects stale callbacks", async () => {
   const db = new SupportDatabase(":memory:");
