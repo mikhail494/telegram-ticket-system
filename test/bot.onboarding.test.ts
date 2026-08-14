@@ -172,10 +172,10 @@ test("team screen returns to the dashboard through the current message", async (
     await harness.bot.handleUpdate(privateCallback(1, "dashboard:team", 10));
     const team = harness.findApiCalls("editMessageText")[0];
     assert.match(String(team?.payload.text), /Owner: @owner/);
-    assert.doesNotMatch(String(team?.payload.text), /user_telegram_id|\b1\b/);
+    assert.doesNotMatch(String(team?.payload.text), /Review RBAC activation|user_telegram_id|\b1\b/);
     const keyboard = team?.payload.reply_markup as { inline_keyboard?: Array<Array<{ callback_data?: string }>> };
     assert.equal(keyboard.inline_keyboard?.flat().some((button) => button.callback_data === "dashboard:home"), true);
-    assert.equal(keyboard.inline_keyboard?.flat().some((button) => button.callback_data === "rbac:preview"), true);
+    assert.equal(keyboard.inline_keyboard?.flat().some((button) => button.callback_data === "rbac:preview"), false);
 
     harness.clearApiCalls();
     await harness.bot.handleUpdate(privateCallback(1, "dashboard:home", 10));
@@ -486,7 +486,7 @@ test("RBAC denies private staff controls without current workspace membership", 
   } finally { harness.cleanup(); }
 });
 
-test("legacy RBAC activation remains an explicit owner action after pairing", async () => {
+test("legacy RBAC activation controls are retired after automatic activation", async () => {
   let service!: InstallationService;
   const harness = createBotHarness({ installationServiceFactory: (db) => {
     service = new InstallationService(db);
@@ -498,8 +498,8 @@ test("legacy RBAC activation remains an explicit owner action after pairing", as
   try {
     await harness.bot.handleUpdate(privateCallback(1, "rbac:preview"));
     assert.equal(harness.countApiCalls("answerCallbackQuery"), 1);
-    assert.match(String(harness.findApiCalls("editMessageText")[0]?.payload.text), /cutover preview|activate role-based access/i);
-    assert.equal(service.getState().authorizationMode, "LEGACY_TRUSTED_GROUP");
+    assert.match(String(harness.findApiCalls("answerCallbackQuery")[0]?.payload.text), /automatic/i);
+    assert.equal(service.getState().authorizationMode, "RBAC_ACTIVE");
   } finally { harness.cleanup(); }
 });
 

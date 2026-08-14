@@ -13,6 +13,7 @@ export async function runWorkspaceStartup(installation: InstallationService, tas
   const setupState = installation.getState().setupState;
   const workspace = installation.getActiveWorkspace();
   if (setupState !== "READY" || !workspace) return "SETUP_REQUIRED";
+  installation.activateReadyRoleBasedAccess();
   await tasks.discoverStaffWorkspaceMembers?.();
   await tasks.initializeSupportLogs();
   await tasks.recoverArchives();

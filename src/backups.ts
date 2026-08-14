@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
@@ -12,6 +13,8 @@ export interface BackupOptions {
   intervalMs: number;
   retentionCount: number;
   enabled: boolean;
+  rename?: typeof rename;
+  remove?: typeof rm;
 }
 
 export interface BackupResult {
@@ -20,6 +23,14 @@ export interface BackupResult {
   size: number;
   sha256: string;
   retentionDeleted: number;
+  retentionFailed: number;
+}
+
+export interface RestoreVerificationResult {
+  path: string;
+  checksum: "verified" | "metadata absent";
+  sqliteIntegrity: "ok";
+  applicationCompatibility: "ok";
 }
 
 function timestamp(now: Date): string {
@@ -37,7 +48,13 @@ export function backupDirectory(database: SupportDatabase, configured: string | 
 }
 
 async function sha256(file: string): Promise<string> {
-  return createHash("sha256").update(await readFile(file)).digest("hex");
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(file);
+    stream.on("data", (chunk) => { hash.update(chunk); });
+    stream.once("error", reject);
+    stream.once("end", () => resolve(hash.digest("hex")));
+  });
 }
 
 export async function verifySqlite(file: string): Promise<void> {
@@ -56,9 +73,13 @@ async function secure(file: string): Promise<void> {
 export class BackupService {
   private active: Promise<BackupResult> | null = null;
   private readonly directory: string;
+  private readonly move: typeof rename;
+  private readonly remove: typeof rm;
 
   constructor(private readonly database: SupportDatabase, private readonly options: BackupOptions, private readonly now = () => new Date()) {
     this.directory = backupDirectory(database, options.directory);
+    this.move = options.rename ?? rename;
+    this.remove = options.remove ?? rm;
   }
 
   async createBackup(): Promise<BackupResult> {
@@ -68,12 +89,21 @@ export class BackupService {
   }
 
   private async createBackupInternal(): Promise<BackupResult> {
-    await mkdir(this.directory, { recursive: true });
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const basename = `support-${timestamp(this.now())}.sqlite`;
     const finalPath = path.join(this.directory, basename);
     const temporary = path.join(this.directory, `.${basename}.${process.pid}.tmp`);
     const temporaryMetadata = `${temporary}.sha256`;
+    const finalMetadata = `${finalPath}.sha256`;
+    let publishedDatabase = false;
+    let publishedMetadata = false;
     try {
+      try {
+        await stat(finalPath);
+        throw new Error(`Refusing to overwrite an existing managed backup: ${basename}`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
       await this.database.backupTo(temporary);
       await verifySqlite(temporary);
       const digest = await sha256(temporary);
@@ -81,24 +111,44 @@ export class BackupService {
       await secure(temporary);
       await writeFile(temporaryMetadata, `${digest}  ${basename}\n`, { mode: 0o600 });
       await secure(temporaryMetadata);
-      await rename(temporary, finalPath);
-      await rename(temporaryMetadata, `${finalPath}.sha256`);
-      const retentionDeleted = await this.applyRetention();
-      return { path: finalPath, basename, size, sha256: digest, retentionDeleted };
+      await this.move(temporary, finalPath);
+      publishedDatabase = true;
+      await this.move(temporaryMetadata, finalMetadata);
+      publishedMetadata = true;
+      let retention: Pick<BackupResult, "retentionDeleted" | "retentionFailed">;
+      try { retention = await this.applyRetention(); }
+      catch { retention = { retentionDeleted: 0, retentionFailed: 1 }; }
+      return { path: finalPath, basename, size, sha256: digest, ...retention };
     } catch (error) {
-      await Promise.allSettled([rm(temporary, { force: true }), rm(temporaryMetadata, { force: true })]);
+      await Promise.allSettled([
+        this.remove(temporary, { force: true }),
+        this.remove(temporaryMetadata, { force: true }),
+        this.remove(`${temporary}-wal`, { force: true }),
+        this.remove(`${temporary}-shm`, { force: true }),
+        ...(publishedDatabase ? [this.remove(finalPath, { force: true })] : []),
+        ...(publishedMetadata ? [this.remove(finalMetadata, { force: true })] : [])
+      ]);
       throw error;
     }
   }
 
-  private async applyRetention(): Promise<number> {
+  private async applyRetention(): Promise<Pick<BackupResult, "retentionDeleted" | "retentionFailed">> {
     const entries = await readdir(this.directory, { withFileTypes: true });
     const managed = entries.filter((entry) => entry.isFile() && BACKUP_NAME.test(entry.name)).map((entry) => entry.name).sort().reverse();
     const remove = managed.slice(Math.max(1, this.options.retentionCount));
+    let retentionDeleted = 0;
+    let retentionFailed = 0;
     for (const name of remove) {
-      await Promise.all([rm(path.join(this.directory, name), { force: true }), rm(path.join(this.directory, `${name}.sha256`), { force: true })]);
+      try {
+        await this.remove(path.join(this.directory, name), { force: true });
+        retentionDeleted += 1;
+      } catch {
+        retentionFailed += 1;
+        continue;
+      }
+      try { await this.remove(path.join(this.directory, `${name}.sha256`), { force: true }); } catch { retentionFailed += 1; }
     }
-    return remove.length;
+    return { retentionDeleted, retentionFailed };
   }
 
   async newestValidBackup(): Promise<string | null> {
@@ -107,26 +157,30 @@ export class BackupService {
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
     for (const name of entries) {
       const candidate = path.join(this.directory, name);
-      try { await verifyBackupChecksum(candidate); await verifySqlite(candidate); return candidate; } catch { /* examine older backup */ }
+      try { await verifyBackupChecksum(candidate, { requireMetadata: true }); await verifySqlite(candidate); return candidate; } catch { /* examine older backup */ }
     }
     return null;
   }
 }
 
-export async function verifyBackupChecksum(file: string): Promise<string> {
+export async function verifyBackupChecksum(file: string, options: { requireMetadata?: boolean } = {}): Promise<{ sha256: string; metadata: "verified" | "absent" }> {
   const sidecar = `${file}.sha256`;
   let expected: string;
   try { expected = (await readFile(sidecar, "utf8")).trim().split(/\s+/)[0] ?? ""; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return sha256(file); throw error; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (options.requireMetadata) throw new Error("Managed backup checksum metadata is missing.");
+    return { sha256: await sha256(file), metadata: "absent" };
+  }
   if (!/^[a-f0-9]{64}$/i.test(expected)) throw new Error("Backup checksum metadata is invalid.");
   const actual = await sha256(file);
   if (actual !== expected) throw new Error("Backup checksum does not match.");
-  return actual;
+  return { sha256: actual, metadata: "verified" };
 }
 
 export class BackupScheduler {
   private timer: NodeJS.Timeout | null = null;
-  constructor(private readonly service: BackupService, private readonly options: BackupOptions, private readonly onFailure: (error: unknown) => void) {}
+  constructor(private readonly service: BackupService, private readonly options: BackupOptions, private readonly onFailure: (error: unknown) => void, private readonly onSuccess: (result: BackupResult) => void = () => undefined) {}
   async start(): Promise<void> {
     if (!this.options.enabled) return;
     const latest = await this.service.newestValidBackup();
@@ -135,7 +189,7 @@ export class BackupScheduler {
   }
   stop(): void { if (this.timer) clearTimeout(this.timer); this.timer = null; }
   private async run(): Promise<void> {
-    try { await this.service.createBackup(); } catch (error) { this.onFailure(error); }
+    try { this.onSuccess(await this.service.createBackup()); } catch (error) { this.onFailure(error); }
     this.schedule(this.options.intervalMs);
   }
   private schedule(delay: number): void {
@@ -145,17 +199,29 @@ export class BackupScheduler {
   }
 }
 
-export async function verifyRestoreCandidate(backupPath: string, liveDatabasePath: string): Promise<void> {
+export function createAutomaticBackupScheduler(
+  database: SupportDatabase,
+  options: BackupOptions,
+  onFailure: (error: unknown) => void,
+  onSuccess: (result: BackupResult) => void = () => undefined
+): BackupScheduler | null {
+  if (!options.enabled) return null;
+  try { return new BackupScheduler(new BackupService(database, options), options, onFailure, onSuccess); }
+  catch (error) { onFailure(error); return null; }
+}
+
+export async function verifyRestoreCandidate(backupPath: string, liveDatabasePath: string): Promise<RestoreVerificationResult> {
   const resolved = path.resolve(backupPath);
   if (resolved === path.resolve(liveDatabasePath)) throw new Error("Restore verification refuses the configured live database path.");
-  await verifyBackupChecksum(resolved);
-  const directory = await (await import("node:fs/promises")).mkdtemp(path.join(os.tmpdir(), "ticket-restore-"));
+  const checksum = await verifyBackupChecksum(resolved);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ticket-restore-"));
   const copy = path.join(directory, path.basename(resolved));
   try {
-    await (await import("node:fs/promises")).copyFile(resolved, copy);
+    await copyFile(resolved, copy);
     await verifySqlite(copy);
     const database = new SupportDatabase(`file:${copy}`);
     try { database.getInstallationState(); } finally { database.close(); }
     await verifySqlite(copy);
+    return { path: resolved, checksum: checksum.metadata === "verified" ? "verified" : "metadata absent", sqliteIntegrity: "ok", applicationCompatibility: "ok" };
   } finally { await rm(directory, { recursive: true, force: true }); }
 }

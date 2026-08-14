@@ -22,6 +22,7 @@ test("host config validates backup settings", () => {
   assert.throws(() => loadHostConfig({ env: { BOT_TOKEN: "123:test", BACKUP_INTERVAL_HOURS: "0" }, envFile: false }), /BACKUP_INTERVAL_HOURS/);
   assert.throws(() => loadHostConfig({ env: { BOT_TOKEN: "123:test", BACKUP_RETENTION_COUNT: "0" }, envFile: false }), /BACKUP_RETENTION_COUNT/);
   assert.equal(loadHostConfig({ env: { BOT_TOKEN: "123:test", BACKUP_ENABLED: "0" }, envFile: false }).backupEnabled, false);
+  assert.equal(loadHostConfig({ env: { BOT_TOKEN: "123:test", BACKUP_DIR: "" }, envFile: false }).backupDir, null);
 });
 
 test("explicit environment overrides local file values", async () => {
