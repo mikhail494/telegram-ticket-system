@@ -2565,6 +2565,14 @@ export function createBot(
         return;
       }
       if (action === "reset-response-time") {
+        const rendered = validateRenderedSupportAcknowledgement(
+          supportTicketReceivedTemplate(),
+          DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME
+        );
+        if (rendered.error) {
+          await showSupportSettings(ctx, "Cannot reset response time because the current acknowledgement would become too long. Shorten or reset the acknowledgement first.");
+          return;
+        }
         db.setSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY, "");
         pendingSupportSettingsInput.delete(ctx.from.id);
         await showSupportSettings(ctx, "Expected response time reset to default.");

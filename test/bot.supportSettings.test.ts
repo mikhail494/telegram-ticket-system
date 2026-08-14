@@ -6,7 +6,8 @@ import test, { afterEach } from "node:test";
 import type { Update } from "grammy/types";
 import {
   DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME,
-  DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE
+  DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE,
+  validateRenderedSupportAcknowledgement
 } from "../src/format.js";
 import { InstallationService } from "../src/installation.js";
 import { createBotHarness, TEST_STAFF_CHAT_ID, type BotHarness } from "./helpers/botHarness.js";
@@ -183,6 +184,55 @@ test("support response time editor rejects a value that would make the current a
   harness.clearApiCalls();
   await harness.bot.handleUpdate(privateMessage(1, "within 24 hours", 21));
   assert.equal(harness.db.getSetting("support_expected_response_time"), "within 24 hours");
+});
+
+test("support response time reset preserves a short override when the current acknowledgement would become too long", async () => {
+  const { harness } = createReadyHarness();
+  const shortResponseTime = "x";
+  const template = "{{response_time}}".repeat(300);
+  harness.db.setSetting("support_expected_response_time", shortResponseTime);
+  harness.db.setSetting("support_ticket_received_template", template);
+  assert.equal(validateRenderedSupportAcknowledgement(template, shortResponseTime).error, undefined);
+  assert.notEqual(validateRenderedSupportAcknowledgement(template, DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME).error, undefined);
+
+  await harness.bot.handleUpdate(privateCallback(1, "dashboard:support", 10));
+  await harness.bot.handleUpdate(privateCallback(1, "support:reset-response-time", 10));
+
+  assert.equal(harness.db.getSetting("support_expected_response_time"), shortResponseTime);
+  assert.equal(harness.db.getSetting("support_ticket_received_template"), template);
+  assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /cannot reset response time/i);
+});
+
+test("support response time reset succeeds when the current acknowledgement remains valid", async () => {
+  const { harness } = createReadyHarness();
+  harness.db.setSetting("support_expected_response_time", "within 24 hours");
+  harness.db.setSetting("support_ticket_received_template", "Reply in {{response_time}}.");
+
+  await harness.bot.handleUpdate(privateCallback(1, "dashboard:support", 10));
+  await harness.bot.handleUpdate(privateCallback(1, "support:reset-response-time", 10));
+
+  assert.equal(harness.db.getSetting("support_expected_response_time"), "");
+  assert.equal(
+    validateRenderedSupportAcknowledgement("Reply in {{response_time}}.", DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME).error,
+    undefined
+  );
+  assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /Expected response time reset to default/);
+});
+
+test("support acknowledgement reset remains valid with the longest supported response time", async () => {
+  const { harness } = createReadyHarness();
+  const longestResponseTime = "x".repeat(80);
+  harness.db.setSetting("support_expected_response_time", longestResponseTime);
+  harness.db.setSetting("support_ticket_received_template", "Custom acknowledgement");
+
+  await harness.bot.handleUpdate(privateCallback(1, "dashboard:support", 10));
+  await harness.bot.handleUpdate(privateCallback(1, "support:reset-acknowledgement", 10));
+
+  assert.equal(harness.db.getSetting("support_ticket_received_template"), "");
+  assert.equal(
+    validateRenderedSupportAcknowledgement(DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE, longestResponseTime).error,
+    undefined
+  );
 });
 
 test("support response time changes remain valid for acknowledgement templates without placeholders", async () => {
