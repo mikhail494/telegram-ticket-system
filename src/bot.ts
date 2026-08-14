@@ -75,6 +75,7 @@ import {
 } from "./deliveryDiagnostics.js";
 import { StaffChatDeliveryCoordinator, type StaffChatDeliveryOptions } from "./staffChatDelivery.js";
 import { InstallationService, type Permission } from "./installation.js";
+import { BackgroundTaskRegistry, type BackgroundTaskTracker } from "./lifecycle.js";
 import { formatWorkspaceChecklist, isPrivateInviteLink, parsePublicSupergroupReference, validateStaffWorkspace, type WorkspaceValidationResult } from "./workspaceValidation.js";
 import {
   formatPublicChatPermissionChecklist,
@@ -93,7 +94,6 @@ const SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY = "support_expected_response_ti
 const SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY = "support_ticket_received_template";
 const STAFF_TEST_TICKET_MODE_SETTING_PREFIX = "staff_test_ticket_mode:";
 const STAFF_TEST_TICKET_ID_SETTING_PREFIX = "staff_test_ticket_id:";
-const pendingWarningTimers = new Map<string, ReturnType<typeof setTimeout>>();
 type ModerationReactionEmoji = "\u{1F440}" | "\u{1F621}";
 const MODERATION_STRIKE_REACTION: ModerationReactionEmoji = "\u{1F440}";
 const MODERATION_SANCTION_REACTION: ModerationReactionEmoji = "\u{1F621}";
@@ -226,9 +226,13 @@ interface BotRuntimeDependencies {
   entityNotificationProviders?: EntityNotificationProviderRegistry;
   staffChatDelivery?: StaffChatDeliveryOptions;
   installationService?: InstallationService;
+  backgroundTasks?: BackgroundTaskTracker;
 }
 
-export type SupportBot = Bot<Context> & { recoverPendingTicketBatchStaffOperations(): Promise<void> };
+export type SupportBot = Bot<Context> & {
+  recoverPendingTicketBatchStaffOperations(): Promise<void>;
+  stopBackgroundWork(): void;
+};
 
 export function createBot(
   db: SupportDatabase,
@@ -260,7 +264,9 @@ export function createBot(
   });
   const fetchImpl = runtime.fetch ?? globalThis.fetch;
   const moderationNow = runtime.now ?? (() => new Date());
-  const moderationCleanupScheduler = runtime.scheduleModerationCleanup ?? scheduleModerationCleanup;
+  const backgroundTasks = runtime.backgroundTasks ?? new BackgroundTaskRegistry();
+  const moderationCleanupScheduler = runtime.scheduleModerationCleanup ?? ((api, moderationDb, jobId, delayMs) =>
+    scheduleModerationCleanup(api, moderationDb, jobId, delayMs, undefined, backgroundTasks));
   const entityNotificationProviders = runtime.entityNotificationProviders ?? new Map();
   const runningTicketBatchExports = new Set<number>();
   const staffChatDelivery = new StaffChatDeliveryCoordinator(runtime.staffChatDelivery);
@@ -1610,7 +1616,7 @@ export function createBot(
   }
 
   bot.command("start", async (ctx) => {
-    if (!isPrivateChat(ctx)) { await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler); return; }
+    if (!isPrivateChat(ctx)) { await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler, backgroundTasks); return; }
 
     pendingSupportSettingsInput.delete(ctx.from?.id ?? -1);
     persistUserFromContext(db, ctx);
@@ -2742,7 +2748,7 @@ export function createBot(
     }
 
     if (!isPrivateChat(ctx)) {
-      await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler);
+      await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler, backgroundTasks);
       return;
     }
 
@@ -3606,7 +3612,10 @@ export function createBot(
     ticketBatchRecoveryTimer = setTimeout(() => {
       ticketBatchRecoveryTimer = undefined;
       ticketBatchRecoveryTimerAt = undefined;
-      void recoverTicketBatchStaffOperations().catch((error) => logger.warn({ category: normalizeTelegramDeliveryError(error).category }, "Ticket batch staff recovery failed"));
+      backgroundTasks.run(async () => {
+        try { await recoverTicketBatchStaffOperations(); }
+        catch (error) { logger.warn({ category: normalizeTelegramDeliveryError(error).category }, "Ticket batch staff recovery failed"); }
+      });
     }, delay);
     ticketBatchRecoveryTimer.unref();
   }
@@ -3630,6 +3639,12 @@ export function createBot(
 
   const supportBot = bot as SupportBot;
   supportBot.recoverPendingTicketBatchStaffOperations = () => recoverTicketBatchStaffOperations();
+  supportBot.stopBackgroundWork = () => {
+    if (ticketBatchRecoveryTimer) clearTimeout(ticketBatchRecoveryTimer);
+    ticketBatchRecoveryTimer = undefined;
+    ticketBatchRecoveryTimerAt = undefined;
+    stopPendingWarnings();
+  };
   return supportBot;
 }
 
@@ -4715,7 +4730,8 @@ async function handlePublicLanguageModeration(
   db: SupportDatabase,
   ctx: Context,
   now: () => Date,
-  cleanupScheduler: ModerationCleanupScheduler
+  cleanupScheduler: ModerationCleanupScheduler,
+  backgroundTasks?: BackgroundTaskTracker
 ): Promise<void> {
   if (!ctx.chat || !ctx.from || !ctx.message || ctx.from.is_bot) return;
   const moderation = moderationConfigForChat(db, ctx.chat.id);
@@ -4747,7 +4763,7 @@ async function handlePublicLanguageModeration(
         const startedAt = currentTime;
         const dueAt = new Date(startedAt.getTime() + 3_000);
         db.upsertLanguageModerationWarningState(ctx.chat.id, messageThreadId, { lastWarningMessageId: currentChatState?.last_warning_message_id ?? null, lastWarningAt: currentChatState?.last_warning_at ?? null, ordinaryMessagesSinceWarning: currentChatState?.ordinary_messages_since_warning ?? 0, pendingWarningStartedAt: startedAt.toISOString(), pendingWarningDueAt: dueAt.toISOString() });
-        schedulePendingWarning(ctx.api, db, ctx.chat.id, messageThreadId, 3_000);
+        schedulePendingWarning(ctx.api, db, ctx.chat.id, messageThreadId, 3_000, backgroundTasks);
       }
     } else {
       db.upsertLanguageModerationUserState({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from), current_strikes: 1, sanction_tier: state.sanction_tier, first_strike_at: currentTime.toISOString() });
@@ -4826,12 +4842,21 @@ async function setModerationReaction(
   }
 }
 
-function schedulePendingWarning(api: BotApi, db: SupportDatabase, chatId: number, messageThreadId: number | null, delayMs: number): void {
+const pendingWarningTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function stopPendingWarnings(): void {
+  for (const timer of pendingWarningTimers.values()) clearTimeout(timer);
+  pendingWarningTimers.clear();
+}
+
+function schedulePendingWarning(api: BotApi, db: SupportDatabase, chatId: number, messageThreadId: number | null, delayMs: number, backgroundTasks?: BackgroundTaskTracker): void {
   const key = `${chatId}:${messageThreadId ?? 0}`;
   if (pendingWarningTimers.has(key)) return;
   const timer = setTimeout(() => {
     pendingWarningTimers.delete(key);
-    void processPendingWarning(api, db, chatId, messageThreadId);
+    const run = () => processPendingWarning(api, db, chatId, messageThreadId);
+    if (backgroundTasks) backgroundTasks.run(run);
+    else void run();
   }, delayMs);
   timer.unref();
   pendingWarningTimers.set(key, timer);

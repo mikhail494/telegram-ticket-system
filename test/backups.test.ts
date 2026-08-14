@@ -32,6 +32,54 @@ test("online backup is finalized with immutable checksum metadata and passes a r
   } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test("successful backup removes only its own temporary database and WAL sidecars", async () => {
+  const { directory, db, backupDirectory } = await fixture();
+  try {
+    const originalBackup = db.backupTo.bind(db);
+    db.backupTo = async (destination) => {
+      const result = await originalBackup(destination);
+      await Promise.all([writeFile(`${destination}-wal`, "temporary WAL"), writeFile(`${destination}-shm`, "temporary SHM")]);
+      return result;
+    };
+    const result = await new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 }).createBackup();
+    const entries = await readdir(backupDirectory);
+    assert.equal(entries.includes(path.basename(result.path)), true);
+    assert.equal(entries.includes(`${path.basename(result.path)}.sha256`), true);
+    assert.equal(entries.some((name) => name.startsWith(".support-") && (name.endsWith(".tmp") || name.endsWith(".tmp.sha256") || name.endsWith(".tmp-wal") || name.endsWith(".tmp-shm"))), false);
+  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("temporary sidecar cleanup failure does not roll back a finalized backup", async () => {
+  const { directory, db, backupDirectory } = await fixture();
+  try {
+    const originalBackup = db.backupTo.bind(db);
+    db.backupTo = async (destination) => {
+      const result = await originalBackup(destination);
+      await Promise.all([writeFile(`${destination}-wal`, "temporary WAL"), writeFile(`${destination}-shm`, "temporary SHM")]);
+      return result;
+    };
+    let tick = 0;
+    const now = () => new Date(1_700_000_000_000 + tick++);
+    const older = await new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 }, now).createBackup();
+    const service = new BackupService(db, {
+      enabled: true,
+      directory: backupDirectory,
+      intervalMs: 1,
+      retentionCount: 14,
+      removeTemporary: async (target, options) => {
+        if (String(target).endsWith(".tmp-shm")) throw new Error("temporary sidecar remains locked");
+        await rm(target, options);
+      }
+    }, now);
+    const result = await service.createBackup();
+    assert.equal(result.tempCleanupFailed, 1);
+    await verifyBackupChecksum(result.path, { requireMetadata: true });
+    await verifySqlite(result.path);
+    assert.equal((await readdir(backupDirectory)).includes(path.basename(result.path)), true);
+    assert.equal((await readdir(backupDirectory)).includes(path.basename(older.path)), true);
+  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("managed backup publication removes its own partial final file when checksum publication fails", async () => {
   const { directory, db, backupDirectory } = await fixture();
   try {
@@ -119,6 +167,69 @@ test("scheduler does not duplicate a recent valid backup", async () => {
     const scheduler = new BackupScheduler(service, { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 }, () => assert.fail("unexpected failure"));
     await scheduler.start(); scheduler.stop();
     assert.equal((await readdir(backupDirectory)).filter((name) => /^support-.*\.sqlite$/.test(name)).length, 1);
+  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("scheduler stops future work and drains an active backup before shutdown", async () => {
+  const { directory, db, backupDirectory } = await fixture();
+  try {
+    const originalBackup = db.backupTo.bind(db);
+    let release!: () => void;
+    let started!: () => void;
+    const active = new Promise<void>((resolve) => { release = resolve; });
+    const startedBackup = new Promise<void>((resolve) => { started = resolve; });
+    db.backupTo = async (destination) => {
+      started();
+      await active;
+      return originalBackup(destination);
+    };
+    const service = new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 });
+    const scheduler = new BackupScheduler(service, { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 }, () => assert.fail("unexpected failure"));
+    const startedScheduler = scheduler.start();
+    await startedBackup;
+    let drained = false;
+    const draining = scheduler.stopAndDrain().then(() => { drained = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(drained, false);
+    release();
+    await Promise.all([startedScheduler, draining]);
+    assert.equal(drained, true);
+  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("scheduler drain treats temporary cleanup failure as a completed backup", async () => {
+  const { directory, db, backupDirectory } = await fixture();
+  try {
+    const originalBackup = db.backupTo.bind(db);
+    let release!: () => void;
+    let started!: () => void;
+    const active = new Promise<void>((resolve) => { release = resolve; });
+    const startedBackup = new Promise<void>((resolve) => { started = resolve; });
+    db.backupTo = async (destination) => {
+      started();
+      await active;
+      const result = await originalBackup(destination);
+      await writeFile(`${destination}-shm`, "temporary SHM");
+      return result;
+    };
+    const results: number[] = [];
+    const service = new BackupService(db, {
+      enabled: true,
+      directory: backupDirectory,
+      intervalMs: 86_400_000,
+      retentionCount: 14,
+      removeTemporary: async (target, options) => {
+        if (String(target).endsWith(".tmp-shm")) throw new Error("temporary sidecar remains locked");
+        await rm(target, options);
+      }
+    });
+    const scheduler = new BackupScheduler(service, { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 }, () => assert.fail("unexpected failure"), (result) => results.push(result.tempCleanupFailed));
+    const startedScheduler = scheduler.start();
+    await startedBackup;
+    const draining = scheduler.stopAndDrain();
+    release();
+    await Promise.all([startedScheduler, draining]);
+    assert.deepEqual(results, [1]);
   } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

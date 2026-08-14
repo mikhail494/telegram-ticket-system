@@ -6,6 +6,12 @@ The bot creates verified SQLite online backups by default every 24 hours and kee
 
 Backups are useful for bad deploys, accidental mutation, and logical corruption. A backup on the same disk does not protect against disk, VPS, or provider loss; copy verified backups to separately managed storage. Restrict an operator-provided `BACKUP_DIR` to the service account.
 
+## Graceful shutdown
+
+On `SIGINT` or `SIGTERM`, the process stops accepting new detached recovery work, stops polling, waits for active middleware and tracked database-dependent background work, then waits for any active automatic backup before closing SQLite. The scheduler stops creating future backups as soon as shutdown begins. A failed backup drain is logged safely and does not leave the database open indefinitely. `SIGKILL` cannot be drained by the application, so use it only after ordinary shutdown has failed.
+
+After final publication, a successful backup attempts to remove only the temporary database, checksum, WAL, and SHM sidecars created for that attempt. A cleanup failure is reported but does not remove the finalized backup or cause automatic backup draining to fail. It does not sweep or delete unrelated older temporary files in an operator-managed backup directory.
+
 ## Manual restore drill
 
 1. Verify the chosen backup first with `npm run db:restore:verify -- <backup-path>`.

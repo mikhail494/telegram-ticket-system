@@ -8,10 +8,12 @@ All notable changes to this project are documented in this file. This project fo
 
 - Verified SQLite online backups with safe retention, restore verification tooling, and an operational restore drill.
 - Secret-safe runtime logging and an explicit interactive OWNER pairing command.
+- Graceful shutdown lifecycle draining for Telegram polling, tracked durable background work, and active SQLite backups.
 
 ### Fixed
 
 - Kept existing automatic role-based access behavior unchanged for READY installations after OWNER pairing and startup.
+- Removed per-attempt SQLite backup WAL/SHM temporary sidecars after successful backup publication without rolling back a finalized backup if cleanup fails.
 
 ### Changed
 

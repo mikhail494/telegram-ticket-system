@@ -9,6 +9,7 @@ import type { EntityNotificationProviderRegistry } from "./entityNotifications.j
 import { InstallationService } from "./installation.js";
 import { runWorkspaceStartup } from "./startup.js";
 import { createAutomaticBackupScheduler } from "./backups.js";
+import { ApplicationLifecycle, awaitApplicationCompletion, BackgroundTaskRegistry } from "./lifecycle.js";
 
 const db = new SupportDatabase(config.databaseUrl);
 const quickRepliesRegistry = createPersistentQuickRepliesRegistry(db, loadQuickRepliesRegistry());
@@ -26,14 +27,29 @@ const installationService = new InstallationService(db);
 if (hostConfig.staffChatId !== null) installationService.adoptLegacyInstallation(hostConfig.staffChatId);
 setRuntimeStaffChatId(installationService.getStaffChatId());
 const entityNotificationProviders: EntityNotificationProviderRegistry = new Map();
-const bot = createBot(db, quickRepliesRegistry, { entityNotificationProviders, installationService });
+const backgroundTasks = new BackgroundTaskRegistry();
+const bot = createBot(db, quickRepliesRegistry, { entityNotificationProviders, installationService, backgroundTasks });
 const backupOptions = { enabled: config.backupEnabled, directory: config.backupDir, intervalMs: config.backupIntervalHours * 3_600_000, retentionCount: config.backupRetentionCount };
 const backupScheduler = createAutomaticBackupScheduler(
   db,
   backupOptions,
   (error) => logger.warn({ err: error }, "Automatic SQLite backups are unavailable; support bot startup will continue"),
-  (result) => logger.info({ backup: result.basename, size: result.size, sha256: result.sha256, retentionDeleted: result.retentionDeleted, retentionFailed: result.retentionFailed }, "Automatic SQLite backup completed")
+  (result) => {
+    const details = { backup: result.basename, size: result.size, sha256: result.sha256, retentionDeleted: result.retentionDeleted, retentionFailed: result.retentionFailed, tempCleanupFailed: result.tempCleanupFailed };
+    if (result.tempCleanupFailed) logger.warn(details, "Automatic SQLite backup completed with temporary cleanup failures");
+    else logger.info(details, "Automatic SQLite backup completed");
+  }
 );
+let polling: Promise<void> | null = null;
+const lifecycle = new ApplicationLifecycle({
+  stopPolling: () => bot.stop(),
+  pollingCompletion: () => polling,
+  stopBackgroundWork: () => bot.stopBackgroundWork(),
+  backgroundTasks,
+  stopAndDrainBackups: () => backupScheduler?.stopAndDrain() ?? Promise.resolve(),
+  closeDatabase: () => db.close(),
+  onDrainFailure: (stage, error) => logger.warn({ err: error, stage }, "Graceful shutdown drain failed")
+});
 
 async function main(): Promise<void> {
   await bot.api.deleteWebhook({ drop_pending_updates: false });
@@ -72,24 +88,23 @@ async function main(): Promise<void> {
 
   const shutdown = (signal: NodeJS.Signals) => {
     logger.info({ signal }, "Stopping bot");
-    backupScheduler?.stop();
-    bot.stop();
-    db.close();
+    return lifecycle.shutdown();
   };
 
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
 
-  await bot.start({
+  polling = bot.start({
     allowed_updates: ["message", "callback_query", "chat_member"],
     onStart: (botInfo) => {
       logger.info({ username: botInfo.username }, "Telegram support bot started");
     }
   });
+  await awaitApplicationCompletion(polling, lifecycle);
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   logger.fatal({ err: error }, "Bot failed to start");
-  db.close();
-  process.exit(1);
+  await lifecycle.startupFailed();
+  process.exitCode = 1;
 });
