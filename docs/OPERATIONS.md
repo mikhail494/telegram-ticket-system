@@ -14,6 +14,10 @@ Finalized managed backups are checksum-validated and SQLite-checked through isol
 
 Pre-fix managed backup WAL/SHM/journal sidecars may be removed manually only after confirming they match an old managed backup filename. Retention removes those exact companions only when it has successfully removed that managed backup. Never remove live database `-wal` or `-shm` files while the service is running.
 
+## Customer private-message anti-flood protection
+
+Private customer ingress uses a permissive, in-memory per-user limiter to bound sustained abusive traffic while allowing ordinary bursts of screenshots, documents, and clarifications. A throttled message is not stored or forwarded; the customer is asked to wait briefly and resend it. The limiter does not ban, mute, or close tickets, and its process-local state resets on restart. Operator flows, staff test tickets, public moderation, Batch operations, and configuration input are not limited by this protection.
+
 ## Manual restore drill
 
 1. Verify the chosen backup first with `npm run db:restore:verify -- <backup-path>`.

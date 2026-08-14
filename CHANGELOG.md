@@ -9,6 +9,7 @@ All notable changes to this project are documented in this file. This project fo
 - Verified SQLite online backups with safe retention, restore verification tooling, and an operational restore drill.
 - Secret-safe runtime logging and an explicit interactive OWNER pairing command.
 - Graceful shutdown lifecycle draining for Telegram polling, tracked durable background work, and active SQLite backups.
+- In-memory per-customer private-message anti-flood protection that keeps legitimate support bursts permissive without creating bans or durable abuse records.
 
 ### Fixed
 
