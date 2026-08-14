@@ -15,7 +15,7 @@ flowchart LR
 
 `src/index.ts` owns process startup: it loads configuration, opens `SupportDatabase`, initializes persistent Quick Replies and the installation service, composes the bot, then performs ready-workspace recovery before long polling starts.
 
-`src/bot.ts` remains the grammY composition root and routes four distinct update paths: customer ticket ingress, the staff workspace, managed public-chat moderation, and private operator control. `PrivateControlPlane` owns the private operator screen lifecycle and short-lived editor and picker sessions. It deliberately remains grammY-aware because it is the Telegram adapter for OWNER and staff administration, while the underlying installation, Quick Reply, moderation, and Batch domain services retain their own business state.
+`src/bot.ts` remains the grammY composition root and routes four distinct update paths: customer ticket ingress, the staff workspace, managed public-chat moderation, and private operator control. `PrivateControlPlane` owns private operator dashboard/navigation rendering, authoritative-screen lifecycle, stale callback rejection, editor and picker sessions, and callback/input dispatch for Team, public chats, moderation, Support settings, and Quick Replies. It deliberately remains grammY-aware because it is the Telegram adapter for OWNER and staff administration, while installation, Quick Reply, moderation, and Batch services retain their business state.
 
 ```mermaid
 flowchart TD

@@ -47,3 +47,54 @@ test("private control plane keeps one authoritative screen and rejects stale cal
     db.close();
   }
 });
+
+test("private control plane owns dashboard callbacks and private editor input dispatch", async () => {
+  const db = new SupportDatabase(":memory:");
+  const installation = new InstallationService(db);
+  const controlPlane = new PrivateControlPlane(installation);
+  const token = installation.createOwnerPairingToken();
+  installation.consumeOwnerPairingToken(token, { telegramId: 42, username: "owner" });
+  const edits: string[] = [];
+  const context = {
+    from: { id: 42, is_bot: false, first_name: "Owner" },
+    chat: { id: 42, type: "private" },
+    api: {
+      async editMessageText(_chatId: number, _messageId: number, text: string) { edits.push(text); },
+      async deleteMessage() {},
+      async editMessageReplyMarkup() {}
+    },
+    callbackQuery: { message: { chat: { id: 42, type: "private" }, message_id: 100 } },
+    async answerCallbackQuery() {},
+    async reply() { return { chat: { id: 42 }, message_id: 100 }; }
+  } as unknown as Context;
+
+  controlPlane.configureOperatorUi({
+    db,
+    quickReplies: {} as never,
+    canConfigure: async () => true,
+    canUsePermission: async () => true,
+    hasPrivateWorkspaceMembership: async () => true,
+    getPendingBatchExport: () => undefined,
+    onStartTestTicket: async () => {},
+    onShowWorkspace: async () => {},
+    onShowBatch: async () => {},
+    packageVersion: "1.3.0",
+    botUsername: () => "bot",
+    botId: () => 1
+  });
+
+  try {
+    await controlPlane.renderScreen(context, "Owner dashboard", new InlineKeyboard().text("Support settings", "dashboard:support"));
+    assert.equal(await controlPlane.handleCallback(context, "dashboard:support"), true);
+    assert.match(edits.at(-1) ?? "", /Support settings/);
+
+    assert.equal(await controlPlane.handleCallback(context, "support:edit"), true);
+    assert.equal(controlPlane.getPendingSupportSettingsInput(42), "RESPONSE_TIME");
+    assert.equal(await controlPlane.handlePrivateInput(context, "30 minutes"), true);
+    assert.equal(controlPlane.getPendingSupportSettingsInput(42), undefined);
+    assert.equal(db.getSetting("support_expected_response_time"), "30 minutes");
+    assert.equal(await controlPlane.handlePrivateInput(context, "unrelated operator text"), false);
+  } finally {
+    db.close();
+  }
+});

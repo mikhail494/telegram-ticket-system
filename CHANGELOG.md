@@ -20,7 +20,7 @@ All notable changes to this project are documented in this file. This project fo
 
 ### Changed
 
-- Private operator UI state and authoritative-screen lifecycle now have one dedicated control-plane owner while preserving existing OWNER/ADMIN navigation and callback behavior.
+- Private operator UI state, dashboard navigation, private configuration screens, and authoritative-screen lifecycle now have one dedicated control-plane owner while preserving existing OWNER/ADMIN navigation and callback behavior.
 - Ticket Batch exports now represent the known hosted Telegram Bot API oversized-file limitation as explicit unavailable attachment metadata instead of aborting the whole archive.
 - OWNER and ADMIN can configure the expected response-time text and complete new-ticket acknowledgement shown when a ticket is created.
 - Test-ticket mode now retires its prompt after consumption and returns the operator to a fresh dashboard after a test ticket closes.

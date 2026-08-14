@@ -333,7 +333,26 @@ export function createBot(
   privateControlPlane.configureOperatorUi({
     db,
     quickReplies: quickRepliesManager,
-    canConfigure: (ctx) => requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")
+    canConfigure: (ctx) => requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION"),
+    canUsePermission: requirePrivatePermission,
+    hasPrivateWorkspaceMembership: hasRequiredPrivateWorkspaceMembership,
+    getPendingBatchExport: getPendingPrivateBatchExport,
+    onStartTestTicket: async (ctx) => {
+      if (!ctx.from) return;
+      setStaffTestTicketId(ctx.from.id, undefined);
+      db.setSetting(`${STAFF_TEST_TICKET_MODE_SETTING_PREFIX}${ctx.from.id}`, "true");
+      await privateControlPlane.refreshScreen(ctx, "Test-ticket mode enabled for your next message. Send harmless test content now.", new InlineKeyboard().text("Cancel", "dashboard:home"));
+    },
+    onShowWorkspace: (ctx) => showStaffWorkspaceSettings(ctx),
+    onShowBatch: async (ctx) => {
+      if (!ctx.from) return;
+      const exportId = getPendingPrivateBatchExport(ctx.from.id);
+      if (exportId) await showPrivateBatchWaiting(ctx, exportId);
+      else await privateControlPlane.showDashboard(ctx);
+    },
+    packageVersion: packageMetadata.version,
+    botUsername: () => bot.botInfo?.username,
+    botId: () => bot.botInfo?.id
   });
 
   class StaffOnlyDeliveryError extends Error {
@@ -779,30 +798,6 @@ export function createBot(
 
   const clearPublicChatPicker = privateControlPlane.clearPublicChatPicker.bind(privateControlPlane);
 
-  function dashboardText(userId: number): string {
-    const member = installation.getMember(userId);
-    const counts = db.getInstallationOperationalCounts();
-    return [member?.role === "OWNER" ? "Owner dashboard" : `${member?.role.replace("_", " ") ?? "Staff"} dashboard`, "",
-      installation.getState().setupState === "READY" ? "Support is ready." : "Finish setup to activate support.",
-      `Public chats: ${counts.publicChats}`].join("\n");
-  }
-
-  function systemStatusText(userId: number): string {
-    const workspace = installation.getActiveWorkspace();
-    const counts = db.getInstallationOperationalCounts();
-    const roles = new Map<string, number>();
-    for (const entry of installation.listTeamMembers()) roles.set(entry.role, (roles.get(entry.role) ?? 0) + 1);
-    return ["System status", "",
-      `Bot: @${bot.botInfo?.username ?? "loading"}`, `Version: ${packageMetadata.version}`, `Setup: ${installation.getState().setupState}`,
-      `Authorization: ${installation.getState().authorizationMode}`, `Owner: ${installation.getOwner()?.username ? `@${installation.getOwner()?.username}` : installation.getOwner()?.userTelegramId ?? "not paired"}`,
-      `Staff workspace: ${workspace?.title ?? workspace?.telegram_chat_id ?? "not configured"}`,
-      `Support Logs: ${workspace && db.getSetting(`support_logs_message_thread_id:${workspace.telegram_chat_id}`) ? "configured" : "not configured"}`,
-      `Public chats: ${counts.publicChats}`, `Team: OWNER ${roles.get("OWNER") ?? 0}, ADMIN ${roles.get("ADMIN") ?? 0}, SENIOR_AGENT ${roles.get("SENIOR_AGENT") ?? 0}, AGENT ${roles.get("AGENT") ?? 0}`,
-      `Moderation enabled: ${counts.moderationEnabled}/${counts.publicChats}`, `Unhealthy moderation chats: ${counts.unhealthyModerationChats}`,
-      `Pending moderation cleanup: ${counts.pendingCleanup}`, `Pending archives: ${counts.pendingArchives}`,
-      `Pending batch staff operations: ${counts.pendingBatchStaffOperations}`, "Database: available"].join("\n");
-  }
-
   function privateBatchWorkflowSettingKey(userId: number): string {
     return `private_batch_export:${userId}`;
   }
@@ -816,16 +811,6 @@ export function createBot(
   function setPendingPrivateBatchExport(userId: number, exportId: string | undefined): void {
     db.setSetting(privateBatchWorkflowSettingKey(userId), exportId ?? "");
     installation.saveOnboardingStage(userId, exportId ? "BATCH_APPLY" : "WELCOME", exportId ? "ACTIVE" : "COMPLETED");
-  }
-
-  function dashboardKeyboard(userId: number, role: string): InlineKeyboard {
-    const keyboard = new InlineKeyboard();
-    if (role === "OWNER" || role === "ADMIN") {
-      if (installation.getState().setupState !== "READY") keyboard.text("Continue setup", "setup:resume").row();
-      const pendingExport = getPendingPrivateBatchExport(userId);
-      keyboard.text("Staff workspace", "dashboard:workspace").row().text("Public chats", "dashboard:public").text("Team", "dashboard:team").row().text("Moderation", "dashboard:moderation").text("Quick replies", "dashboard:quick").row().text("Support settings", "dashboard:support").row().text(pendingExport ? "Continue batch" : "Export tickets", pendingExport ? "batch-ui:continue" : "batch-ui:export").text("Batch status", "batch-ui:recent").row().text("System status", "dashboard:status").row();
-    }
-    return keyboard.text("Open test ticket as user", "dashboard:test-ticket");
   }
 
   function privateBatchWaitingKeyboard(): InlineKeyboard {
@@ -850,49 +835,10 @@ export function createBot(
     await renderPrivateScreen(ctx, ["Preparing batch answers", "", "1. Give your chosen AI assistant the product documentation, support policies, FAQ, tone guidance, and any other authoritative context it needs.", "2. Upload this ticket export ZIP to that assistant.", "3. Ask it to follow the instructions included in the archive and prepare the completed import file.", "4. Send the returned answer file here for preview and explicit approval."].join("\n"), new InlineKeyboard().text("Back", "batch-ui:continue"));
   }
 
-  async function showDashboard(ctx: Context, fresh = false): Promise<void> {
-    if (!ctx.from) return;
-    const member = installation.getMember(ctx.from.id);
-    if (!member) return;
-    if (!await hasRequiredPrivateWorkspaceMembership(ctx)) {
-      await ctx.reply("Staff workspace membership required for role-based access.");
-      return;
-    }
-    const render = fresh ? refreshPrivateScreen : renderPrivateScreen;
-    await render(ctx, dashboardText(ctx.from.id), dashboardKeyboard(ctx.from.id, member.role));
-  }
-
-  async function showDashboardAfterStaffTestTicketClose(ctx: Context): Promise<void> {
-    if (!ctx.from) return;
-    const member = installation.getMember(ctx.from.id);
-    if (!member) return;
-    await retireTrackedPrivateScreens(ctx);
-    await sendFreshPrivateScreen(ctx, dashboardText(ctx.from.id), dashboardKeyboard(ctx.from.id, member.role));
-  }
-
-  async function showSystemStatus(ctx: Context): Promise<void> {
-    if (!ctx.from) return;
-    await renderPrivateScreen(ctx, systemStatusText(ctx.from.id), new InlineKeyboard().text("Back", "dashboard:home"));
-  }
-
-  async function showModerationDashboard(ctx: Context): Promise<void> {
-    const chats = db.listManagedPublicChats();
-    const enabled = chats.filter((chat) => chat.moderation_enabled === 1).length;
-    const unhealthy = chats.filter((chat) => chat.permission_status === "UNHEALTHY").length;
-    const text = ["Moderation", "", `Managed public chats: ${chats.length}`, `Enabled: ${enabled}`, `Needs attention: ${unhealthy}`, "", "Manage each public chat's moderation settings and permission health."].join("\n");
-    await renderPrivateScreen(ctx, text, new InlineKeyboard().text("Manage public chats", "dashboard:public").row().text("Back", "dashboard:home"));
-  }
-
-  const showQuickRepliesManagement = privateControlPlane.showQuickRepliesManagement.bind(privateControlPlane);
-  const showQuickReplyDetail = privateControlPlane.showQuickReplyDetail.bind(privateControlPlane);
-  const beginQuickReplyInput = privateControlPlane.beginQuickReplyInput.bind(privateControlPlane);
-  const showQuickReplyCategoryPicker = privateControlPlane.showQuickReplyCategoryPicker.bind(privateControlPlane);
-  const savePendingQuickReplyInput = privateControlPlane.consumeQuickReplyInput.bind(privateControlPlane);
-  const showSupportSettings = privateControlPlane.showSupportSettings.bind(privateControlPlane);
-  const beginSupportResponseTimeInput = privateControlPlane.beginSupportResponseTimeInput.bind(privateControlPlane);
-  const beginSupportAcknowledgementInput = privateControlPlane.beginSupportAcknowledgementInput.bind(privateControlPlane);
-  const savePendingSupportSettingsInput = privateControlPlane.consumeSupportSettingsInput.bind(privateControlPlane);
-
+  const showDashboard = privateControlPlane.showDashboard.bind(privateControlPlane);
+  const showDashboardAfterStaffTestTicketClose = privateControlPlane.showDashboardAfterStaffTestTicketClose.bind(privateControlPlane);
+  const showSystemStatus = privateControlPlane.showSystemStatus.bind(privateControlPlane);
+  const showModerationDashboard = privateControlPlane.showModerationDashboard.bind(privateControlPlane);
   function supportExpectedResponseTime(): string {
     return db.getSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME;
   }
@@ -1803,6 +1749,8 @@ export function createBot(
       privateControlPlane.clearSupportSettingsInput(ctx.from.id);
     }
 
+    if (await privateControlPlane.handleCallback(ctx, data)) return;
+
     if (namespace === "owner" && data === "owner:confirm-transfer") {
       if (!isPrivateChat(ctx) || !ctx.from || !db.hasPendingOwnerTransfer(ctx.from.id)) { await ctx.answerCallbackQuery({ text: "No pending owner transfer.", show_alert: true }); return; }
       if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
@@ -1845,57 +1793,6 @@ export function createBot(
       if (data === "workspace:select") await sendWorkspacePicker(ctx, "RECONFIGURE");
       else await showStaffWorkspaceSettings(ctx);
       return;
-    }
-
-    if (namespace === "dashboard") {
-      if (!isPrivateChat(ctx) || !ctx.from || !installation.getMember(ctx.from.id)) { await ctx.answerCallbackQuery({ text: "Staff access required.", show_alert: true }); return; }
-      if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
-      const action = data.split(":")[1]; await ctx.answerCallbackQuery();
-      if (action === "test-ticket") {
-        setStaffTestTicketId(ctx.from.id, undefined);
-        db.setSetting(`${STAFF_TEST_TICKET_MODE_SETTING_PREFIX}${ctx.from.id}`, "true");
-        await refreshPrivateScreen(ctx, "Test-ticket mode enabled for your next message. Send harmless test content now.", new InlineKeyboard().text("Cancel", "dashboard:home"));
-        return;
-      }
-      if (action === "status") { await showSystemStatus(ctx); return; }
-      if (action === "workspace") {
-        if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) return;
-        await showStaffWorkspaceSettings(ctx);
-        return;
-      }
-      if (action === "moderation") {
-        if (!await requirePrivatePermission(ctx, "MODERATION_SETTINGS")) return;
-        await showModerationDashboard(ctx);
-        return;
-      }
-      if (action === "team") {
-        if (!await requirePrivatePermission(ctx, "MANAGE_TEAM")) return;
-        await showTeam(ctx); return;
-      }
-      if (action === "public") {
-        if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) return;
-        await showPublicChats(ctx);
-        return;
-      }
-      if (action === "quick") {
-        if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) return;
-        privateControlPlane.clearPendingQuickReplyInput(ctx.from.id);
-        await showQuickRepliesManagement(ctx);
-        return;
-      }
-      if (action === "support") {
-        if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) return;
-        await showSupportSettings(ctx);
-        return;
-      }
-      if (action === "batch") {
-        if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) return;
-        const exportId = getPendingPrivateBatchExport(ctx.from.id);
-        if (exportId) await showPrivateBatchWaiting(ctx, exportId);
-        else await showDashboard(ctx);
-        return;
-      }
-      await showDashboard(ctx); return;
     }
 
     if (namespace === "batch-ui") {
@@ -1956,305 +1853,6 @@ export function createBot(
       return;
     }
 
-    if (namespace === "public") {
-      if (!isPrivateChat(ctx) || !ctx.from || !installation.can(ctx.from.id, "CONFIGURE_INSTALLATION")) {
-        await ctx.answerCallbackQuery({ text: "Owner or administrator access required.", show_alert: true });
-        return;
-      }
-      if (!await hasRequiredPrivateWorkspaceMembership(ctx)) {
-        await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true });
-        return;
-      }
-      const [, action, rawChatId] = data.split(":");
-      const chatId = Number(rawChatId);
-      if (action === "add") {
-        await ctx.answerCallbackQuery();
-        await sendPublicChatPicker(ctx);
-        return;
-      }
-      if (action === "list") {
-        privateControlPlane.clearPendingPublicChatConfiguration(ctx.from.id);
-        await ctx.answerCallbackQuery();
-        await showPublicChats(ctx);
-        return;
-      }
-      if (!Number.isSafeInteger(chatId)) {
-        await ctx.answerCallbackQuery({ text: "Invalid public chat.", show_alert: true });
-        return;
-      }
-      const managed = db.getManagedPublicChat(chatId);
-      if (!managed) {
-        await ctx.answerCallbackQuery({ text: "This public chat is not managed.", show_alert: true });
-        return;
-      }
-      if (action === "open") {
-        privateControlPlane.clearPendingPublicChatConfiguration(ctx.from.id);
-        await ctx.answerCallbackQuery();
-        await showPublicChatSettings(ctx, chatId);
-        return;
-      }
-      if (action?.startsWith("config-")) {
-        const field = action.slice("config-".length);
-        if (!(["warning", "allowlist", "cooldown", "threshold", "lookback"] as const).includes(field as "warning" | "allowlist" | "cooldown" | "threshold" | "lookback")) {
-          await ctx.answerCallbackQuery({ text: "Unknown configuration field.", show_alert: true });
-          return;
-        }
-        await ctx.answerCallbackQuery();
-        await beginPublicChatConfiguration(ctx, managed, field as PublicChatConfigurationField);
-        return;
-      }
-      if (action === "disable") {
-        db.setManagedPublicChatModerationEnabled(chatId, false);
-        await ctx.answerCallbackQuery({ text: "Moderation disabled." });
-        await showPublicChatSettings(ctx, chatId);
-        return;
-      }
-      if (action === "remove") {
-        await ctx.answerCallbackQuery();
-        await renderPrivateScreen(ctx, `Remove ${publicChatLabel(managed)} from managed public chats? Historical moderation records will be preserved.`, new InlineKeyboard()
-          .text("Confirm removal", `public:confirm-remove:${chatId}`)
-          .row()
-          .text("Cancel", `public:open:${chatId}`));
-        return;
-      }
-      if (action === "confirm-remove") {
-        db.deactivateManagedPublicChat(chatId);
-        await ctx.answerCallbackQuery({ text: "Public chat removed." });
-        await showPublicChats(ctx);
-        return;
-      }
-      if (action === "check" || action === "enable") {
-        try {
-          if (!bot.botInfo) throw new Error("Bot identity is unavailable.");
-          const result = await validatePublicModerationChat(ctx.api, chatId, bot.botInfo.id);
-          db.recordManagedPublicChatPermissionHealth({
-            chatId,
-            healthy: result.valid,
-            reactionsAvailable: result.reactionsAvailable,
-            connected: true,
-            title: result.title,
-            username: result.username,
-            isForum: result.isForum
-          });
-          if (action === "enable" && result.valid) db.setManagedPublicChatModerationEnabled(chatId, true);
-          await ctx.answerCallbackQuery({
-            text: action === "enable" && result.valid ? "Moderation enabled." : result.valid ? "Permissions are healthy." : "Required permissions are missing.",
-            show_alert: !result.valid
-          });
-          const notice = action === "enable" && result.valid
-            ? "Moderation enabled. Permissions are healthy."
-            : result.valid
-              ? "Permissions checked: healthy."
-              : `Permissions need attention:\n${formatPublicChatPermissionChecklist(result)}`;
-          await showPublicChatSettings(ctx, chatId, notice);
-        } catch (error) {
-          db.recordManagedPublicChatUnreachable(chatId);
-          logger.warn({ chatId, err: error }, "Could not validate managed public chat permissions");
-          await ctx.answerCallbackQuery({ text: "The public chat could not be inspected.", show_alert: true });
-          await showPublicChatSettings(ctx, chatId, "The public chat could not be inspected. Check the bot membership and permissions, then try again.");
-        }
-        return;
-      }
-      await ctx.answerCallbackQuery({ text: "Unknown public chat action.", show_alert: true });
-      return;
-    }
-
-    if (namespace === "quick") {
-      if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) {
-        await ctx.answerCallbackQuery({ text: "Quick Replies management requires OWNER or ADMIN.", show_alert: true });
-        return;
-      }
-      if (!ctx.from) return;
-      const [, action, value] = data.split(":");
-      if (action === "list") {
-        privateControlPlane.clearPendingQuickReplyInput(ctx.from.id);
-        await ctx.answerCallbackQuery();
-        await showQuickRepliesManagement(ctx);
-        return;
-      }
-      if (action === "view" && value) {
-        privateControlPlane.clearPendingQuickReplyInput(ctx.from.id);
-        await ctx.answerCallbackQuery();
-        await showQuickReplyDetail(ctx, value);
-        return;
-      }
-      if (action === "edit-name" && value) {
-        if (!quickRepliesManager.findTemplate(value)) {
-          await ctx.answerCallbackQuery({ text: "This Quick Reply is no longer available.", show_alert: true });
-          return;
-        }
-        await ctx.answerCallbackQuery();
-        await beginQuickReplyInput(ctx, { kind: "EDIT_TITLE", templateId: value });
-        return;
-      }
-      if (action === "edit-text" && value) {
-        if (!quickRepliesManager.findTemplate(value)) {
-          await ctx.answerCallbackQuery({ text: "This Quick Reply is no longer available.", show_alert: true });
-          return;
-        }
-        await ctx.answerCallbackQuery();
-        await beginQuickReplyInput(ctx, { kind: "EDIT_TEXT", templateId: value });
-        return;
-      }
-      if (action === "add") {
-        await ctx.answerCallbackQuery();
-        const categories = quickRepliesManager.listCategories();
-        if (categories.length === 1) await beginQuickReplyInput(ctx, { kind: "ADD_TITLE", categoryId: categories[0]!.id });
-        else await showQuickReplyCategoryPicker(ctx);
-        return;
-      }
-      if (action === "add-category" && value) {
-        if (!quickRepliesManager.listCategories().some((category) => category.id === value)) {
-          await ctx.answerCallbackQuery({ text: "This category is no longer available.", show_alert: true });
-          return;
-        }
-        await ctx.answerCallbackQuery();
-        await beginQuickReplyInput(ctx, { kind: "ADD_TITLE", categoryId: value });
-        return;
-      }
-      if (action === "add-save") {
-        const pending = privateControlPlane.getPendingQuickReplyInput(ctx.from.id);
-        if (!pending || pending.kind !== "ADD_PREVIEW") {
-          await ctx.answerCallbackQuery({ text: "This reply draft is no longer active.", show_alert: true });
-          return;
-        }
-        const template = quickRepliesManager.createTemplate(pending);
-        privateControlPlane.clearPendingQuickReplyInput(ctx.from.id);
-        await ctx.answerCallbackQuery({ text: "Quick Reply saved." });
-        await retirePrivateScreens(ctx);
-        await showQuickReplyDetail(ctx, template.id);
-        return;
-      }
-      if (action === "delete" && value) {
-        const template = quickRepliesManager.findTemplate(value);
-        if (!template) {
-          await ctx.answerCallbackQuery({ text: "This Quick Reply is no longer available.", show_alert: true });
-          return;
-        }
-        await ctx.answerCallbackQuery();
-        await renderPrivateScreen(ctx, `Delete \"${template.title}\"?`, new InlineKeyboard()
-          .text("Delete", `quick:confirm-delete:${template.id}`)
-          .row()
-          .text("Cancel", `quick:view:${template.id}`));
-        return;
-      }
-      if (action === "confirm-delete" && value) {
-        const result = quickRepliesManager.deleteTemplate(value);
-        if (result === "LAST_TEMPLATE") {
-          await ctx.answerCallbackQuery({ text: "Keep at least one reply in this category.", show_alert: true });
-          await showQuickReplyDetail(ctx, value);
-          return;
-        }
-        if (result === "NOT_FOUND") {
-          await ctx.answerCallbackQuery({ text: "This Quick Reply is no longer available.", show_alert: true });
-          await showQuickRepliesManagement(ctx);
-          return;
-        }
-        await ctx.answerCallbackQuery({ text: "Quick Reply deleted." });
-        await showQuickRepliesManagement(ctx);
-        return;
-      }
-      await ctx.answerCallbackQuery({ text: "Unknown Quick Replies action.", show_alert: true });
-      return;
-    }
-
-    if (namespace === "support") {
-      if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) {
-        await ctx.answerCallbackQuery({ text: "Support settings require OWNER or ADMIN.", show_alert: true });
-        return;
-      }
-      if (!ctx.from) return;
-      const action = data.split(":")[1];
-      await ctx.answerCallbackQuery();
-      if (action === "edit") {
-        await beginSupportResponseTimeInput(ctx);
-        return;
-      }
-      if (action === "edit-acknowledgement") {
-        await beginSupportAcknowledgementInput(ctx);
-        return;
-      }
-      if (action === "reset-response-time") {
-        const rendered = validateRenderedSupportAcknowledgement(
-          supportTicketReceivedTemplate(),
-          DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME
-        );
-        if (rendered.error) {
-          await showSupportSettings(ctx, "Cannot reset response time because the current acknowledgement would become too long. Shorten or reset the acknowledgement first.");
-          return;
-        }
-        db.setSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY, "");
-        privateControlPlane.clearSupportSettingsInput(ctx.from.id);
-        await showSupportSettings(ctx, "Expected response time reset to default.");
-        return;
-      }
-      if (action === "reset-acknowledgement") {
-        db.setSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY, "");
-        privateControlPlane.clearSupportSettingsInput(ctx.from.id);
-        await showSupportSettings(ctx, "Acknowledgement reset to default.");
-        return;
-      }
-      if (action === "back") {
-        privateControlPlane.clearSupportSettingsInput(ctx.from.id);
-        await showDashboard(ctx);
-        return;
-      }
-      await ctx.answerCallbackQuery({ text: "Unknown support settings action.", show_alert: true });
-      return;
-    }
-
-    if (namespace === "team") {
-      if (!isPrivateChat(ctx) || !ctx.from) { await ctx.answerCallbackQuery({ text: "Private staff dashboard only.", show_alert: true }); return; }
-      if (!await requirePrivatePermission(ctx, "MANAGE_TEAM")) { await ctx.answerCallbackQuery({ text: "Your application role cannot manage the team.", show_alert: true }); return; }
-      const [, action, value, roleValue] = data.split(":");
-      try {
-        if (action === "list") { await ctx.answerCallbackQuery(); await showTeam(ctx); return; }
-        if (action === "member") {
-          const member = installation.getMember(Number(value));
-          if (!member) throw new Error("This team member is no longer active.");
-          await ctx.answerCallbackQuery();
-          await showTeamMember(ctx, member);
-          return;
-        }
-        if (action === "transfer") {
-          if (installation.getMember(ctx.from.id)?.role !== "OWNER") throw new Error("Only the OWNER can transfer ownership.");
-          const token = installation.createOwnerRecoveryToken();
-          await ctx.answerCallbackQuery({ text: "Transfer link created." });
-          await retirePrivateScreens(ctx);
-          await ctx.reply(`One-use ownership transfer link (30 minutes):\nhttps://t.me/${bot.botInfo.username}?start=setup_${token}\n\nThe current OWNER remains active until the recipient confirms.`);
-          await sendFreshPrivateScreen(ctx, "Team", teamKeyboard(ctx.from.id));
-          return;
-        }
-        if (action === "set") {
-          installation.assignRole(ctx.from.id, Number(value), roleValue as "ADMIN" | "SENIOR_AGENT" | "AGENT");
-          await ctx.answerCallbackQuery({ text: "Role updated." });
-          const member = installation.getMember(Number(value));
-          if (member) await showTeamMember(ctx, member);
-          return;
-        }
-        if (action === "revoke") {
-          installation.assignRole(ctx.from.id, Number(value), "AGENT");
-          await ctx.answerCallbackQuery({ text: "Member kept as an agent." });
-          const member = installation.getMember(Number(value));
-          if (member) await showTeamMember(ctx, member);
-          return;
-        }
-        const role = (value === "ADMIN" || value === "SENIOR_AGENT" || value === "AGENT") ? value : "AGENT";
-        const token = installation.createTeamInvitation(ctx.from.id, role);
-        await ctx.answerCallbackQuery({ text: "Invitation created." });
-        await retirePrivateScreens(ctx);
-        await ctx.reply(`One-use ${role} invitation (30 minutes):\nhttps://t.me/${bot.botInfo.username}?start=team_${token}`);
-        await sendFreshPrivateScreen(ctx, "Team", teamKeyboard(ctx.from.id));
-      }
-      catch (error) { await ctx.answerCallbackQuery({ text: error instanceof Error ? error.message : "Invitation denied.", show_alert: true }); }
-      return;
-    }
-
-    if (namespace === "rbac") {
-      await ctx.answerCallbackQuery({ text: "Role-based access is automatic for ready installations.", show_alert: true });
-      return;
-    }
-
     if (namespace === "user") {
       await handleUserCallback(db, ctx, data, async (ticketId) => {
         if (!ctx.from || staffTestTicketId(ctx.from.id) !== ticketId) return;
@@ -2303,11 +1901,11 @@ export function createBot(
     const shared = ctx.message.chat_shared;
     if (shared.request_id === 1400) {
       try {
-        await inspectAndSavePublicChat(ctx, shared.chat_id, { title: shared.title, username: shared.username });
+        await privateControlPlane.inspectAndSavePublicChat(ctx, shared.chat_id, { title: shared.title, username: shared.username });
       } catch (error) {
         logger.warn({ chatId: shared.chat_id, err: error }, "Could not add selected public chat");
         await clearPublicChatPicker(ctx);
-        await showPublicChats(ctx, "The selected public chat could not be inspected. Add the bot as an administrator, then retry.");
+        await privateControlPlane.showPublicChats(ctx, "The selected public chat could not be inspected. Add the bot as an administrator, then retry.");
       }
       return;
     }
@@ -2372,33 +1970,7 @@ export function createBot(
 
     if (ctx.from && installation.getMember(ctx.from.id) && db.getSetting(`staff_test_ticket_mode:${ctx.from.id}`) !== "true") {
       const text = ctx.message && "text" in ctx.message ? ctx.message.text : "";
-      if (text && await savePendingQuickReplyInput(ctx, text)) return;
-      if (text && await savePendingSupportSettingsInput(ctx, text)) return;
-      if (text && await savePendingPublicChatConfiguration(ctx, text)) return;
-      if (privateControlPlane.isPublicChatSelectionPending(ctx.from.id) && text) {
-        if (text === "Cancel public chat selection") {
-          await clearPublicChatPicker(ctx);
-          await showPublicChats(ctx, "Public chat selection cancelled.");
-          return;
-        }
-        if (isPrivateInviteLink(text)) {
-          await clearPublicChatPicker(ctx);
-          await showPublicChats(ctx, "The Bot API cannot inspect an inaccessible private invite link. Add the bot to the group, then use the Telegram public-chat picker. You do not need a numeric chat ID.");
-          return;
-        }
-        const reference = parsePublicSupergroupReference(text);
-        if (reference) {
-          try {
-            const chat = await ctx.api.getChat(reference);
-            await inspectAndSavePublicChat(ctx, chat.id);
-          } catch (error) {
-            logger.warn({ err: error }, "Could not resolve public chat reference");
-            await clearPublicChatPicker(ctx);
-            await showPublicChats(ctx, "That public supergroup could not be validated. Check its public username and the bot permissions, or use the Telegram picker.");
-          }
-          return;
-        }
-      }
+      if (text && await privateControlPlane.handlePrivateInput(ctx, text)) return;
       const session = installation.getOnboardingSession(ctx.from.id);
       const workspaceMode = privateControlPlane.getPendingWorkspaceSelection(ctx.from.id) ?? (session?.state === "ACTIVE" && session.stage === "STAFF_WORKSPACE" ? "SETUP" : undefined);
       if (workspaceMode && text) {
