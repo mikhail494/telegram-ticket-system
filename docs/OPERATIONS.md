@@ -10,7 +10,9 @@ Backups are useful for bad deploys, accidental mutation, and logical corruption.
 
 On `SIGINT` or `SIGTERM`, the process stops accepting new detached recovery work, stops polling, waits for active middleware and tracked database-dependent background work, then waits for any active automatic backup before closing SQLite. The scheduler stops creating future backups as soon as shutdown begins. A failed backup drain is logged safely and does not leave the database open indefinitely. `SIGKILL` cannot be drained by the application, so use it only after ordinary shutdown has failed.
 
-After final publication, a successful backup attempts to remove only the temporary database, checksum, WAL, and SHM sidecars created for that attempt. A cleanup failure is reported but does not remove the finalized backup or cause automatic backup draining to fail. It does not sweep or delete unrelated older temporary files in an operator-managed backup directory.
+Finalized managed backups are checksum-validated and SQLite-checked through isolated temporary copies, so normal discovery never opens or creates SQLite sidecars beside the finalized source. After final publication, a successful backup attempts to remove only the temporary database, checksum, WAL, and SHM sidecars created for that attempt. A cleanup failure is reported but does not remove the finalized backup or cause automatic backup draining to fail. It does not sweep or delete unrelated older temporary files in an operator-managed backup directory.
+
+Pre-fix managed backup WAL/SHM/journal sidecars may be removed manually only after confirming they match an old managed backup filename. Retention removes those exact companions only when it has successfully removed that managed backup. Never remove live database `-wal` or `-shm` files while the service is running.
 
 ## Manual restore drill
 

@@ -32,6 +32,23 @@ test("online backup is finalized with immutable checksum metadata and passes a r
   } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test("finalized backup discovery validates an isolated copy without mutating the backup directory", async () => {
+  const { directory, db, backupDirectory } = await fixture();
+  try {
+    const result = await new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 }).createBackup();
+    const original = await readFile(result.path);
+    const checksum = await readFile(`${result.path}.sha256`, "utf8");
+    const temporaryDirectoriesBefore = (await readdir(os.tmpdir())).filter((name) => name.startsWith("ticket-backup-verify-"));
+    const discovered = await new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 }).newestValidBackup();
+    const temporaryDirectoriesAfter = (await readdir(os.tmpdir())).filter((name) => name.startsWith("ticket-backup-verify-"));
+    assert.equal(discovered, result.path);
+    assert.deepEqual(await readFile(result.path), original);
+    assert.equal(await readFile(`${result.path}.sha256`, "utf8"), checksum);
+    assert.deepEqual(temporaryDirectoriesAfter, temporaryDirectoriesBefore);
+    assert.equal((await readdir(backupDirectory)).some((name) => name === `${result.basename}-wal` || name === `${result.basename}-shm` || name === `${result.basename}-journal`), false);
+  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("successful backup removes only its own temporary database and WAL sidecars", async () => {
   const { directory, db, backupDirectory } = await fixture();
   try {
@@ -142,6 +159,21 @@ test("restore verification rejects missing, corrupt, truncated, mismatched, and 
     await writeFile(`${result.path}.sha256`, checksum);
     assert.deepEqual(await readFile(result.path), bytes);
     assert.equal(await readFile(`${result.path}.sha256`, "utf8"), checksum);
+    assert.equal((await readdir(backupDirectory)).some((name) => name === `${result.basename}-wal` || name === `${result.basename}-shm` || name === `${result.basename}-journal`), false);
+  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("discovery skips a corrupt newer finalized backup without creating sidecars", async () => {
+  const { directory, db, backupDirectory } = await fixture();
+  try {
+    let tick = 0;
+    const service = new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 }, () => new Date(1_700_000_000_000 + tick++));
+    const older = await service.createBackup();
+    const newer = await service.createBackup();
+    await writeFile(newer.path, "corrupt finalized backup");
+    assert.equal(await service.newestValidBackup(), older.path);
+    assert.equal((await readdir(backupDirectory)).some((name) => name === `${newer.basename}-wal` || name === `${newer.basename}-shm` || name === `${newer.basename}-journal`), false);
+    assert.equal((await readdir(backupDirectory)).some((name) => name === `${older.basename}-wal` || name === `${older.basename}-shm` || name === `${older.basename}-journal`), false);
   } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -159,14 +191,41 @@ test("retention only removes managed finalized backups and overlapping triggers 
   } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test("retention removes only exact legacy sidecars for the managed backup it deletes", async () => {
+  const { directory, db, backupDirectory } = await fixture();
+  try {
+    let tick = 0;
+    const service = new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 1 }, () => new Date(1_700_000_000_000 + tick++));
+    const older = await service.createBackup();
+    await Promise.all([
+      writeFile(`${older.path}-wal`, "legacy WAL"),
+      writeFile(`${older.path}-shm`, "legacy SHM"),
+      writeFile(`${older.path}-journal`, "legacy journal"),
+      writeFile(path.join(backupDirectory, "support.db-wal"), "live-like WAL"),
+      writeFile(path.join(backupDirectory, "support.db-shm"), "live-like SHM"),
+      writeFile(path.join(backupDirectory, "random.sqlite-wal"), "unrelated WAL"),
+      writeFile(path.join(backupDirectory, "notes.txt"), "keep")
+    ]);
+    const newest = await service.createBackup();
+    assert.equal(newest.retentionDeleted, 1);
+    assert.equal((await readdir(backupDirectory)).some((name) => name === path.basename(older.path) || name === `${older.basename}.sha256` || name === `${older.basename}-wal` || name === `${older.basename}-shm` || name === `${older.basename}-journal`), false);
+    assert.equal((await readdir(backupDirectory)).includes(path.basename(newest.path)), true);
+    assert.equal((await readdir(backupDirectory)).includes("support.db-wal"), true);
+    assert.equal((await readdir(backupDirectory)).includes("support.db-shm"), true);
+    assert.equal((await readdir(backupDirectory)).includes("random.sqlite-wal"), true);
+    assert.equal((await readdir(backupDirectory)).includes("notes.txt"), true);
+  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("scheduler does not duplicate a recent valid backup", async () => {
   const { directory, db, backupDirectory } = await fixture();
   try {
     const service = new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 });
-    await service.createBackup();
+    const result = await service.createBackup();
     const scheduler = new BackupScheduler(service, { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 }, () => assert.fail("unexpected failure"));
     await scheduler.start(); scheduler.stop();
     assert.equal((await readdir(backupDirectory)).filter((name) => /^support-.*\.sqlite$/.test(name)).length, 1);
+    assert.equal((await readdir(backupDirectory)).some((name) => name === `${result.basename}-wal` || name === `${result.basename}-shm` || name === `${result.basename}-journal`), false);
   } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

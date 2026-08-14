@@ -14,6 +14,7 @@ All notable changes to this project are documented in this file. This project fo
 
 - Kept existing automatic role-based access behavior unchanged for READY installations after OWNER pairing and startup.
 - Removed per-attempt SQLite backup WAL/SHM temporary sidecars after successful backup publication without rolling back a finalized backup if cleanup fails.
+- Kept finalized managed SQLite backups immutable during validation and cleaned exact legacy SQLite sidecars only when their managed backup ages out through retention.
 
 ### Changed
 
