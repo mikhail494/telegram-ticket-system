@@ -150,6 +150,50 @@ describe("ticket batch Telegram workflow", () => {
     assert.equal(harness.findApiCalls("sendMessage").some((call) => String(call.payload.text).includes("Export failed before delivery")), true);
   });
 
+  it("exports available attachments when Telegram reports one file is too big", async () => {
+    const harness = createHarness();
+    const active = harness.seedTicket();
+    harness.db.addMessage({ ticketId: active.id, direction: "USER_TO_STAFF", sourceChatId: active.user_telegram_id, sourceMessageId: 98, mediaType: "photo", fileId: "small" });
+    harness.db.addMessage({ ticketId: active.id, direction: "USER_TO_STAFF", sourceChatId: active.user_telegram_id, sourceMessageId: 99, mediaType: "video", fileId: "large" });
+    harness.setFileDownload("small", new Uint8Array([7, 8, 9]), { filePath: "evidence/photo.jpg" });
+    harness.setApiResponseOverride("getFile", (call) => call.payload.file_id === "large"
+      ? { ok: false, error_code: 400, description: "Bad Request: file is too big" }
+      : undefined);
+
+    await harness.bot.handleUpdate(exportCommand());
+
+    assert.equal(harness.countApiCalls("sendDocument"), 1);
+    const exportDocument = harness.findApiCalls("sendDocument")[0];
+    assert.match(String(exportDocument?.payload.caption), /Attachments: 1 embedded, 1 unavailable/);
+    const entries = unzipSync(exportDocument!.documentBytes!);
+    const mediaIndex = JSON.parse(strFromU8(entries["media-index.json"]!)) as Array<{ embedded: boolean; failure_category?: string }>;
+    assert.deepEqual(mediaIndex.map((attachment) => [attachment.embedded, attachment.failure_category]), [[true, undefined], [false, "TELEGRAM_FILE_TOO_LARGE"]]);
+  });
+
+  it("keeps other Telegram getFile failures strict", async () => {
+    const harness = createHarness();
+    const active = harness.seedTicket();
+    harness.db.addMessage({ ticketId: active.id, direction: "USER_TO_STAFF", sourceChatId: active.user_telegram_id, sourceMessageId: 99, mediaType: "document", fileId: "file_1" });
+    harness.failNextApiCall("getFile", "Bad Request: file not found", 400);
+
+    await harness.bot.handleUpdate(exportCommand());
+
+    assert.equal(harness.countApiCalls("sendDocument"), 0);
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => String(call.payload.text).includes("Export failed before delivery")), true);
+  });
+
+  it("keeps Telegram rate limits strict during attachment retrieval", async () => {
+    const harness = createHarness();
+    const active = harness.seedTicket();
+    harness.db.addMessage({ ticketId: active.id, direction: "USER_TO_STAFF", sourceChatId: active.user_telegram_id, sourceMessageId: 99, mediaType: "document", fileId: "file_1" });
+    harness.failNextApiCall("getFile", "Too Many Requests", 429);
+
+    await harness.bot.handleUpdate(exportCommand());
+
+    assert.equal(harness.countApiCalls("sendDocument"), 0);
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => String(call.payload.text).includes("Export failed before delivery")), true);
+  });
+
   it("rejects export commands inside ticket topics", async () => {
     const harness = createHarness();
     const ticket = harness.seedTicket();

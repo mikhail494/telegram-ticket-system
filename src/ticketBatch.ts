@@ -123,9 +123,17 @@ export interface DownloadedTicketBatchAttachment {
   mimeType?: string | null;
 }
 
+export interface UnavailableTicketBatchAttachment {
+  unavailable: true;
+  failureCategory: "TELEGRAM_FILE_TOO_LARGE";
+  failureReason: "Attachment exceeds the hosted Telegram Bot API download limit.";
+}
+
+export type TicketBatchAttachmentDownloadResult = DownloadedTicketBatchAttachment | UnavailableTicketBatchAttachment;
+
 export type TicketBatchAttachmentDownloader = (
   source: Readonly<TicketBatchAttachmentSource>
-) => Promise<DownloadedTicketBatchAttachment>;
+) => Promise<TicketBatchAttachmentDownloadResult>;
 
 export interface TicketBatchEmbeddedAttachment {
   ticket_id: number;
@@ -143,6 +151,22 @@ export interface TicketBatchEmbeddedAttachment {
   disk_path: string;
 }
 
+export interface TicketBatchUnavailableAttachment {
+  ticket_id: number;
+  database_message_id: number;
+  source_telegram_message_id: number | null;
+  timestamp: string;
+  direction: TicketMessageRecord["direction"];
+  media_type: string;
+  mime_type: null;
+  original_filename: string | null;
+  embedded: false;
+  failure_category: "TELEGRAM_FILE_TOO_LARGE";
+  failure_reason: "Attachment exceeds the hosted Telegram Bot API download limit.";
+}
+
+export type TicketBatchExportAttachment = TicketBatchEmbeddedAttachment | TicketBatchUnavailableAttachment;
+
 export interface TemporaryTicketBatchZip {
   directory: string;
   filePath: string;
@@ -150,6 +174,8 @@ export interface TemporaryTicketBatchZip {
   ticketCount: number;
   messageCount: number;
   attachmentCount: number;
+  embeddedAttachmentCount: number;
+  failedAttachmentCount: number;
 }
 
 export const FOLLOW_UP_STATES = ["NONE", "WAITING_USER", "WAITING_DEVS", "WAITING_QUEST_OWNER", "MONITORING"] as const;
@@ -404,10 +430,11 @@ export async function createTicketBatchZip(
   const filePath = path.join(directory, filename);
   try {
     const attachments = await embedAttachments(snapshot, directory, downloadAttachment);
+    const embeddedAttachments = attachments.filter(isEmbeddedAttachment);
     const manifest: TicketBatchExportManifest = {
       ...snapshot.manifest,
-      embedded_attachment_count: attachments.length,
-      failed_attachment_count: 0
+      embedded_attachment_count: embeddedAttachments.length,
+      failed_attachment_count: attachments.length - embeddedAttachments.length
     };
     const records = renderTicketRecords(snapshot, attachments);
     const mediaIndex = attachments.map(stripDiskPath);
@@ -418,7 +445,7 @@ export async function createTicketBatchZip(
       { archivePath: "media-index.json", bytes: strToU8(`${JSON.stringify(mediaIndex, null, 2)}\n`) },
       { archivePath: "ANSWER_PACKAGE_INSTRUCTIONS.md", bytes: strToU8(buildAnswerPackageInstructions(snapshot.exportId)) },
       { archivePath: "answer-package.schema.json", bytes: strToU8(`${JSON.stringify(getAnswerPackageJsonSchema(), null, 2)}\n`) },
-      ...attachments.map((attachment) => ({ archivePath: attachment.archive_path, filePath: attachment.disk_path }))
+      ...embeddedAttachments.map((attachment) => ({ archivePath: attachment.archive_path, filePath: attachment.disk_path }))
     ];
     await writeZip(entries, filePath);
     await validateTicketBatchZip(filePath, manifest, records, attachments);
@@ -428,7 +455,9 @@ export async function createTicketBatchZip(
       filename,
       ticketCount: manifest.ticket_count,
       messageCount: manifest.message_count,
-      attachmentCount: attachments.length
+      attachmentCount: attachments.length,
+      embeddedAttachmentCount: embeddedAttachments.length,
+      failedAttachmentCount: attachments.length - embeddedAttachments.length
     };
   } catch (error) {
     await fs.rm(directory, { recursive: true, force: true });
@@ -575,6 +604,18 @@ export function buildAnswerPackageInstructions(exportId: string): string {
     "A terminal staff-topic synchronization failure preserves internal follow-up context and is never a reason to repeat a user-facing reply.",
     "Use WAITING_USER only when the user must provide information, WAITING_DEVS for technical investigation, WAITING_QUEST_OWNER for independent quest-host review, and MONITORING for an external result that does not need user input.",
     "",
+    "## Unavailable attachments",
+    "",
+    "An attachment with `embedded: false` existed in Telegram but could not be included in this ZIP. Do not invent or hallucinate unavailable attachment contents. The human operator is authoritative: explicit operator instructions about the attachment, ticket handling, reply, follow-up, escalation, or closure take precedence when the final package remains valid.",
+    "",
+    "First use the exported ticket history, text, captions, previous staff replies, follow-up context, and any operator instructions. Do not ask for manual review when the remaining ticket context is sufficient to decide safely.",
+    "",
+    "If the unavailable attachment materially affects the decision, ask the human operator to inspect it in Telegram before finalizing that ticket. Identify the ticket and useful attachment metadata, explain briefly why its contents matter, and wait for the operator's description. Treat that description as authoritative context and then choose the normal schema-valid action.",
+    "",
+    "If the operator confirms the attachment is spam, irrelevant, or otherwise non-actionable and gives no more specific direction, prefer a short professional response and `reply_and_close`. Do not use insulting or profane customer-facing language. Explicit operator instructions always override this default.",
+    "",
+    "If review is required but the operator has not supplied the needed context, do not guess. During an interactive preparation session, ask first. If a package must be produced before clarification, prefer `no_action` with existing internal follow-up context indicating that manual attachment review is required.",
+    "",
     "```json",
     JSON.stringify({
       schema: "telegram_ticket_answer_package",
@@ -637,8 +678,8 @@ async function embedAttachments(
   snapshot: TicketBatchExportSnapshot,
   directory: string,
   downloadAttachment: TicketBatchAttachmentDownloader
-): Promise<TicketBatchEmbeddedAttachment[]> {
-  const attachments: TicketBatchEmbeddedAttachment[] = [];
+): Promise<TicketBatchExportAttachment[]> {
+  const attachments: TicketBatchExportAttachment[] = [];
   const usedPaths = new Set<string>();
   const messageById = new Map(snapshot.records.flatMap((record) => record.messages.map((message) => [message.id, message])));
   for (const source of snapshot.attachmentSources) {
@@ -650,6 +691,22 @@ async function embedAttachments(
       throw new TicketBatchValidationError(`Ticket #${source.ticketId} message ${source.messageId} could not be mapped into the export.`);
     }
     const downloaded = await downloadAttachment(source);
+    if (isUnavailableAttachment(downloaded)) {
+      attachments.push({
+        ticket_id: source.ticketId,
+        database_message_id: source.messageId,
+        source_telegram_message_id: source.sourceMessageId,
+        timestamp: message.created_at,
+        direction: message.direction,
+        media_type: source.mediaType,
+        mime_type: null,
+        original_filename: source.filename,
+        embedded: false,
+        failure_category: downloaded.failureCategory,
+        failure_reason: downloaded.failureReason
+      });
+      continue;
+    }
     if (!(downloaded.bytes instanceof Uint8Array) || downloaded.bytes.byteLength === 0) {
       throw new TicketBatchValidationError(`Ticket #${source.ticketId} message ${source.messageId} attachment could not be embedded.`);
     }
@@ -682,12 +739,12 @@ async function embedAttachments(
     });
   }
   return attachments.sort((left, right) =>
-    left.ticket_id - right.ticket_id || left.database_message_id - right.database_message_id || left.archive_path.localeCompare(right.archive_path)
+    left.ticket_id - right.ticket_id || left.database_message_id - right.database_message_id || attachmentSortKey(left).localeCompare(attachmentSortKey(right))
   );
 }
 
-function renderTicketRecords(snapshot: TicketBatchExportSnapshot, attachments: TicketBatchEmbeddedAttachment[]): Array<Record<string, unknown>> {
-  const attachmentsByMessage = new Map<number, TicketBatchEmbeddedAttachment[]>();
+function renderTicketRecords(snapshot: TicketBatchExportSnapshot, attachments: TicketBatchExportAttachment[]): Array<Record<string, unknown>> {
+  const attachmentsByMessage = new Map<number, TicketBatchExportAttachment[]>();
   for (const attachment of attachments) {
     const items = attachmentsByMessage.get(attachment.database_message_id) ?? [];
     items.push(attachment);
@@ -751,7 +808,7 @@ function formatTicketsMarkdown(snapshot: TicketBatchExportSnapshot, records: Arr
     const ticket = record as {
       ticket_id: number; status: string; user_telegram_id: number; username: string | null; first_name: string | null; last_name: string | null;
       created_at: string; updated_at: string; snapshot_token: string; follow_up_state: string; internal_note: string | null; escalation_target: string; follow_up_updated_at: string | null;
-      messages: Array<{ timestamp: string; sender_type: string | null; direction: string; text: string | null; caption: string | null; attachments: Array<{ media_type: string; archive_path: string }> }>;
+      messages: Array<{ timestamp: string; sender_type: string | null; direction: string; text: string | null; caption: string | null; attachments: TicketBatchExportAttachment[] }>;
     };
     lines.push(`## Ticket #${ticket.ticket_id}`, "", `- Status: ${ticket.status}`, `- User Telegram ID: ${ticket.user_telegram_id}`);
     if (ticket.username) lines.push(`- Username: @${ticket.username}`);
@@ -764,7 +821,13 @@ function formatTicketsMarkdown(snapshot: TicketBatchExportSnapshot, records: Arr
       if (content !== null) lines.push(content, "");
       if (message.attachments.length) {
         lines.push("Attachments:", "");
-        for (const attachment of message.attachments) lines.push(`- ${titleCase(attachment.media_type)}: \`${attachment.archive_path}\``);
+        for (const attachment of message.attachments) {
+          if (attachment.embedded) {
+            lines.push(`- ${titleCase(attachment.media_type)}: \`${attachment.archive_path}\``);
+          } else {
+            lines.push(`- ${titleCase(attachment.media_type)}: ${attachment.original_filename ?? "unnamed attachment"}`, "  Status: unavailable", "  Reason: exceeds the hosted Telegram Bot API download limit");
+          }
+        }
         lines.push("");
       }
     }
@@ -826,13 +889,14 @@ async function validateTicketBatchZip(
   filePath: string,
   manifest: TicketBatchExportManifest,
   records: Array<Record<string, unknown>>,
-  attachments: TicketBatchEmbeddedAttachment[]
+  attachments: TicketBatchExportAttachment[]
 ): Promise<void> {
+  const embeddedAttachments = attachments.filter(isEmbeddedAttachment);
   const expectedPaths = new Set([
     "manifest.json", "tickets.jsonl", "tickets.md", "media-index.json", "ANSWER_PACKAGE_INSTRUCTIONS.md", "answer-package.schema.json",
-    ...attachments.map((attachment) => attachment.archive_path)
+    ...embeddedAttachments.map((attachment) => attachment.archive_path)
   ]);
-  const attachmentsByPath = new Map(attachments.map((attachment) => [attachment.archive_path, attachment]));
+  const attachmentsByPath = new Map(embeddedAttachments.map((attachment) => [attachment.archive_path, attachment]));
   const metadataEntries = new Map<string, Uint8Array[]>();
   const metadataLengths = new Map<string, number>();
   const seenPaths = new Set<string>();
@@ -883,7 +947,7 @@ async function validateTicketBatchZip(
     throw new TicketBatchValidationError("Ticket export ZIP did not contain the expected files.");
   }
   const parsedManifest = JSON.parse(strFromU8(requiredMetadataEntry(metadataEntries, metadataLengths, "manifest.json"))) as TicketBatchExportManifest;
-  const parsedMediaIndex = JSON.parse(strFromU8(requiredMetadataEntry(metadataEntries, metadataLengths, "media-index.json"))) as Array<Omit<TicketBatchEmbeddedAttachment, "disk_path">>;
+  const parsedMediaIndex = JSON.parse(strFromU8(requiredMetadataEntry(metadataEntries, metadataLengths, "media-index.json"))) as TicketBatchExportAttachment[];
   JSON.parse(strFromU8(requiredMetadataEntry(metadataEntries, metadataLengths, "answer-package.schema.json")));
   const parsedRecords = strFromU8(requiredMetadataEntry(metadataEntries, metadataLengths, "tickets.jsonl")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
   const parsedMessageCount = parsedRecords.reduce((count, record) => {
@@ -894,25 +958,25 @@ async function validateTicketBatchZip(
     parsedRecords.length !== records.length ||
     parsedManifest.message_count !== parsedMessageCount ||
     parsedManifest.attachment_count !== attachments.length ||
-    parsedManifest.embedded_attachment_count !== attachments.length ||
-    parsedManifest.failed_attachment_count !== 0 ||
+    parsedManifest.embedded_attachment_count !== embeddedAttachments.length ||
+    parsedManifest.failed_attachment_count !== attachments.length - embeddedAttachments.length ||
     parsedMediaIndex.length !== attachments.length
   ) {
     throw new TicketBatchValidationError("Ticket export ZIP counts did not match its contents.");
   }
-  const expectedAttachmentPaths = [...attachmentsByPath.keys()].sort();
-  const mediaIndexPaths = parsedMediaIndex.map((item) => item.archive_path).sort();
-  const recordAttachmentPaths = parsedRecords.flatMap((record) => {
+  const expectedAttachmentMetadata = attachments.map((attachment) => JSON.stringify(stripDiskPath(attachment))).sort();
+  const mediaIndexMetadata = parsedMediaIndex.map((attachment) => JSON.stringify(attachment)).sort();
+  const recordAttachmentMetadata = parsedRecords.flatMap((record) => {
     const messages = isRecord(record) && Array.isArray(record.messages) ? record.messages : [];
     return messages.flatMap((message) => isRecord(message) && Array.isArray(message.attachments)
-      ? message.attachments.flatMap((attachment) => isRecord(attachment) && typeof attachment.archive_path === "string" ? [attachment.archive_path] : [])
+      ? message.attachments.filter(isRecord).map((attachment) => JSON.stringify(attachment))
       : []);
   }).sort();
-  if (!sameStringArray(expectedAttachmentPaths, mediaIndexPaths) || !sameStringArray(expectedAttachmentPaths, recordAttachmentPaths)) {
+  if (!sameStringArray(expectedAttachmentMetadata, mediaIndexMetadata) || !sameStringArray(expectedAttachmentMetadata, recordAttachmentMetadata)) {
     throw new TicketBatchValidationError("Ticket export ZIP attachment metadata did not match embedded files.");
   }
-  for (const attachment of attachments) {
-    const mediaIndexItem = parsedMediaIndex.find((item) => item.archive_path === attachment.archive_path);
+  for (const attachment of embeddedAttachments) {
+    const mediaIndexItem = parsedMediaIndex.find((item): item is TicketBatchEmbeddedAttachment => isEmbeddedAttachment(item) && item.archive_path === attachment.archive_path);
     if (
       !mediaIndexItem ||
       mediaIndexItem.ticket_id !== attachment.ticket_id ||
@@ -945,9 +1009,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function stripDiskPath(attachment: TicketBatchEmbeddedAttachment): Omit<TicketBatchEmbeddedAttachment, "disk_path"> {
+function stripDiskPath(attachment: TicketBatchExportAttachment): Omit<TicketBatchEmbeddedAttachment, "disk_path"> | TicketBatchUnavailableAttachment {
+  if (!attachment.embedded) return attachment;
   const { disk_path: _diskPath, ...value } = attachment;
   return value;
+}
+
+function isEmbeddedAttachment(attachment: TicketBatchExportAttachment): attachment is TicketBatchEmbeddedAttachment {
+  return attachment.embedded;
+}
+
+function isUnavailableAttachment(result: TicketBatchAttachmentDownloadResult): result is UnavailableTicketBatchAttachment {
+  return "unavailable" in result && result.unavailable;
+}
+
+function attachmentSortKey(attachment: TicketBatchExportAttachment): string {
+  return attachment.embedded ? attachment.archive_path : attachment.original_filename ?? attachment.failure_category;
 }
 
 function safeArchiveFilename(originalFilename: string | null, mediaType: string, telegramFilePath?: string | null, mimeType?: string | null): string {

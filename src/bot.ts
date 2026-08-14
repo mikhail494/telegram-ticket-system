@@ -48,7 +48,8 @@ import {
   getAnswerPackageHash,
   getTicketSnapshotToken,
   parseAndValidateAnswerPackage,
-  type TicketAnswerPackage
+  type TicketAnswerPackage,
+  type TicketBatchAttachmentDownloadResult
 } from "./ticketBatch.js";
 import {
   displayTelegramUser,
@@ -1549,11 +1550,23 @@ export function createBot(
       exportId = `export_${randomUUID().replace(/-/g, "")}`;
       const createdAt = new Date().toISOString();
       const snapshot = buildTicketBatchExportSnapshot({ exportId, createdAt, staffChatId: config.staffChatId, tickets });
-      zip = await createTicketBatchZip(snapshot, async (attachment) => {
+      zip = await createTicketBatchZip(snapshot, async (attachment): Promise<TicketBatchAttachmentDownloadResult> => {
         if (!attachment.fileId) {
           throw new TicketBatchValidationError(`Ticket #${attachment.ticketId} message ${attachment.messageId} has no downloadable media reference.`);
         }
-        const file = await ctx.api.getFile(attachment.fileId);
+        let file;
+        try {
+          file = await ctx.api.getFile(attachment.fileId);
+        } catch (error) {
+          if (isHostedTelegramFileTooLargeError(error)) {
+            return {
+              unavailable: true,
+              failureCategory: "TELEGRAM_FILE_TOO_LARGE",
+              failureReason: "Attachment exceeds the hosted Telegram Bot API download limit."
+            };
+          }
+          throw error;
+        }
         if (!file.file_path) {
           throw new TicketBatchValidationError(`Ticket #${attachment.ticketId} message ${attachment.messageId} attachment could not be retrieved.`);
         }
@@ -4164,16 +4177,23 @@ function formatTicketBatchPreviewPage(pages: string[], page: number): string {
 
 function formatTicketBatchExportCaption(
   exportId: string,
-  zip: Pick<Awaited<ReturnType<typeof createTicketBatchZip>>, "ticketCount" | "messageCount" | "attachmentCount">
+  zip: Pick<Awaited<ReturnType<typeof createTicketBatchZip>>, "ticketCount" | "messageCount" | "attachmentCount" | "embeddedAttachmentCount" | "failedAttachmentCount">
 ): string {
+  const attachments = zip.failedAttachmentCount
+    ? `Attachments: ${zip.embeddedAttachmentCount} embedded, ${zip.failedAttachmentCount} unavailable`
+    : `Attachments: ${zip.attachmentCount}`;
   return [
     "Ticket export ready",
     `Export: ${exportId}`,
     `Tickets: ${zip.ticketCount}`,
     `Messages: ${zip.messageCount}`,
-    `Attachments: ${zip.attachmentCount}`,
+    attachments,
     `Use the included instructions to prepare and return ticket-answers_${exportId}.json.`
   ].join("\n");
+}
+
+function isHostedTelegramFileTooLargeError(error: unknown): error is GrammyError {
+  return error instanceof GrammyError && error.error_code === 400 && /\bfile is too big\b/i.test(error.description);
 }
 
 function userTicketKeyboard(ticketId: number): InlineKeyboard {
