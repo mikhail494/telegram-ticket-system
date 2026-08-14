@@ -146,7 +146,7 @@ test("public callbacks require current staff workspace membership even for an ow
       { text: "Staff workspace membership required.", show_alert: true },
       { text: "Staff workspace membership required.", show_alert: true }
     ]);
-    assert.equal(db.getManagedPublicChat(-2001)?.moderation_enabled, true);
+    assert.equal(db.getManagedPublicChat(-2001)?.moderation_enabled, 1);
     assert.equal(telegramInspectionCalls, 0);
     assert.equal(screenReplies, 0);
   } finally {
