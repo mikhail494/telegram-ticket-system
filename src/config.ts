@@ -8,7 +8,11 @@ const hostSchema = z.object({
   BOT_TOKEN: z.string().trim().min(1, "BOT_TOKEN is required"),
   STAFF_CHAT_ID: z.union([z.coerce.number().int(), z.literal("")]).optional(),
   DATABASE_URL: z.string().trim().min(1).default("file:./data/support.db"),
-  LOG_LEVEL: z.string().trim().min(1).default("info")
+  LOG_LEVEL: z.string().trim().min(1).default("info"),
+  BACKUP_ENABLED: z.string().trim().toLowerCase().pipe(z.enum(["true", "false", "1", "0"])).default("true"),
+  BACKUP_DIR: z.string().trim().transform((value) => value || undefined).optional(),
+  BACKUP_INTERVAL_HOURS: z.coerce.number().int().min(1).max(8760).default(24),
+  BACKUP_RETENTION_COUNT: z.coerce.number().int().min(1).max(365).default(14)
 });
 
 export interface HostConfig {
@@ -17,6 +21,10 @@ export interface HostConfig {
   staffChatId: number | null;
   databaseUrl: string;
   logLevel: string;
+  backupEnabled: boolean;
+  backupDir: string | null;
+  backupIntervalHours: number;
+  backupRetentionCount: number;
 }
 
 export function loadHostConfig(options: { env?: NodeJS.ProcessEnv; envFile?: string | false } = {}): HostConfig {
@@ -35,7 +43,11 @@ export function loadHostConfig(options: { env?: NodeJS.ProcessEnv; envFile?: str
     botToken: parsed.data.BOT_TOKEN,
     staffChatId: typeof parsed.data.STAFF_CHAT_ID === "number" ? parsed.data.STAFF_CHAT_ID : null,
     databaseUrl: parsed.data.DATABASE_URL,
-    logLevel: parsed.data.LOG_LEVEL
+    logLevel: parsed.data.LOG_LEVEL,
+    backupEnabled: parsed.data.BACKUP_ENABLED === "true" || parsed.data.BACKUP_ENABLED === "1",
+    backupDir: parsed.data.BACKUP_DIR || null,
+    backupIntervalHours: parsed.data.BACKUP_INTERVAL_HOURS,
+    backupRetentionCount: parsed.data.BACKUP_RETENTION_COUNT
   };
 }
 
@@ -47,6 +59,10 @@ export const config = {
   botToken: hostConfig.botToken,
   databaseUrl: hostConfig.databaseUrl,
   logLevel: hostConfig.logLevel,
+  backupEnabled: hostConfig.backupEnabled,
+  backupDir: hostConfig.backupDir,
+  backupIntervalHours: hostConfig.backupIntervalHours,
+  backupRetentionCount: hostConfig.backupRetentionCount,
   get staffChatId(): number {
     if (runtimeStaffChatId === null) throw new Error("Staff workspace is not configured yet.");
     return runtimeStaffChatId;

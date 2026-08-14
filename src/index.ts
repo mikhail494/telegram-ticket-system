@@ -8,6 +8,7 @@ import { processModerationRecovery } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
 import { InstallationService } from "./installation.js";
 import { runWorkspaceStartup } from "./startup.js";
+import { createAutomaticBackupScheduler } from "./backups.js";
 
 const db = new SupportDatabase(config.databaseUrl);
 const quickRepliesRegistry = createPersistentQuickRepliesRegistry(db, loadQuickRepliesRegistry());
@@ -26,6 +27,13 @@ if (hostConfig.staffChatId !== null) installationService.adoptLegacyInstallation
 setRuntimeStaffChatId(installationService.getStaffChatId());
 const entityNotificationProviders: EntityNotificationProviderRegistry = new Map();
 const bot = createBot(db, quickRepliesRegistry, { entityNotificationProviders, installationService });
+const backupOptions = { enabled: config.backupEnabled, directory: config.backupDir, intervalMs: config.backupIntervalHours * 3_600_000, retentionCount: config.backupRetentionCount };
+const backupScheduler = createAutomaticBackupScheduler(
+  db,
+  backupOptions,
+  (error) => logger.warn({ err: error }, "Automatic SQLite backups are unavailable; support bot startup will continue"),
+  (result) => logger.info({ backup: result.basename, size: result.size, sha256: result.sha256, retentionDeleted: result.retentionDeleted, retentionFailed: result.retentionFailed }, "Automatic SQLite backup completed")
+);
 
 async function main(): Promise<void> {
   await bot.api.deleteWebhook({ drop_pending_updates: false });
@@ -58,12 +66,13 @@ async function main(): Promise<void> {
   });
   await setBotCommands(bot, installationService);
   if (!installationService.getOwner()) {
-    const pairingToken = installationService.createOwnerPairingToken();
-    process.stdout.write(`Owner setup link (expires in 30 minutes): https://t.me/${botInfo.username}?start=setup_${pairingToken}\n`);
+    logger.warn("No OWNER is paired. Run npm run owner:pair in an interactive terminal to create a one-use pairing link.");
   }
+  if (backupScheduler) void backupScheduler.start().catch((error) => logger.warn({ err: error }, "Automatic SQLite backup scheduler failed to start"));
 
   const shutdown = (signal: NodeJS.Signals) => {
     logger.info({ signal }, "Stopping bot");
+    backupScheduler?.stop();
     bot.stop();
     db.close();
   };

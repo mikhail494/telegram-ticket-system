@@ -379,7 +379,7 @@ function senderTypeForDirection(direction: MessageDirection): MessageSenderType 
   return "SYSTEM";
 }
 
-function normalizeDatabasePath(databaseUrl: string): string {
+export function resolveDatabasePath(databaseUrl: string): string {
   const value = databaseUrl.trim();
 
   if (value === ":memory:") {
@@ -422,11 +422,13 @@ function ensureDirectoryForDatabase(databasePath: string): void {
 
 export class SupportDatabase {
   private readonly db: Database.Database;
+  readonly databasePath: string;
 
   constructor(databaseUrl: string) {
-    const databasePath = normalizeDatabasePath(databaseUrl);
+    const databasePath = resolveDatabasePath(databaseUrl);
     ensureDirectoryForDatabase(databasePath);
 
+    this.databasePath = databasePath;
     this.db = new Database(databasePath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
@@ -435,6 +437,10 @@ export class SupportDatabase {
 
   close(): void {
     this.db.close();
+  }
+
+  backupTo(destination: string): Promise<Database.BackupMetadata> {
+    return this.db.backup(destination);
   }
 
   upsertUser(user: UserInput): void {

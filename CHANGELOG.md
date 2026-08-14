@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+### Added
+
+- Verified SQLite online backups with safe retention, restore verification tooling, and an operational restore drill.
+- Secret-safe runtime logging and an explicit interactive OWNER pairing command.
+
+### Fixed
+
+- Kept existing automatic role-based access behavior unchanged for READY installations after OWNER pairing and startup.
+
 ### Changed
 
 - Ticket Batch exports now represent the known hosted Telegram Bot API oversized-file limitation as explicit unavailable attachment metadata instead of aborting the whole archive.
@@ -15,14 +24,14 @@ All notable changes to this project are documented in this file. This project fo
 ### Added
 
 - Guided self-hosted setup with OWNER pairing, recovery, and Telegram-native staff-workspace selection.
-- Application roles for OWNER, ADMIN, SENIOR_AGENT, and AGENT, with explicit role-based access activation.
+- Application roles for OWNER, ADMIN, SENIOR_AGENT, and AGENT, with automatic role-based access for READY installations with an OWNER.
 - Management of multiple public Telegram chats with independent moderation configuration.
 - Topic-aware moderation warnings for forum supergroups.
 - Private OWNER/ADMIN ticket export and answer-package Apply workflows.
 
 ### Changed
 
-- Existing installations adopt the workspace, Support Logs, moderation state, tickets, archives, batch state, and sanctions without activating role-based access automatically.
+- Existing installations adopt the workspace, Support Logs, moderation state, tickets, archives, batch state, and sanctions without changing them during adoption.
 - RBAC-active staff-chat batch commands now redirect privileged operations to private chat.
 
 ### Database

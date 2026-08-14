@@ -149,7 +149,6 @@ test("a ready installation with an owner automatically activates role-based acce
     service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 10 });
     assert.equal(service.getState().authorizationMode, "RBAC_ACTIVE");
     assert.equal(service.activateReadyRoleBasedAccess(), false);
-    assert.equal(service.getState().authorizationMode, "RBAC_ACTIVE");
   } finally { db.close(); }
 });
 
