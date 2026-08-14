@@ -98,3 +98,58 @@ test("private control plane owns dashboard callbacks and private editor input di
     db.close();
   }
 });
+
+test("public callbacks require current staff workspace membership even for an owner", async () => {
+  const db = new SupportDatabase(":memory:");
+  const installation = new InstallationService(db);
+  const controlPlane = new PrivateControlPlane(installation);
+  const token = installation.createOwnerPairingToken();
+  installation.consumeOwnerPairingToken(token, { telegramId: 42, username: "owner" });
+  const workspace = installation.activateWorkspace({ chatId: -1001, title: "Staff" });
+  db.upsertManagedPublicChat({ chatId: -2001, workspaceId: workspace.id, title: "Public" });
+  db.setManagedPublicChatModerationEnabled(-2001, true);
+  const alerts: Array<{ text?: string; show_alert?: boolean }> = [];
+  let telegramInspectionCalls = 0;
+  let screenReplies = 0;
+  const context = {
+    from: { id: 42, is_bot: false, first_name: "Owner" },
+    chat: { id: 42, type: "private" },
+    api: {
+      async getChat() { telegramInspectionCalls += 1; },
+      async editMessageText() {},
+      async deleteMessage() {},
+      async editMessageReplyMarkup() {}
+    },
+    callbackQuery: { message: { chat: { id: 42, type: "private" }, message_id: 100 } },
+    async answerCallbackQuery(options?: { text?: string; show_alert?: boolean }) { alerts.push(options ?? {}); },
+    async reply() { screenReplies += 1; return { chat: { id: 42 }, message_id: 100 }; }
+  } as unknown as Context;
+  controlPlane.configureOperatorUi({
+    db,
+    quickReplies: {} as never,
+    canConfigure: async () => true,
+    canUsePermission: async () => true,
+    hasPrivateWorkspaceMembership: async () => false,
+    getPendingBatchExport: () => undefined,
+    onStartTestTicket: async () => {},
+    onShowWorkspace: async () => {},
+    onShowBatch: async () => {},
+    packageVersion: "1.3.0",
+    botUsername: () => "bot",
+    botId: () => 1
+  });
+
+  try {
+    assert.equal(await controlPlane.handleCallback(context, "public:disable:-2001"), true);
+    assert.equal(await controlPlane.handleCallback(context, "public:list"), true);
+    assert.deepEqual(alerts, [
+      { text: "Staff workspace membership required.", show_alert: true },
+      { text: "Staff workspace membership required.", show_alert: true }
+    ]);
+    assert.equal(db.getManagedPublicChat(-2001)?.moderation_enabled, true);
+    assert.equal(telegramInspectionCalls, 0);
+    assert.equal(screenReplies, 0);
+  } finally {
+    db.close();
+  }
+});

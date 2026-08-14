@@ -306,9 +306,11 @@ export class PrivateControlPlane {
   }
 
   async showDashboardAfterStaffTestTicketClose(ctx: Context): Promise<void> {
-    if (!ctx.from || !this.installation.getMember(ctx.from.id)) return;
+    if (!ctx.from) return;
+    const member = this.installation.getMember(ctx.from.id);
+    if (!member) return;
     await this.retireTrackedScreens(ctx);
-    await this.sendFreshScreen(ctx, this.dashboardText(ctx.from.id), this.dashboardKeyboard(ctx.from.id, this.installation.getMember(ctx.from.id)!.role));
+    await this.sendFreshScreen(ctx, this.dashboardText(ctx.from.id), this.dashboardKeyboard(ctx.from.id, member.role));
   }
 
   async showSystemStatus(ctx: Context): Promise<void> {
@@ -575,6 +577,10 @@ export class PrivateControlPlane {
       return true;
     }
     const dependencies = this.operatorDependenciesOrThrow();
+    if (!await dependencies.hasPrivateWorkspaceMembership(ctx)) {
+      await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true });
+      return true;
+    }
     if (action === "add") {
       await ctx.answerCallbackQuery();
       await this.sendPublicChatPicker(ctx);
