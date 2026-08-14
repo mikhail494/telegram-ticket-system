@@ -37,7 +37,8 @@ import {
   formatWhois,
   formatUserTicketList,
   SUPPORT_RESPONSE_TIME_PLACEHOLDER,
-  truncate
+  truncate,
+  validateRenderedSupportAcknowledgement
 } from "./format.js";
 import { logger } from "./logger.js";
 import { createQuickRepliesManager, type QuickRepliesRegistry } from "./quickReplies.js";
@@ -1129,7 +1130,8 @@ export function createBot(
     if (!normalized) return { error: "message cannot be empty." };
     if (normalized.length > 3500) return { error: "use at most 3500 characters." };
     if (/[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/.test(normalized)) return { error: "remove unsafe control characters." };
-    if (formatTicketReceived(normalized, supportExpectedResponseTime()).length > 4096) return { error: "the rendered message must fit within Telegram's 4096-character limit." };
+    const rendered = validateRenderedSupportAcknowledgement(normalized, supportExpectedResponseTime());
+    if (rendered.error) return { error: rendered.error };
     return { value: normalized };
   }
 
@@ -1165,6 +1167,15 @@ export function createBot(
       const normalized = normalizeSupportExpectedResponseTime(text);
       if (!normalized.value) {
         await renderPrivateScreen(ctx, supportResponseTimePrompt(normalized.error), new InlineKeyboard().text("Back", "support:back"));
+        return true;
+      }
+      const rendered = validateRenderedSupportAcknowledgement(supportTicketReceivedTemplate(), normalized.value);
+      if (rendered.error) {
+        await renderPrivateScreen(
+          ctx,
+          supportResponseTimePrompt("that response time makes the current acknowledgement too long. Shorten it or edit the acknowledgement first."),
+          new InlineKeyboard().text("Back", "support:back")
+        );
         return true;
       }
       db.setSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY, normalized.value);
@@ -3689,6 +3700,16 @@ async function createFreshTicketFromUserMessage(db: SupportDatabase, ctx: Contex
     return;
   }
 
+  const acknowledgement = validateRenderedSupportAcknowledgement(
+    db.getSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE,
+    db.getSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME
+  );
+  if (acknowledgement.error) {
+    logger.error({ userId: ctx.from.id }, "Support acknowledgement settings exceed Telegram's message limit");
+    await ctx.reply("Sorry, support acknowledgement settings need attention. Please try again later.");
+    return;
+  }
+
   let ticket: TicketRecord;
   try {
     ticket = db.createTicket(ctx.from.id, config.staffChatId);
@@ -3773,10 +3794,7 @@ async function createFreshTicketFromUserMessage(db: SupportDatabase, ctx: Contex
 
   db.closeOtherActiveTicketsForUserInStaffChat(ctx.from.id, config.staffChatId, ticket.id);
   await maybeCopyOriginalMessageToStaff(db, ctx, ticketWithTopic, content.shouldCopyOriginal);
-  await ctx.reply(formatTicketReceived(
-    db.getSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE,
-    db.getSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME
-  ), {
+  await ctx.reply(acknowledgement.rendered, {
     reply_markup: userTicketKeyboard(ticket.id)
   });
 }

@@ -163,6 +163,57 @@ test("support response time editor validates input, persists through restart, an
   }
 });
 
+test("support response time editor rejects a value that would make the current acknowledgement too long", async () => {
+  const { harness } = createReadyHarness();
+  const shortResponseTime = "soon";
+  const longResponseTime = "x".repeat(80);
+  const template = "{{response_time}}".repeat(52);
+  harness.db.setSetting("support_expected_response_time", shortResponseTime);
+  harness.db.setSetting("support_ticket_received_template", template);
+
+  await harness.bot.handleUpdate(privateCallback(1, "dashboard:support", 10));
+  await harness.bot.handleUpdate(privateCallback(1, "support:edit", 10));
+  harness.clearApiCalls();
+  await harness.bot.handleUpdate(privateMessage(1, longResponseTime, 20));
+
+  assert.equal(harness.db.getSetting("support_expected_response_time"), shortResponseTime);
+  assert.equal(harness.findApiCalls("deleteMessage").some((entry) => entry.payload.message_id === 20), true);
+  assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /current acknowledgement too long/i);
+
+  harness.clearApiCalls();
+  await harness.bot.handleUpdate(privateMessage(1, "within 24 hours", 21));
+  assert.equal(harness.db.getSetting("support_expected_response_time"), "within 24 hours");
+});
+
+test("support response time changes remain valid for acknowledgement templates without placeholders", async () => {
+  const { harness } = createReadyHarness();
+  harness.db.setSetting("support_ticket_received_template", "We received your request.");
+  await harness.bot.handleUpdate(privateCallback(1, "dashboard:support", 10));
+  await harness.bot.handleUpdate(privateCallback(1, "support:edit", 10));
+  await harness.bot.handleUpdate(privateMessage(1, "within 24 hours", 20));
+
+  assert.equal(harness.db.getSetting("support_expected_response_time"), "within 24 hours");
+  harness.setStaffMembership(505, "left");
+  await harness.bot.handleUpdate(privateMessage(505, "Need help", 21));
+  assert.equal(ticketAcknowledgementText(harness, 505), "We received your request.");
+});
+
+test("invalid persisted acknowledgement settings do not create a ticket", async () => {
+  const { harness } = createReadyHarness();
+  const userId = 506;
+  harness.setStaffMembership(userId, "left");
+  harness.db.setSetting("support_expected_response_time", "x".repeat(80));
+  harness.db.setSetting("support_ticket_received_template", "{{response_time}}".repeat(52));
+
+  await harness.bot.handleUpdate(privateMessage(userId, "Need help", 1));
+
+  assert.equal(harness.db.listTicketsForUser(userId, TEST_STAFF_CHAT_ID).length, 0);
+  assert.equal(
+    harness.findApiCalls("sendMessage").some((entry) => entry.payload.chat_id === userId && /settings need attention/i.test(String(entry.payload.text))),
+    true
+  );
+});
+
 test("support acknowledgement templates render every response-time placeholder and reset to the default", async () => {
   const { harness } = createReadyHarness();
   harness.db.setSetting("support_expected_response_time", "up to 5 working days");
