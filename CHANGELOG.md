@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+### Added
+
+- Verified SQLite online backups with safe retention, restore verification tooling, and an operational restore drill.
+- Secret-safe runtime logging and an explicit interactive OWNER pairing command.
+
 ### Changed
 
 - Ticket Batch exports now represent the known hosted Telegram Bot API oversized-file limitation as explicit unavailable attachment metadata instead of aborting the whole archive.

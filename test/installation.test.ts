@@ -141,19 +141,19 @@ test("expired owner pairing token is rejected", () => {
   } finally { db.close(); }
 });
 
-test("a ready installation with an owner automatically activates role-based access", () => {
+test("owner pairing preserves legacy authorization until explicit role-based activation", () => {
   const db = new SupportDatabase(":memory:");
   try {
     const service = new InstallationService(db);
     service.adoptLegacyInstallation(-10042);
     service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 10 });
-    assert.equal(service.getState().authorizationMode, "RBAC_ACTIVE");
-    assert.equal(service.activateReadyRoleBasedAccess(), false);
+    assert.equal(service.getState().authorizationMode, "LEGACY_TRUSTED_GROUP");
+    assert.equal(service.activateReadyRoleBasedAccess(), true);
     assert.equal(service.getState().authorizationMode, "RBAC_ACTIVE");
   } finally { db.close(); }
 });
 
-test("automatic role-based access preserves elevated roles and enrolls only unknown staff as agents", () => {
+test("explicit role-based access preserves elevated roles and enrolls only unknown staff as agents", () => {
   const db = new SupportDatabase(":memory:");
   try {
     const service = new InstallationService(db);

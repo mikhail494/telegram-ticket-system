@@ -1577,7 +1577,10 @@ export function createBot(
     for (const member of installation.listTeamMembers()) {
       keyboard.text(`${teamRoleLabel(member.role)}: ${teamMemberLabel(member)}`, `team:member:${member.user_telegram_id}`).row();
     }
-    if (installation.getMember(actorId)?.role === "OWNER") keyboard.text("Transfer ownership", "team:transfer").row();
+    if (installation.getMember(actorId)?.role === "OWNER") {
+      keyboard.text("Transfer ownership", "team:transfer").row();
+      if (installation.getState().authorizationMode === "LEGACY_TRUSTED_GROUP") keyboard.text("Review RBAC activation", "rbac:preview").row();
+    }
     return keyboard.text("Back", "dashboard:home");
   }
 
@@ -2640,8 +2643,22 @@ export function createBot(
       return;
     }
 
-    if (namespace === "rbac") {
-      await ctx.answerCallbackQuery({ text: "Role-based access is automatic for ready installations.", show_alert: true });
+    if (namespace === "rbac" && ctx.from) {
+      if (!installation.can(ctx.from.id, "MANAGE_ADMINS")) { await ctx.answerCallbackQuery({ text: "OWNER access is required.", show_alert: true }); return; }
+      const [, action, confirmationToken] = data.split(":");
+      if (action === "preview") {
+        const preview = installation.previewRoleBasedAccessActivation();
+        await ctx.answerCallbackQuery();
+        await renderPrivateScreen(ctx, `Role-based access cutover preview\n\nCurrent authorization: LEGACY_TRUSTED_GROUP\nAssigned application roles retained: ${preview.activeRoleCount}\n\nUnassigned staff-workspace participants will lose application access. Telegram staff-workspace membership remains required after activation.`, new InlineKeyboard().text("Activate role-based access", `rbac:confirm:${preview.confirmationToken}`).row().text("Cancel", "rbac:cancel"));
+      } else if (action === "confirm") {
+        installation.activateRoleBasedAccess(ctx.from.id, confirmationToken ?? "");
+        await ctx.answerCallbackQuery({ text: "Role-based access activated." });
+        await showDashboard(ctx);
+      } else if (action === "cancel") {
+        installation.cancelRoleBasedAccessActivation();
+        await ctx.answerCallbackQuery({ text: "Role-based access remains inactive." });
+        await showTeam(ctx);
+      }
       return;
     }
 

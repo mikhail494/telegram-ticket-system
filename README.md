@@ -244,6 +244,10 @@ Use the private onboarding button to open Telegram's forum-group picker. The bot
 
 ## Configuration
 
+Automatic verified SQLite backups are enabled by default: one every 24 hours, retaining 14 files. They are stored beside the SQLite database unless `BACKUP_DIR` is set. `BACKUP_ENABLED`, `BACKUP_INTERVAL_HOURS`, and `BACKUP_RETENTION_COUNT` control scheduling. Use `npm run db:backup` for an immediate backup and `npm run db:restore:verify -- <backup-path>` for a non-destructive restore drill. See [operations](docs/OPERATIONS.md) for configuration, same-disk limitations, and the manual restore procedure.
+
+For an installation without an OWNER, use `npm run owner:pair` from an interactive terminal. The running service logs only the safe instruction, never a pairing link.
+
 ### Environment Variables
 
 Run `npm run setup`, or provide environment variables for automation:

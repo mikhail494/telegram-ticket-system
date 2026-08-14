@@ -26,7 +26,7 @@ test("legacy workspace starts recoveries without creating onboarding noise", asy
   } finally { db.close(); }
 });
 
-test("ready startup automatically switches an adopted installation with an owner to role-based access", async () => {
+test("ready startup preserves legacy authorization after owner pairing", async () => {
   const db = new SupportDatabase(":memory:");
   try {
     const service = new InstallationService(db);
@@ -42,6 +42,6 @@ test("ready startup automatically switches an adopted installation with an owner
       sendLegacyStaffOnboarding: task
     });
 
-    assert.equal(service.getState().authorizationMode, "RBAC_ACTIVE");
+    assert.equal(service.getState().authorizationMode, "LEGACY_TRUSTED_GROUP");
   } finally { db.close(); }
 });

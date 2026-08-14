@@ -129,7 +129,6 @@ export class InstallationService {
     if (result === "INVALID") return { kind: "INVALID" };
     if (result === "TRANSFER_PENDING") return { kind: "TRANSFER_CONFIRMATION_REQUIRED" };
     this.saveOnboardingStage(user.telegramId, "WELCOME");
-    this.activateReadyRoleBasedAccess();
     return { kind: "PAIRED" };
   }
 
