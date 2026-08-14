@@ -76,6 +76,7 @@ import {
 import { StaffChatDeliveryCoordinator, type StaffChatDeliveryOptions } from "./staffChatDelivery.js";
 import { InstallationService, type Permission } from "./installation.js";
 import { BackgroundTaskRegistry, type BackgroundTaskTracker } from "./lifecycle.js";
+import { SupportIngressLimiter, type SupportIngressDecision } from "./supportIngressLimiter.js";
 import { formatWorkspaceChecklist, isPrivateInviteLink, parsePublicSupergroupReference, validateStaffWorkspace, type WorkspaceValidationResult } from "./workspaceValidation.js";
 import {
   formatPublicChatPermissionChecklist,
@@ -84,6 +85,7 @@ import {
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
+const SUPPORT_INGRESS_THROTTLED_TEXT = "You're sending messages too quickly.\n\nSome recent messages were not added to your ticket. Please wait a few seconds, then resend anything that did not go through.";
 const DEFAULT_BAN_REASON = "No reason provided.";
 const STAFF_HELP_SENT_SETTING_PREFIX = "staff_help_sent";
 const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
@@ -227,6 +229,7 @@ interface BotRuntimeDependencies {
   staffChatDelivery?: StaffChatDeliveryOptions;
   installationService?: InstallationService;
   backgroundTasks?: BackgroundTaskTracker;
+  supportIngressLimiter?: SupportIngressLimiter;
 }
 
 export type SupportBot = Bot<Context> & {
@@ -265,6 +268,7 @@ export function createBot(
   const fetchImpl = runtime.fetch ?? globalThis.fetch;
   const moderationNow = runtime.now ?? (() => new Date());
   const backgroundTasks = runtime.backgroundTasks ?? new BackgroundTaskRegistry();
+  const supportIngressLimiter = runtime.supportIngressLimiter ?? new SupportIngressLimiter();
   const moderationCleanupScheduler = runtime.scheduleModerationCleanup ?? ((api, moderationDb, jobId, delayMs) =>
     scheduleModerationCleanup(api, moderationDb, jobId, delayMs, undefined, backgroundTasks));
   const entityNotificationProviders = runtime.entityNotificationProviders ?? new Map();
@@ -2827,6 +2831,13 @@ export function createBot(
     }
     const staffTestTicketMode = Boolean(ctx.from && installation.getMember(ctx.from.id) && db.getSetting(`${STAFF_TEST_TICKET_MODE_SETTING_PREFIX}${ctx.from.id}`) === "true");
     clearStaffTestTicketMode(ctx.from?.id);
+    if (!staffTestTicketMode && ctx.from) {
+      const ingressDecision = supportIngressLimiter.check(ctx.from.id);
+      if (!ingressDecision.allowed) {
+        await warnThrottledCustomerIngress(ctx, ingressDecision);
+        return;
+      }
+    }
     if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet. Please try again later."); return; }
     if (await replyIfBanned(db, ctx)) {
       return;
@@ -4034,6 +4045,25 @@ async function handleUserCallback(
   await ctx.answerCallbackQuery({ text: "Ticket closed." });
   await ctx.reply(CLOSED_TEXT);
   await onStaffTestTicketClosed?.(ticket.id);
+}
+
+async function warnThrottledCustomerIngress(ctx: Context, decision: Extract<SupportIngressDecision, { allowed: false }>): Promise<void> {
+  if (!decision.shouldWarn || !ctx.from) {
+    return;
+  }
+
+  logger.warn(
+    { userId: ctx.from.id, category: "CUSTOMER_INGRESS_THROTTLED", retryAfterSeconds: Math.ceil(decision.retryAfterMs / 1_000) },
+    "Customer support ingress throttled"
+  );
+  try {
+    await ctx.reply(SUPPORT_INGRESS_THROTTLED_TEXT);
+  } catch (error) {
+    logger.warn(
+      { err: error, userId: ctx.from.id, category: "CUSTOMER_INGRESS_THROTTLED_WARNING" },
+      "Could not send customer ingress throttle warning"
+    );
+  }
 }
 
 async function handleStaffCallback(db: SupportDatabase, ctx: Context, data: string): Promise<void> {

@@ -5,6 +5,7 @@ import type { QuickRepliesRegistry } from "../../src/quickReplies.js";
 import type { ModerationCleanupScheduler } from "../../src/languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "../../src/entityNotifications.js";
 import type { InstallationService } from "../../src/installation.js";
+import type { SupportIngressLimiter } from "../../src/supportIngressLimiter.js";
 import type {
   SupportDatabase as SupportDatabaseType,
   TicketStatus,
@@ -128,6 +129,7 @@ export interface BotHarnessOptions {
   scheduleModerationCleanup?: ModerationCleanupScheduler;
   entityNotificationProviders?: EntityNotificationProviderRegistry;
   installationServiceFactory?: (db: SupportDatabaseType) => InstallationService;
+  supportIngressLimiter?: SupportIngressLimiter;
 }
 
 export interface BotHarness {
@@ -181,6 +183,7 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
     scheduleModerationCleanup: scheduleCleanup,
     entityNotificationProviders: options.entityNotificationProviders,
     installationService,
+    supportIngressLimiter: options.supportIngressLimiter,
     staffChatDelivery: { minimumIntervalMs: 0, sleep: async () => undefined }
   });
   const apiCalls: RecordedApiCall[] = [];
