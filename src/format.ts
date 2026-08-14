@@ -10,8 +10,17 @@ import { displayTelegramUser } from "./telegram.js";
 export const START_TEXT =
   "Hi! Please describe your issue in one message. Include your AgentOn UID, wallet address, quest link, screenshots or transaction hash if relevant.";
 
-export const RECEIVED_TEXT =
-  "Thanks, your request has been received.\n\nOur support team will get back to you soon.\n\nYou can continue sending messages in this chat until your ticket is closed.";
+export const DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME = "1-7 business days";
+
+export function formatTicketReceived(expectedResponseTime: string): string {
+  return [
+    "Thanks, your request has been received.",
+    "",
+    `Expected response time: ${expectedResponseTime}.`,
+    "",
+    "You can continue sending messages in this chat until your ticket is closed."
+  ].join("\n");
+}
 
 export const CLOSED_TEXT =
   "Your ticket has been closed. If you still need help, send a new message.";
