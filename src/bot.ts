@@ -82,6 +82,10 @@ import {
   formatPublicChatPermissionChecklist,
   validatePublicModerationChat
 } from "./publicChatModeration.js";
+import {
+  PrivateControlPlane,
+  type PublicChatConfigurationField
+} from "./privateControlPlane.js";
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
@@ -205,15 +209,6 @@ interface QuickRepliesCallbackTarget {
   messageThreadId: number;
 }
 
-type PendingQuickReplyInput =
-  | { kind: "EDIT_TITLE"; templateId: string }
-  | { kind: "EDIT_TEXT"; templateId: string }
-  | { kind: "ADD_TITLE"; categoryId: string }
-  | { kind: "ADD_TEXT"; categoryId: string; title: string }
-  | { kind: "ADD_PREVIEW"; categoryId: string; title: string; text: string };
-
-type PendingSupportSettingsInput = "RESPONSE_TIME" | "ACKNOWLEDGEMENT";
-
 type DeliverAndRecordStaffTextReply = (
   ticket: TicketWithUser,
   text: string,
@@ -274,20 +269,8 @@ export function createBot(
   const entityNotificationProviders = runtime.entityNotificationProviders ?? new Map();
   const runningTicketBatchExports = new Set<number>();
   const staffChatDelivery = new StaffChatDeliveryCoordinator(runtime.staffChatDelivery);
-  const pendingPublicChatSelection = new Set<number>();
-  const pendingPublicChatConfiguration = new Map<number, {
-    chatId: number;
-    field: "warning" | "allowlist" | "cooldown" | "threshold" | "lookback";
-  }>();
-  const pendingQuickReplyInput = new Map<number, PendingQuickReplyInput>();
-  const pendingSupportSettingsInput = new Map<number, PendingSupportSettingsInput>();
   const quickRepliesManager = createQuickRepliesManager(db, quickRepliesRegistry);
-  const privateOperatorCallbackNamespaces = new Set(["owner", "setup", "workspace", "dashboard", "batch-ui", "public", "quick", "support", "team", "rbac"]);
-  const pendingWorkspaceSelection = new Map<number, "SETUP" | "RECONFIGURE">();
-  const privateUiMessages = new Map<number, { chatId: number; messageId: number }>();
-  const workspacePickerPrompts = new Map<number, { chatId: number; messageId: number }>();
-  const publicChatPickerPrompts = new Map<number, { chatId: number; messageId: number }>();
-  const temporaryPrivateUiMessages = new Map<number, { chatId: number; messageId: number }>();
+  const privateControlPlane = new PrivateControlPlane(installation);
   let ticketBatchRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   let ticketBatchRecoveryTimerAt: number | undefined;
   let ticketBatchRecoveryQueue: Promise<void> = Promise.resolve();
@@ -346,6 +329,12 @@ export function createBot(
     }
     return true;
   };
+
+  privateControlPlane.configureOperatorUi({
+    db,
+    quickReplies: quickRepliesManager,
+    canConfigure: (ctx) => requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")
+  });
 
   class StaffOnlyDeliveryError extends Error {
     constructor(readonly diagnostic: NormalizedDeliveryError, readonly retryAt: string | null) {
@@ -766,121 +755,11 @@ export function createBot(
     });
   }
 
-  function persistedPrivateScreen(userId: number): { chatId: number; messageId: number } | undefined {
-    const session = installation.getOnboardingSession(userId);
-    if (!session || session.primary_message_chat_id === null || session.primary_message_id === null) return undefined;
-    return { chatId: session.primary_message_chat_id, messageId: session.primary_message_id };
-  }
-
-  function rememberPrivateScreen(ctx: Context, target: { chatId: number; messageId: number }): void {
-    if (!ctx.from) return;
-    privateUiMessages.set(ctx.from.id, target);
-    if (!installation.getOnboardingSession(ctx.from.id)) installation.saveOnboardingStage(ctx.from.id, "WELCOME", "COMPLETED");
-    installation.setOnboardingPrimaryMessage(ctx.from.id, target.chatId, target.messageId);
-  }
-
-  function isObsoletePrivateBatchCallback(ctx: Context): boolean {
-    const message = ctx.callbackQuery?.message;
-    if (!ctx.from || message?.chat.type !== "private") return true;
-    const current = persistedPrivateScreen(ctx.from.id);
-    return current !== undefined && (current.chatId !== message.chat.id || current.messageId !== message.message_id);
-  }
-
-  function isObsoletePrivateOperatorCallback(ctx: Context, namespace: string): boolean {
-    if (!isPrivateChat(ctx) || !privateOperatorCallbackNamespaces.has(namespace)) return false;
-    return isObsoletePrivateBatchCallback(ctx);
-  }
-
-  async function renderPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard): Promise<void> {
-    const callbackMessage = ctx.callbackQuery?.message;
-    const callbackTarget = callbackMessage?.chat.type === "private"
-      ? { chatId: callbackMessage.chat.id, messageId: callbackMessage.message_id }
-      : undefined;
-    const target = (ctx.from ? privateUiMessages.get(ctx.from.id) : undefined) ?? (ctx.from ? persistedPrivateScreen(ctx.from.id) : undefined) ?? callbackTarget;
-    const temporaryTarget = ctx.from ? temporaryPrivateUiMessages.get(ctx.from.id) : undefined;
-    const isTemporaryTarget = target !== undefined && temporaryTarget?.chatId === target.chatId && temporaryTarget.messageId === target.messageId;
-    if (target) {
-      try {
-        await ctx.api.editMessageText(target.chatId, target.messageId, text, { reply_markup: replyMarkup });
-        if (ctx.from && isTemporaryTarget) temporaryPrivateUiMessages.delete(ctx.from.id);
-        rememberPrivateScreen(ctx, target);
-        return;
-      } catch (error) {
-        if (error instanceof GrammyError && error.description.includes("message is not modified")) {
-          if (ctx.from && isTemporaryTarget) temporaryPrivateUiMessages.delete(ctx.from.id);
-          rememberPrivateScreen(ctx, target);
-          return;
-        }
-        logger.warn({ userId: ctx.from?.id }, "Could not replace private UI screen");
-      }
-    }
-    if (target && isTemporaryTarget) {
-      await retirePrivateScreenTarget(ctx, target);
-      if (ctx.from) temporaryPrivateUiMessages.delete(ctx.from.id);
-    }
-    const sent = await ctx.reply(text, { reply_markup: replyMarkup });
-    rememberPrivateScreen(ctx, { chatId: sent.chat.id, messageId: sent.message_id });
-  }
-
-  function privateUiTargets(ctx: Context): Array<{ chatId: number; messageId: number }> {
-    const callbackMessage = ctx.callbackQuery?.message;
-    const callbackTarget = callbackMessage?.chat.type === "private"
-      ? { chatId: callbackMessage.chat.id, messageId: callbackMessage.message_id }
-      : undefined;
-    const trackedTarget = ctx.from ? privateUiMessages.get(ctx.from.id) : undefined;
-    const temporaryTarget = ctx.from ? temporaryPrivateUiMessages.get(ctx.from.id) : undefined;
-    const persistedTarget = ctx.from ? persistedPrivateScreen(ctx.from.id) : undefined;
-    return [callbackTarget, trackedTarget, temporaryTarget, persistedTarget].filter((target): target is { chatId: number; messageId: number } => Boolean(target))
-      .filter((target, index, targets) => targets.findIndex((other) => other.chatId === target.chatId && other.messageId === target.messageId) === index);
-  }
-
-  async function retirePrivateScreenTarget(ctx: Context, target: { chatId: number; messageId: number }): Promise<void> {
-    try {
-      await ctx.api.deleteMessage(target.chatId, target.messageId);
-    } catch {
-      try {
-        await ctx.api.editMessageReplyMarkup(target.chatId, target.messageId, { reply_markup: { inline_keyboard: [] } });
-      } catch {
-        logger.warn({ userId: ctx.from?.id }, "Could not retire private UI screen");
-      }
-    }
-  }
-
-  async function retirePrivateScreens(ctx: Context): Promise<void> {
-    for (const target of privateUiTargets(ctx)) {
-      await retirePrivateScreenTarget(ctx, target);
-    }
-    if (ctx.from) {
-      privateUiMessages.delete(ctx.from.id);
-      temporaryPrivateUiMessages.delete(ctx.from.id);
-      installation.setOnboardingPrimaryMessage(ctx.from.id, null, null);
-    }
-  }
-
-  async function retireTrackedPrivateScreens(ctx: Context): Promise<void> {
-    if (!ctx.from) return;
-    const targets = [
-      privateUiMessages.get(ctx.from.id),
-      temporaryPrivateUiMessages.get(ctx.from.id),
-      persistedPrivateScreen(ctx.from.id)
-    ].filter((target): target is { chatId: number; messageId: number } => Boolean(target))
-      .filter((target, index, all) => all.findIndex((other) => other.chatId === target.chatId && other.messageId === target.messageId) === index);
-    for (const target of targets) await retirePrivateScreenTarget(ctx, target);
-    privateUiMessages.delete(ctx.from.id);
-    temporaryPrivateUiMessages.delete(ctx.from.id);
-    installation.setOnboardingPrimaryMessage(ctx.from.id, null, null);
-  }
-
-  async function sendFreshPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard) {
-    const sent = await ctx.reply(text, { reply_markup: replyMarkup });
-    rememberPrivateScreen(ctx, { chatId: sent.chat.id, messageId: sent.message_id });
-    return sent;
-  }
-
-  async function refreshPrivateScreen(ctx: Context, text: string, replyMarkup: InlineKeyboard) {
-    await retirePrivateScreens(ctx);
-    return sendFreshPrivateScreen(ctx, text, replyMarkup);
-  }
+  const renderPrivateScreen = privateControlPlane.renderScreen.bind(privateControlPlane);
+  const sendFreshPrivateScreen = privateControlPlane.sendFreshScreen.bind(privateControlPlane);
+  const refreshPrivateScreen = privateControlPlane.refreshScreen.bind(privateControlPlane);
+  const retirePrivateScreens = privateControlPlane.retireScreens.bind(privateControlPlane);
+  const retireTrackedPrivateScreens = privateControlPlane.retireTrackedScreens.bind(privateControlPlane);
 
   function clearStaffTestTicketMode(userId: number | undefined): void {
     if (userId === undefined) return;
@@ -898,41 +777,7 @@ export function createBot(
     db.setSetting(`${STAFF_TEST_TICKET_ID_SETTING_PREFIX}${userId}`, ticketId === undefined ? "" : String(ticketId));
   }
 
-  async function retireWorkspacePickerPrompt(userId: number | undefined): Promise<void> {
-    if (userId === undefined) return;
-    const prompt = workspacePickerPrompts.get(userId);
-    workspacePickerPrompts.delete(userId);
-    if (!prompt) return;
-    try {
-      await bot.api.deleteMessage(prompt.chatId, prompt.messageId);
-    } catch {
-      logger.warn({ userId }, "Could not delete workspace picker prompt");
-    }
-  }
-
-  async function retirePublicChatPickerPrompt(userId: number | undefined): Promise<void> {
-    if (userId === undefined) return;
-    const prompt = publicChatPickerPrompts.get(userId);
-    publicChatPickerPrompts.delete(userId);
-    if (!prompt) return;
-    try {
-      await bot.api.deleteMessage(prompt.chatId, prompt.messageId);
-    } catch {
-      logger.warn({ userId }, "Could not delete public chat picker prompt");
-    }
-  }
-
-  async function clearPublicChatPicker(ctx: Context): Promise<void> {
-    if (!ctx.from) return;
-    const hadPendingSelection = pendingPublicChatSelection.delete(ctx.from.id);
-    const hadPrompt = publicChatPickerPrompts.has(ctx.from.id);
-    await retirePublicChatPickerPrompt(ctx.from.id);
-    if (!hadPendingSelection && !hadPrompt) return;
-    const sent = await ctx.reply("Updating...", { reply_markup: { remove_keyboard: true } });
-    const target = { chatId: sent.chat.id, messageId: sent.message_id };
-    temporaryPrivateUiMessages.set(ctx.from.id, target);
-    rememberPrivateScreen(ctx, target);
-  }
+  const clearPublicChatPicker = privateControlPlane.clearPublicChatPicker.bind(privateControlPlane);
 
   function dashboardText(userId: number): string {
     const member = installation.getMember(userId);
@@ -1038,21 +883,15 @@ export function createBot(
     await renderPrivateScreen(ctx, text, new InlineKeyboard().text("Manage public chats", "dashboard:public").row().text("Back", "dashboard:home"));
   }
 
-  function quickReplyManagementKeyboard(): InlineKeyboard {
-    const keyboard = new InlineKeyboard();
-    for (const category of quickRepliesManager.listCategories()) {
-      for (const template of category.templates) {
-        keyboard.text(template.title, `quick:view:${template.id}`).row();
-      }
-    }
-    return keyboard.text("Add reply", "quick:add").row().text("Back", "dashboard:home");
-  }
-
-  async function showQuickRepliesManagement(ctx: Context): Promise<void> {
-    const categories = quickRepliesManager.listCategories();
-    const count = categories.reduce((total, category) => total + category.templates.length, 0);
-    await renderPrivateScreen(ctx, ["Quick replies", "", `${count} replies configured.`].join("\n"), quickReplyManagementKeyboard());
-  }
+  const showQuickRepliesManagement = privateControlPlane.showQuickRepliesManagement.bind(privateControlPlane);
+  const showQuickReplyDetail = privateControlPlane.showQuickReplyDetail.bind(privateControlPlane);
+  const beginQuickReplyInput = privateControlPlane.beginQuickReplyInput.bind(privateControlPlane);
+  const showQuickReplyCategoryPicker = privateControlPlane.showQuickReplyCategoryPicker.bind(privateControlPlane);
+  const savePendingQuickReplyInput = privateControlPlane.consumeQuickReplyInput.bind(privateControlPlane);
+  const showSupportSettings = privateControlPlane.showSupportSettings.bind(privateControlPlane);
+  const beginSupportResponseTimeInput = privateControlPlane.beginSupportResponseTimeInput.bind(privateControlPlane);
+  const beginSupportAcknowledgementInput = privateControlPlane.beginSupportAcknowledgementInput.bind(privateControlPlane);
+  const savePendingSupportSettingsInput = privateControlPlane.consumeSupportSettingsInput.bind(privateControlPlane);
 
   function supportExpectedResponseTime(): string {
     return db.getSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME;
@@ -1061,236 +900,6 @@ export function createBot(
   function supportTicketReceivedTemplate(): string {
     return db.getSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE;
   }
-
-  function supportAcknowledgementPreview(): string {
-    return truncate(formatTicketReceived(supportTicketReceivedTemplate(), supportExpectedResponseTime()), 1200);
-  }
-
-  function supportSettingsText(notice?: string): string {
-    return [
-      "Support settings",
-      "",
-      ...(notice ? [notice, ""] : []),
-      "Expected response time:",
-      supportExpectedResponseTime(),
-      "",
-      "New-ticket acknowledgement preview:",
-      supportAcknowledgementPreview(),
-      "",
-      "Shown to users when a new support ticket is created."
-    ].join("\n");
-  }
-
-  function supportSettingsKeyboard(): InlineKeyboard {
-    return new InlineKeyboard()
-      .text("Edit response time", "support:edit")
-      .row()
-      .text("Edit acknowledgement", "support:edit-acknowledgement")
-      .row()
-      .text("Reset response time", "support:reset-response-time")
-      .text("Reset acknowledgement", "support:reset-acknowledgement")
-      .row()
-      .text("Back", "dashboard:home");
-  }
-
-  async function showSupportSettings(ctx: Context, notice?: string): Promise<void> {
-    await renderPrivateScreen(ctx, supportSettingsText(notice), supportSettingsKeyboard());
-  }
-
-  function supportResponseTimePrompt(error?: string): string {
-    return [
-      "Expected response time",
-      "",
-      ...(error ? [`Invalid: ${error}`, ""] : []),
-      "Current value:",
-      supportExpectedResponseTime(),
-      "",
-      "Send the new value.",
-      "",
-      "Example:",
-      "1-3 business days"
-    ].join("\n");
-  }
-
-  function normalizeSupportExpectedResponseTime(value: string): { value?: string; error?: string } {
-    const trimmed = value.trim();
-    if (!trimmed) return { error: "value cannot be empty." };
-    if (trimmed.length > 80) return { error: "use at most 80 characters." };
-    if (/\r|\n|[\u0000-\u001f\u007f]/.test(value)) return { error: "use one line without control characters." };
-    return { value: trimmed };
-  }
-
-  function supportAcknowledgementPrompt(error?: string): string {
-    return [
-      "New-ticket acknowledgement",
-      "",
-      ...(error ? [`Invalid: ${error}`, ""] : []),
-      `Use ${SUPPORT_RESPONSE_TIME_PLACEHOLDER} anywhere you want the response time to appear.`,
-      "Messages without this placeholder are allowed and will be sent exactly as written.",
-      "",
-      "Current template:",
-      truncate(supportTicketReceivedTemplate(), 2600),
-      "",
-      "Send the complete new acknowledgement."
-    ].join("\n");
-  }
-
-  function normalizeSupportTicketReceivedTemplate(value: string): { value?: string; error?: string } {
-    const normalized = value.replaceAll("\r\n", "\n").replaceAll("\r", "\n").trim();
-    if (!normalized) return { error: "message cannot be empty." };
-    if (normalized.length > 3500) return { error: "use at most 3500 characters." };
-    if (/[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/.test(normalized)) return { error: "remove unsafe control characters." };
-    const rendered = validateRenderedSupportAcknowledgement(normalized, supportExpectedResponseTime());
-    if (rendered.error) return { error: rendered.error };
-    return { value: normalized };
-  }
-
-  async function beginSupportResponseTimeInput(ctx: Context): Promise<void> {
-    if (!ctx.from) return;
-    pendingSupportSettingsInput.set(ctx.from.id, "RESPONSE_TIME");
-    await renderPrivateScreen(ctx, supportResponseTimePrompt(), new InlineKeyboard().text("Back", "support:back"));
-  }
-
-  async function beginSupportAcknowledgementInput(ctx: Context): Promise<void> {
-    if (!ctx.from) return;
-    pendingSupportSettingsInput.set(ctx.from.id, "ACKNOWLEDGEMENT");
-    await renderPrivateScreen(ctx, supportAcknowledgementPrompt(), new InlineKeyboard().text("Back", "support:back"));
-  }
-
-  async function deleteConsumedSupportSettingsInput(ctx: Context): Promise<void> {
-    if (!ctx.chat || !ctx.message) return;
-    try {
-      await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id);
-    } catch {
-      logger.warn({ userId: ctx.from?.id, messageId: ctx.message.message_id }, "Could not delete consumed support settings input");
-    }
-  }
-
-  async function savePendingSupportSettingsInput(ctx: Context, text: string): Promise<boolean> {
-    if (!ctx.from) return false;
-    const pending = pendingSupportSettingsInput.get(ctx.from.id);
-    if (!pending) return false;
-    await deleteConsumedSupportSettingsInput(ctx);
-    if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) return true;
-
-    if (pending === "RESPONSE_TIME") {
-      const normalized = normalizeSupportExpectedResponseTime(text);
-      if (!normalized.value) {
-        await renderPrivateScreen(ctx, supportResponseTimePrompt(normalized.error), new InlineKeyboard().text("Back", "support:back"));
-        return true;
-      }
-      const rendered = validateRenderedSupportAcknowledgement(supportTicketReceivedTemplate(), normalized.value);
-      if (rendered.error) {
-        await renderPrivateScreen(
-          ctx,
-          supportResponseTimePrompt("that response time makes the current acknowledgement too long. Shorten it or edit the acknowledgement first."),
-          new InlineKeyboard().text("Back", "support:back")
-        );
-        return true;
-      }
-      db.setSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY, normalized.value);
-      pendingSupportSettingsInput.delete(ctx.from.id);
-      await showSupportSettings(ctx, "Expected response time saved.");
-      return true;
-    }
-
-    const normalized = normalizeSupportTicketReceivedTemplate(text);
-    if (!normalized.value) {
-      await renderPrivateScreen(ctx, supportAcknowledgementPrompt(normalized.error), new InlineKeyboard().text("Back", "support:back"));
-      return true;
-    }
-    db.setSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY, normalized.value);
-    pendingSupportSettingsInput.delete(ctx.from.id);
-    await showSupportSettings(ctx, "Acknowledgement saved.");
-    return true;
-  }
-
-  async function showQuickReplyDetail(ctx: Context, templateId: string, notice?: string): Promise<void> {
-    const template = quickRepliesManager.findTemplate(templateId);
-    if (!template) {
-      await renderPrivateScreen(ctx, "This Quick Reply is no longer available.", new InlineKeyboard().text("Back", "quick:list"));
-      return;
-    }
-    await renderPrivateScreen(ctx, ["Quick reply", "", `Name: ${template.title}`, "", "Text:", template.text, ...(notice ? ["", notice] : [])].join("\n"), new InlineKeyboard()
-      .text("Edit name", `quick:edit-name:${template.id}`)
-      .text("Edit text", `quick:edit-text:${template.id}`)
-      .row()
-      .text("Delete", `quick:delete:${template.id}`)
-      .row()
-      .text("Back", "quick:list"));
-  }
-
-  function quickReplyInputPrompt(pending: Exclude<PendingQuickReplyInput, { kind: "ADD_PREVIEW" }>, error?: string): string {
-    const prompt = pending.kind === "EDIT_TITLE" ? "Send the new reply name (1-32 characters)."
-      : pending.kind === "EDIT_TEXT" ? "Send the new reply text (1-3500 characters)."
-        : pending.kind === "ADD_TITLE" ? "Send the new reply name (1-32 characters)."
-          : "Send the reply text (1-3500 characters).";
-    return ["Quick replies", "", ...(error ? [`Invalid: ${error}`, ""] : []), prompt].join("\n");
-  }
-
-  async function beginQuickReplyInput(ctx: Context, pending: Exclude<PendingQuickReplyInput, { kind: "ADD_PREVIEW" }>): Promise<void> {
-    if (!ctx.from) return;
-    pendingQuickReplyInput.set(ctx.from.id, pending);
-    await retirePrivateScreens(ctx);
-    await sendFreshPrivateScreen(ctx, quickReplyInputPrompt(pending), new InlineKeyboard().text("Back", "quick:list"));
-  }
-
-  async function showQuickReplyCategoryPicker(ctx: Context): Promise<void> {
-    const categories = quickRepliesManager.listCategories();
-    const keyboard = new InlineKeyboard();
-    for (const category of categories) keyboard.text(category.title, `quick:add-category:${category.id}`).row();
-    keyboard.text("Back", "quick:list");
-    await renderPrivateScreen(ctx, "Add Quick Reply\n\nChoose a category.", keyboard);
-  }
-
-  async function savePendingQuickReplyInput(ctx: Context, text: string): Promise<boolean> {
-    if (!ctx.from) return false;
-    const pending = pendingQuickReplyInput.get(ctx.from.id);
-    if (!pending) return false;
-    if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) return true;
-    const trimmed = text.trim();
-    const invalid = (maximum: number): string | undefined => !trimmed ? "value cannot be empty." : trimmed.length > maximum ? `use at most ${maximum} characters.` : undefined;
-    if (pending.kind === "EDIT_TITLE" || pending.kind === "ADD_TITLE") {
-      const error = invalid(32);
-      if (error) {
-        await renderPrivateScreen(ctx, quickReplyInputPrompt(pending, error), new InlineKeyboard().text("Back", "quick:list"));
-        return true;
-      }
-      if (pending.kind === "EDIT_TITLE") {
-        const updated = quickRepliesManager.updateTemplate(pending.templateId, { title: trimmed });
-        pendingQuickReplyInput.delete(ctx.from.id);
-        await retirePrivateScreens(ctx);
-        await showQuickReplyDetail(ctx, updated?.id ?? pending.templateId);
-      } else {
-        const next: PendingQuickReplyInput = { kind: "ADD_TEXT", categoryId: pending.categoryId, title: trimmed };
-        pendingQuickReplyInput.set(ctx.from.id, next);
-        await renderPrivateScreen(ctx, quickReplyInputPrompt(next), new InlineKeyboard().text("Back", "quick:list"));
-      }
-      return true;
-    }
-    if (pending.kind === "EDIT_TEXT" || pending.kind === "ADD_TEXT") {
-      const error = invalid(3500);
-      if (error) {
-        await renderPrivateScreen(ctx, quickReplyInputPrompt(pending, error), new InlineKeyboard().text("Back", "quick:list"));
-        return true;
-      }
-      if (pending.kind === "EDIT_TEXT") {
-        const updated = quickRepliesManager.updateTemplate(pending.templateId, { text: trimmed });
-        pendingQuickReplyInput.delete(ctx.from.id);
-        await retirePrivateScreens(ctx);
-        await showQuickReplyDetail(ctx, updated?.id ?? pending.templateId);
-      } else {
-        const next: PendingQuickReplyInput = { kind: "ADD_PREVIEW", categoryId: pending.categoryId, title: pending.title, text: trimmed };
-        pendingQuickReplyInput.set(ctx.from.id, next);
-        await renderPrivateScreen(ctx, ["New Quick reply", "", `Name: ${next.title}`, "", "Text:", next.text].join("\n"), new InlineKeyboard()
-          .text("Save", "quick:add-save")
-          .text("Cancel", "quick:list"));
-      }
-      return true;
-    }
-    return true;
-  }
-
   async function showStaffWorkspaceSettings(ctx: Context, notice?: string, refresh = false): Promise<void> {
     const workspace = installation.getActiveWorkspace();
     const current = workspace
@@ -1329,28 +938,21 @@ export function createBot(
     if (stage === "PUBLIC_CHAT") keyboard.text("Skip optional step", "setup:stage:TEAM_ROLES").row();
     keyboard.text("Exit setup", "setup:exit");
     const text = `Setup ${index + 1}/9\n\n${copy[stage]}`;
-    const callbackMessage = ctx.callbackQuery?.message;
-    if (callbackMessage) {
-      try { await ctx.api.editMessageText(callbackMessage.chat.id, callbackMessage.message_id, text, { reply_markup: keyboard }); installation.setOnboardingPrimaryMessage(ctx.from.id, callbackMessage.chat.id, callbackMessage.message_id); privateUiMessages.set(ctx.from.id, { chatId: callbackMessage.chat.id, messageId: callbackMessage.message_id }); return; }
-      catch (error) { if (!(error instanceof GrammyError && error.description.includes("message is not modified"))) logger.warn({ userId: ctx.from.id }, "Could not reuse onboarding message"); }
-    }
-    const sent = await ctx.reply(text, { reply_markup: keyboard });
-    installation.setOnboardingPrimaryMessage(ctx.from.id, sent.chat.id, sent.message_id);
-    privateUiMessages.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
+    await renderPrivateScreen(ctx, text, keyboard);
   }
 
   async function sendWorkspacePicker(ctx: Context, mode: "SETUP" | "RECONFIGURE" = "SETUP"): Promise<void> {
-    if (ctx.from) pendingWorkspaceSelection.set(ctx.from.id, mode);
+    if (ctx.from) privateControlPlane.setPendingWorkspaceSelection(ctx.from.id, mode);
     const rights = { is_anonymous: false, can_manage_chat: true, can_delete_messages: true, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: false, can_change_info: false, can_invite_users: true, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_post_messages: false, can_edit_messages: false, can_pin_messages: true, can_manage_topics: true };
     const keyboard = new Keyboard().requestChat("Select forum staff group", 1300, { chat_is_channel: false, chat_is_forum: true, bot_is_member: true, request_title: true, request_username: true, bot_administrator_rights: rights, user_administrator_rights: rights }).text("Cancel workspace selection").resized().oneTime();
     const prompt = await ctx.reply("Choose the staff forum group by title. You can also paste a public @username or t.me link.", { reply_markup: keyboard });
-    if (ctx.from) workspacePickerPrompts.set(ctx.from.id, { chatId: prompt.chat.id, messageId: prompt.message_id });
+    if (ctx.from) await privateControlPlane.rememberWorkspacePickerPrompt(ctx.from.id, { chatId: prompt.chat.id, messageId: prompt.message_id }, ctx.api);
   }
 
   async function completeWorkspaceSelection(ctx: Context, result: WorkspaceValidationResult, mode: "SETUP" | "RECONFIGURE", fallback?: { title?: string; username?: string }): Promise<void> {
     if (!ctx.from) return;
-    pendingWorkspaceSelection.delete(ctx.from.id);
-    await retireWorkspacePickerPrompt(ctx.from.id);
+    privateControlPlane.clearPendingWorkspaceSelection(ctx.from.id);
+    await privateControlPlane.retireWorkspacePickerPrompt(ctx.from.id, ctx.api);
     if (!result.valid) {
       const notice = `Staff workspace is not ready:\n${formatWorkspaceChecklist(result)}`;
       if (mode === "RECONFIGURE") {
@@ -1447,8 +1049,6 @@ export function createBot(
     ].join("\n"), keyboard);
   }
 
-  type PublicChatConfigurationField = "warning" | "allowlist" | "cooldown" | "threshold" | "lookback";
-
   function publicChatConfigurationPrompt(chat: NonNullable<ReturnType<SupportDatabase["getManagedPublicChat"]>>, field: PublicChatConfigurationField, error?: string): string {
     const details: Record<PublicChatConfigurationField, string> = {
       warning: ["Warning message", "Shown when the bot sends a first-strike warning in this public chat.", `Current value: ${chat.warning_text}`, "Valid: 1-500 characters.", "Example: Please use English in this chat."].join("\n"),
@@ -1462,7 +1062,7 @@ export function createBot(
 
   async function beginPublicChatConfiguration(ctx: Context, chat: NonNullable<ReturnType<SupportDatabase["getManagedPublicChat"]>>, field: PublicChatConfigurationField): Promise<void> {
     if (!ctx.from) return;
-    pendingPublicChatConfiguration.set(ctx.from.id, { chatId: chat.chat_id, field });
+    privateControlPlane.setPendingPublicChatConfiguration(ctx.from.id, { chatId: chat.chat_id, field });
     await retirePrivateScreens(ctx);
     await sendFreshPrivateScreen(ctx, publicChatConfigurationPrompt(chat, field), new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`));
   }
@@ -1470,9 +1070,9 @@ export function createBot(
   async function sendPublicChatPicker(ctx: Context): Promise<void> {
     if (!ctx.from) return;
     await retirePrivateScreens(ctx);
-    pendingPublicChatSelection.delete(ctx.from.id);
-    await retirePublicChatPickerPrompt(ctx.from.id);
-    pendingPublicChatSelection.add(ctx.from.id);
+    privateControlPlane.clearPublicChatSelection(ctx.from.id);
+    await privateControlPlane.retirePublicChatPickerPrompt(ctx.from.id, ctx.api);
+    privateControlPlane.beginPublicChatSelection(ctx.from.id);
     const rights = {
       is_anonymous: false,
       can_manage_chat: true,
@@ -1500,7 +1100,7 @@ export function createBot(
       user_administrator_rights: rights
     }).text("Cancel public chat selection").resized().oneTime();
     const prompt = await ctx.reply("Choose a public supergroup. You may also paste its public @username or t.me link.", { reply_markup: keyboard });
-    publicChatPickerPrompts.set(ctx.from.id, { chatId: prompt.chat.id, messageId: prompt.message_id });
+    await privateControlPlane.rememberPublicChatPickerPrompt(ctx.from.id, { chatId: prompt.chat.id, messageId: prompt.message_id }, ctx.api);
   }
 
   async function inspectAndSavePublicChat(ctx: Context, chatId: number, shared?: { title?: string; username?: string }): Promise<void> {
@@ -1537,11 +1137,11 @@ export function createBot(
 
   async function savePendingPublicChatConfiguration(ctx: Context, text: string): Promise<boolean> {
     if (!ctx.from) return false;
-    const pending = pendingPublicChatConfiguration.get(ctx.from.id);
+    const pending = privateControlPlane.getPendingPublicChatConfiguration(ctx.from.id);
     if (!pending) return false;
     const chat = db.getManagedPublicChat(pending.chatId);
     if (!chat) {
-      pendingPublicChatConfiguration.delete(ctx.from.id);
+      privateControlPlane.clearPendingPublicChatConfiguration(ctx.from.id);
       await renderPrivateScreen(ctx, "This public chat is no longer managed.", new InlineKeyboard().text("Back", "public:list"));
       return true;
     }
@@ -1567,7 +1167,7 @@ export function createBot(
       if (pending.field === "lookback") lookbackMinutes = parsed;
     }
     db.updateManagedPublicChatConfig(chat.chat_id, { warningText, allowlist, warningCooldownMinutes, warningMessageThreshold, lookbackMinutes });
-    pendingPublicChatConfiguration.delete(ctx.from.id);
+    privateControlPlane.clearPendingPublicChatConfiguration(ctx.from.id);
     await retirePrivateScreens(ctx);
     await showPublicChatSettings(ctx, chat.chat_id);
     return true;
@@ -1622,7 +1222,7 @@ export function createBot(
   bot.command("start", async (ctx) => {
     if (!isPrivateChat(ctx)) { await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler, backgroundTasks); return; }
 
-    pendingSupportSettingsInput.delete(ctx.from?.id ?? -1);
+    privateControlPlane.clearSupportSettingsInput(ctx.from?.id ?? -1);
     persistUserFromContext(db, ctx);
     const startParameter = ctx.match.trim();
     if (startParameter.startsWith("setup_") && ctx.from) {
@@ -1648,7 +1248,7 @@ export function createBot(
 
   bot.command("help", async (ctx) => {
     if (isPrivateChat(ctx)) {
-      pendingSupportSettingsInput.delete(ctx.from?.id ?? -1);
+      privateControlPlane.clearSupportSettingsInput(ctx.from?.id ?? -1);
       if (await enrollPrivateWorkspaceMember(ctx)) { clearStaffTestTicketMode(ctx.from?.id); await showDashboard(ctx); }
       else await ctx.reply(installation.getState().setupState === "READY" ? USER_HELP_TEXT : "Support has not been configured yet.");
       return;
@@ -2191,16 +1791,16 @@ export function createBot(
     const data = ctx.callbackQuery.data;
     const [namespace] = data.split(":");
 
-    if (isObsoletePrivateOperatorCallback(ctx, namespace ?? "")) {
+    if (privateControlPlane.isObsoleteOperatorCallback(ctx, namespace ?? "")) {
       await ctx.answerCallbackQuery({ text: "This screen is no longer active. Use /start.", show_alert: true });
       return;
     }
 
-    if (isPrivateChat(ctx) && ctx.from && installation.getMember(ctx.from.id) && privateOperatorCallbackNamespaces.has(namespace ?? "") && data !== "dashboard:test-ticket") {
+    if (isPrivateChat(ctx) && ctx.from && installation.getMember(ctx.from.id) && privateControlPlane.hasOperatorNamespace(namespace ?? "") && data !== "dashboard:test-ticket") {
       clearStaffTestTicketMode(ctx.from.id);
     }
     if (isPrivateChat(ctx) && ctx.from && namespace !== "support") {
-      pendingSupportSettingsInput.delete(ctx.from.id);
+      privateControlPlane.clearSupportSettingsInput(ctx.from.id);
     }
 
     if (namespace === "owner" && data === "owner:confirm-transfer") {
@@ -2279,7 +1879,7 @@ export function createBot(
       }
       if (action === "quick") {
         if (!await requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION")) return;
-        pendingQuickReplyInput.delete(ctx.from.id);
+        privateControlPlane.clearPendingQuickReplyInput(ctx.from.id);
         await showQuickRepliesManagement(ctx);
         return;
       }
@@ -2373,7 +1973,7 @@ export function createBot(
         return;
       }
       if (action === "list") {
-        pendingPublicChatConfiguration.delete(ctx.from.id);
+        privateControlPlane.clearPendingPublicChatConfiguration(ctx.from.id);
         await ctx.answerCallbackQuery();
         await showPublicChats(ctx);
         return;
@@ -2388,7 +1988,7 @@ export function createBot(
         return;
       }
       if (action === "open") {
-        pendingPublicChatConfiguration.delete(ctx.from.id);
+        privateControlPlane.clearPendingPublicChatConfiguration(ctx.from.id);
         await ctx.answerCallbackQuery();
         await showPublicChatSettings(ctx, chatId);
         return;
@@ -2467,13 +2067,13 @@ export function createBot(
       if (!ctx.from) return;
       const [, action, value] = data.split(":");
       if (action === "list") {
-        pendingQuickReplyInput.delete(ctx.from.id);
+        privateControlPlane.clearPendingQuickReplyInput(ctx.from.id);
         await ctx.answerCallbackQuery();
         await showQuickRepliesManagement(ctx);
         return;
       }
       if (action === "view" && value) {
-        pendingQuickReplyInput.delete(ctx.from.id);
+        privateControlPlane.clearPendingQuickReplyInput(ctx.from.id);
         await ctx.answerCallbackQuery();
         await showQuickReplyDetail(ctx, value);
         return;
@@ -2513,13 +2113,13 @@ export function createBot(
         return;
       }
       if (action === "add-save") {
-        const pending = pendingQuickReplyInput.get(ctx.from.id);
+        const pending = privateControlPlane.getPendingQuickReplyInput(ctx.from.id);
         if (!pending || pending.kind !== "ADD_PREVIEW") {
           await ctx.answerCallbackQuery({ text: "This reply draft is no longer active.", show_alert: true });
           return;
         }
         const template = quickRepliesManager.createTemplate(pending);
-        pendingQuickReplyInput.delete(ctx.from.id);
+        privateControlPlane.clearPendingQuickReplyInput(ctx.from.id);
         await ctx.answerCallbackQuery({ text: "Quick Reply saved." });
         await retirePrivateScreens(ctx);
         await showQuickReplyDetail(ctx, template.id);
@@ -2584,18 +2184,18 @@ export function createBot(
           return;
         }
         db.setSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY, "");
-        pendingSupportSettingsInput.delete(ctx.from.id);
+        privateControlPlane.clearSupportSettingsInput(ctx.from.id);
         await showSupportSettings(ctx, "Expected response time reset to default.");
         return;
       }
       if (action === "reset-acknowledgement") {
         db.setSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY, "");
-        pendingSupportSettingsInput.delete(ctx.from.id);
+        privateControlPlane.clearSupportSettingsInput(ctx.from.id);
         await showSupportSettings(ctx, "Acknowledgement reset to default.");
         return;
       }
       if (action === "back") {
-        pendingSupportSettingsInput.delete(ctx.from.id);
+        privateControlPlane.clearSupportSettingsInput(ctx.from.id);
         await showDashboard(ctx);
         return;
       }
@@ -2714,10 +2314,10 @@ export function createBot(
     if (shared.request_id !== 1300) return;
     try {
       const result = await validateStaffWorkspace(ctx.api, shared.chat_id, ctx.from.id);
-      const mode = pendingWorkspaceSelection.get(ctx.from.id) ?? "SETUP";
+      const mode = privateControlPlane.getPendingWorkspaceSelection(ctx.from.id) ?? "SETUP";
       await completeWorkspaceSelection(ctx, result, mode, { title: shared.title, username: shared.username });
     } catch {
-      const mode = pendingWorkspaceSelection.get(ctx.from.id) ?? "SETUP";
+      const mode = privateControlPlane.getPendingWorkspaceSelection(ctx.from.id) ?? "SETUP";
       if (mode === "RECONFIGURE") await showStaffWorkspaceSettings(ctx, "The selected group could not be inspected. Add the bot as administrator, enable Topics, then retry.", true);
       else await renderPrivateScreen(ctx, "The selected group could not be inspected. Add the bot as administrator, enable Topics, then retry.", new InlineKeyboard().text("Retry", "setup:workspace").row().text("Back", "setup:stage:STAFF_WORKSPACE"));
     }
@@ -2775,7 +2375,7 @@ export function createBot(
       if (text && await savePendingQuickReplyInput(ctx, text)) return;
       if (text && await savePendingSupportSettingsInput(ctx, text)) return;
       if (text && await savePendingPublicChatConfiguration(ctx, text)) return;
-      if (pendingPublicChatSelection.has(ctx.from.id) && text) {
+      if (privateControlPlane.isPublicChatSelectionPending(ctx.from.id) && text) {
         if (text === "Cancel public chat selection") {
           await clearPublicChatPicker(ctx);
           await showPublicChats(ctx, "Public chat selection cancelled.");
@@ -2800,11 +2400,11 @@ export function createBot(
         }
       }
       const session = installation.getOnboardingSession(ctx.from.id);
-      const workspaceMode = pendingWorkspaceSelection.get(ctx.from.id) ?? (session?.state === "ACTIVE" && session.stage === "STAFF_WORKSPACE" ? "SETUP" : undefined);
+      const workspaceMode = privateControlPlane.getPendingWorkspaceSelection(ctx.from.id) ?? (session?.state === "ACTIVE" && session.stage === "STAFF_WORKSPACE" ? "SETUP" : undefined);
       if (workspaceMode && text) {
         if (workspaceMode === "RECONFIGURE" && text === "Cancel workspace selection") {
-          pendingWorkspaceSelection.delete(ctx.from.id);
-          await retireWorkspacePickerPrompt(ctx.from.id);
+          privateControlPlane.clearPendingWorkspaceSelection(ctx.from.id);
+          await privateControlPlane.retireWorkspacePickerPrompt(ctx.from.id, ctx.api);
           await ctx.reply("Workspace selection cancelled.", { reply_markup: { remove_keyboard: true } });
           await showStaffWorkspaceSettings(ctx, undefined, true);
           return;
