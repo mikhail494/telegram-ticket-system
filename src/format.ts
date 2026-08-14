@@ -11,15 +11,28 @@ export const START_TEXT =
   "Hi! Please describe your issue in one message. Include your AgentOn UID, wallet address, quest link, screenshots or transaction hash if relevant.";
 
 export const DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME = "1-7 business days";
+export const SUPPORT_RESPONSE_TIME_PLACEHOLDER = "{{response_time}}";
+export const TELEGRAM_SEND_MESSAGE_TEXT_LIMIT = 4096;
+export const DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE = [
+  "Thanks, your request has been received.",
+  "",
+  `Expected response time: ${SUPPORT_RESPONSE_TIME_PLACEHOLDER}.`,
+  "",
+  "You can continue sending messages in this chat until your ticket is closed."
+].join("\n");
 
-export function formatTicketReceived(expectedResponseTime: string): string {
-  return [
-    "Thanks, your request has been received.",
-    "",
-    `Expected response time: ${expectedResponseTime}.`,
-    "",
-    "You can continue sending messages in this chat until your ticket is closed."
-  ].join("\n");
+export function formatTicketReceived(template: string, expectedResponseTime: string): string {
+  return template.replaceAll(SUPPORT_RESPONSE_TIME_PLACEHOLDER, expectedResponseTime);
+}
+
+export function validateRenderedSupportAcknowledgement(
+  template: string,
+  expectedResponseTime: string
+): { rendered: string; error?: string } {
+  const rendered = formatTicketReceived(template, expectedResponseTime);
+  return rendered.length <= TELEGRAM_SEND_MESSAGE_TEXT_LIMIT
+    ? { rendered }
+    : { rendered, error: "the rendered message must fit within Telegram's 4096-character limit." };
 }
 
 export const CLOSED_TEXT =
