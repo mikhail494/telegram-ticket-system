@@ -1,6 +1,7 @@
 
 import { normalizeTelegramDeliveryError } from "./deliveryDiagnostics.js";
 import { logger } from "./logger.js";
+import type { BackgroundTaskTracker } from "./lifecycle.js";
 import { francAll } from "franc-min";
 
 export const DEFAULT_MODERATION_WARNING = "Please use English in the main chat. Further violations may be reviewed by an authorized moderator under the current community policy.";
@@ -162,17 +163,20 @@ export function scheduleModerationCleanup(
   db: import("./db.js").SupportDatabase,
   jobId: number,
   delayMs = 10_000,
-  createTimer: ModerationTimerFactory = (callback, delay) => setTimeout(callback, delay)
+  createTimer: ModerationTimerFactory = (callback, delay) => setTimeout(callback, delay),
+  backgroundTasks?: BackgroundTaskTracker
 ): void {
   if (scheduledCleanupJobs.has(jobId)) return;
   scheduledCleanupJobs.add(jobId);
   const timer = createTimer(() => {
-    void processModerationCleanupJob(api, db, jobId, new Date())
+    const run = () => processModerationCleanupJob(api, db, jobId, new Date())
       .catch(async (error) => {
         const { logger } = await import("./logger.js");
         logger.warn({ jobId, err: error }, "Moderation cleanup timer failed");
       })
       .finally(() => scheduledCleanupJobs.delete(jobId));
+    if (backgroundTasks) backgroundTasks.run(run);
+    else void run();
   }, delayMs);
   timer.unref?.();
 }

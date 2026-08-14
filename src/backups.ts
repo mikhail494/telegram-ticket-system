@@ -88,6 +88,10 @@ export class BackupService {
     try { return await this.active; } finally { this.active = null; }
   }
 
+  async waitForIdle(): Promise<void> {
+    await this.active;
+  }
+
   private async createBackupInternal(): Promise<BackupResult> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const basename = `support-${timestamp(this.now())}.sqlite`;
@@ -118,6 +122,12 @@ export class BackupService {
       let retention: Pick<BackupResult, "retentionDeleted" | "retentionFailed">;
       try { retention = await this.applyRetention(); }
       catch { retention = { retentionDeleted: 0, retentionFailed: 1 }; }
+      await Promise.all([
+        rm(temporary, { force: true }),
+        rm(temporaryMetadata, { force: true }),
+        rm(`${temporary}-wal`, { force: true }),
+        rm(`${temporary}-shm`, { force: true })
+      ]);
       return { path: finalPath, basename, size, sha256: digest, ...retention };
     } catch (error) {
       await Promise.allSettled([
@@ -180,20 +190,34 @@ export async function verifyBackupChecksum(file: string, options: { requireMetad
 
 export class BackupScheduler {
   private timer: NodeJS.Timeout | null = null;
+  private stopped = false;
+  private activeRun: Promise<void> | null = null;
   constructor(private readonly service: BackupService, private readonly options: BackupOptions, private readonly onFailure: (error: unknown) => void, private readonly onSuccess: (result: BackupResult) => void = () => undefined) {}
   async start(): Promise<void> {
     if (!this.options.enabled) return;
+    this.stopped = false;
     const latest = await this.service.newestValidBackup();
     const age = latest ? Date.now() - (await stat(latest)).mtimeMs : Number.POSITIVE_INFINITY;
     if (age >= this.options.intervalMs) await this.run(); else this.schedule(this.options.intervalMs - age);
   }
-  stop(): void { if (this.timer) clearTimeout(this.timer); this.timer = null; }
+  stop(): void { this.stopped = true; if (this.timer) clearTimeout(this.timer); this.timer = null; }
+  async stopAndDrain(): Promise<void> {
+    this.stop();
+    await this.activeRun;
+    await this.service.waitForIdle();
+  }
   private async run(): Promise<void> {
-    try { this.onSuccess(await this.service.createBackup()); } catch (error) { this.onFailure(error); }
-    this.schedule(this.options.intervalMs);
+    if (this.stopped) return;
+    const active = (async () => {
+      try { this.onSuccess(await this.service.createBackup()); } catch (error) { this.onFailure(error); }
+    })();
+    this.activeRun = active;
+    try { await active; } finally { if (this.activeRun === active) this.activeRun = null; }
+    if (!this.stopped) this.schedule(this.options.intervalMs);
   }
   private schedule(delay: number): void {
-    this.stop();
+    if (this.stopped) return;
+    if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => { void this.run(); }, Math.max(1, delay));
     this.timer.unref();
   }
