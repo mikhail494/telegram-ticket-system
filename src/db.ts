@@ -1,1055 +1,256 @@
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
-import type { DeliveryErrorCategory, DeliveryErrorPermanence, NormalizedDeliveryError } from "./deliveryDiagnostics.js";
-
-export type TicketStatus = "OPEN" | "WAITING_USER" | "IN_PROGRESS" | "CLOSED";
-export type MessageDirection = "USER_TO_STAFF" | "STAFF_TO_USER" | "SYSTEM";
-export type MessageSenderType = "USER" | "STAFF" | "SYSTEM";
-export type InstallationSetupState = "SETUP_REQUIRED" | "READY";
-export type AuthorizationMode = "LEGACY_TRUSTED_GROUP" | "RBAC_ACTIVE";
-export type TeamRole = "OWNER" | "ADMIN" | "SENIOR_AGENT" | "AGENT";
-
-export interface InstallationStateRecord {
-  setup_state: InstallationSetupState;
-  authorization_mode: AuthorizationMode;
-  active_workspace_id: number | null;
-  updated_at: string;
-}
-
-export interface WorkspaceRecord {
-  id: number; telegram_chat_id: number; title: string | null; username: string | null;
-  active: number; imported_from_legacy: number; created_at: string; updated_at: string;
-}
-
-export type ManagedPublicChatPermissionStatus = "UNKNOWN" | "HEALTHY" | "UNHEALTHY";
-export type ManagedPublicChatReactionStatus = "UNKNOWN" | "AVAILABLE" | "UNAVAILABLE";
-export type ManagedPublicChatConnectionStatus = "UNKNOWN" | "CONNECTED" | "UNREACHABLE";
-
-export interface ManagedPublicChatRecord {
-  chat_id: number;
-  workspace_id: number | null;
-  title: string | null;
-  username: string | null;
-  is_forum: number;
-  active: number;
-  imported_from_legacy: number;
-  moderation_enabled: number;
-  warning_text: string;
-  allowlist_json: string;
-  warning_cooldown_minutes: number;
-  warning_message_threshold: number;
-  lookback_minutes: number;
-  permission_status: ManagedPublicChatPermissionStatus;
-  reaction_status: ManagedPublicChatReactionStatus;
-  connection_status: ManagedPublicChatConnectionStatus;
-  permissions_checked_at: string | null;
-  created_at: string;
-  updated_at: string;
-  allowlist: readonly string[];
-}
-
-export interface TeamMemberRecord {
-  user_telegram_id: number; username: string | null; display_name: string | null;
-  role: TeamRole; active: number; added_by: number | null; created_at: string; updated_at: string;
-}
-
-export interface SecureTokenRecord {
-  id: number; token_hash: string; kind: "OWNER_PAIRING" | "OWNER_RECOVERY" | "TEAM_INVITE";
-  role: TeamRole | null; created_by: number | null; claimed_by: number | null;
-  expires_at: string; consumed_at: string | null; created_at: string;
-}
-
-export interface OnboardingSessionRecord {
-  user_telegram_id: number; stage: string; state: string; candidate_chat_id: number | null;
-  primary_message_chat_id: number | null; primary_message_id: number | null; updated_at: string;
-}
-
-export interface UserRecord {
-  telegram_id: number;
-  username: string | null;
-  first_name: string | null;
-  last_name: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface TicketRecord {
-  id: number;
-  user_telegram_id: number;
-  status: TicketStatus;
-  staff_chat_id: number | null;
-  message_thread_id: number | null;
-  staff_message_id: number | null;
-  logs_message_id: number | null;
-  transcript_message_id: number | null;
-  archived_at: string | null;
-  closed_by_type: MessageSenderType | null;
-  closed_by_display_name: string | null;
-  closed_by_username: string | null;
-  created_at: string;
-  updated_at: string;
-  closed_at: string | null;
-  follow_up_state: TicketFollowUpState;
-  internal_note: string | null;
-  escalation_target: TicketEscalationTarget;
-  follow_up_updated_at: string | null;
-  follow_up_source_answer_package_id: string | null;
-}
-
-export type TicketFollowUpState = "NONE" | "WAITING_USER" | "WAITING_DEVS" | "WAITING_QUEST_OWNER" | "MONITORING";
-export type TicketEscalationTarget = "NONE" | "DEVS" | "PAYMENTS" | "SECURITY" | "QUEST_OWNER" | "SUPPORT";
-
-export interface TicketFollowUpHistoryRecord {
-  id: number;
-  ticket_id: number;
-  follow_up_state: TicketFollowUpState;
-  internal_note: string | null;
-  escalation_target: TicketEscalationTarget;
-  source_answer_package_id: string | null;
-  created_at: string;
-}
-
-export interface TicketWithUser extends TicketRecord {
-  username: string | null;
-  first_name: string | null;
-  last_name: string | null;
-}
-
-export interface TicketMessageRecord {
-  id: number;
-  ticket_id: number;
-  direction: MessageDirection;
-  source_chat_id: number | null;
-  source_message_id: number | null;
-  delivery_chat_id: number | null;
-  delivery_message_id: number | null;
-  from_telegram_id: number | null;
-  from_username: string | null;
-  sender_type: MessageSenderType | null;
-  sender_display_name: string | null;
-  sender_username: string | null;
-  text: string | null;
-  media_type: string | null;
-  filename: string | null;
-  file_id: string | null;
-  created_at: string;
-}
-
-export interface BannedUserRecord {
-  user_telegram_id: number;
-  username: string | null;
-  reason: string;
-  banned_by: number | null;
-  created_at: string;
-}
-
-export interface UserInput {
-  telegramId: number;
-  username?: string | null;
-  firstName?: string | null;
-  lastName?: string | null;
-}
-
-export interface AddMessageInput {
-  ticketId: number;
-  direction: MessageDirection;
-  sourceChatId?: number | null;
-  sourceMessageId?: number | null;
-  deliveryChatId?: number | null;
-  deliveryMessageId?: number | null;
-  fromTelegramId?: number | null;
-  fromUsername?: string | null;
-  senderType?: MessageSenderType | null;
-  senderDisplayName?: string | null;
-  senderUsername?: string | null;
-  text?: string | null;
-  mediaType?: string | null;
-  filename?: string | null;
-  fileId?: string | null;
-}
-
-export interface BanUserInput {
-  userTelegramId: number;
-  username?: string | null;
-  reason: string;
-  bannedBy?: number | null;
-}
-
-export interface CloseTicketInput {
-  type: MessageSenderType;
-  displayName: string;
-  username?: string | null;
-}
-
-export interface TicketBatchExportRecord {
-  export_id: string;
-  staff_chat_id: number;
-  created_at: string;
-  selection_mode: string;
-  ticket_count: number;
-  delivery_state: TicketBatchExportDeliveryState;
-  delivery_message_id: number | null;
-  delivered_at: string | null;
-  last_error: string | null;
-}
-
-export type TicketBatchExportDeliveryState = "PREPARING" | "DELIVERED" | "FAILED" | "UNKNOWN_DELIVERY";
-
-export interface TicketBatchExportItemRecord {
-  export_id: string;
-  ticket_id: number;
-  snapshot_token: string;
-}
-
-export interface TicketBatchDeliveryFailureContext {
-  category: DeliveryErrorCategory;
-  permanence: DeliveryErrorPermanence;
-  occurred_at: string;
-  retry_after_seconds: number | null;
-  staff_failure_event_posted: boolean;
-}
-
-export interface TicketBatchStaffSyncContext {
-  state: TicketBatchTopicEchoState;
-  delivered: boolean;
-  terminal_failure_category: DeliveryErrorCategory | null;
-  intended_follow_up_state: TicketFollowUpState;
-  intended_escalation_target: TicketEscalationTarget;
-  internal_context_available: boolean;
-}
-
-export interface CreateTicketBatchExportInput {
-  exportId: string;
-  staffChatId: number;
-  createdAt: string;
-  selectionMode: "all_active";
-  ticketCount: number;
-  items: Array<{ ticketId: number; snapshotToken: string }>;
-  deliveryState?: TicketBatchExportDeliveryState;
-}
-
-export type TicketBatchAnswerPackageStatus = "PENDING" | "APPLYING" | "COMPLETED" | "PARTIAL" | "CANCELLED";
-export type TicketBatchAnswerItemState = "PENDING" | "APPLYING" | "REPLY_SENT" | "STAFF_SYNC_PENDING" | "COMPLETED" | "NO_ACTION" | "STALE" | "INACTIVE" | "FAILED" | "UNKNOWN_DELIVERY";
-export type TicketBatchTopicEchoState = "NOT_REQUIRED" | "PENDING" | "SENT" | "FAILED" | "TERMINAL_FAILED";
-export type TicketBatchFailureEventState = "NOT_REQUIRED" | "PENDING" | "SENT" | "FAILED";
-export type TicketBatchSummaryDeliveryState = "NOT_ATTEMPTED" | "SENT" | "FAILED";
-export type TicketBatchFinalSummaryState = "NOT_PENDING" | "PENDING" | "SENT" | "FAILED" | "UNKNOWN_DELIVERY";
-
-export interface TicketBatchAnswerPackageRecord {
-  answer_package_id: string; export_id: string; staff_chat_id: number; package_hash: string;
-  source_chat_id: number | null; source_message_id: number | null; package_created_at: string;
-  imported_at: string; status: TicketBatchAnswerPackageStatus; started_at: string | null;
-  completed_at: string | null; updated_at: string;
-  preview_token: string | null; preview_chat_id: number | null; preview_message_id: number | null; preview_page: number | null;
-  summary_delivery_state: TicketBatchSummaryDeliveryState; summary_delivery_error: string | null; summary_delivery_attempted_at: string | null;
-  final_summary_state: TicketBatchFinalSummaryState; final_summary_text: string | null;
-  final_summary_chat_id: number | null; final_summary_origin_chat_id: number | null; final_summary_origin_message_id: number | null;
-  final_summary_message_id: number | null; final_summary_attempt_count: number; final_summary_next_retry_at: string | null;
-  final_summary_last_error: string | null; final_summary_delivered_at: string | null;
-}
-
-export interface TicketBatchAnswerItemRecord {
-  answer_package_id: string; ticket_id: number; snapshot_token: string; action: "reply_keep_open" | "reply_and_close" | "no_action";
-  reply_text: string | null; state: TicketBatchAnswerItemState; delivery_message_id: number | null;
-  applied_at: string | null; last_error: string | null; updated_at: string;
-  follow_up_state: TicketFollowUpState; internal_note: string | null; escalation_target: TicketEscalationTarget;
-  topic_echo_chat_id: number | null; topic_echo_thread_id: number | null; topic_echo_message_id: number | null;
-  topic_echo_state: TicketBatchTopicEchoState; topic_echo_last_error: string | null;
-  topic_echo_attempt_count: number; topic_echo_next_retry_at: string | null;
-  topic_echo_error_category: DeliveryErrorCategory | null; topic_echo_error_code: number | null;
-  topic_echo_http_status: number | null; topic_echo_error_method: string | null;
-  topic_echo_error_description: string | null; topic_echo_terminal_at: string | null;
-  delivery_error_category: DeliveryErrorCategory | null; delivery_error_permanence: DeliveryErrorPermanence | null;
-  delivery_error_code: number | null; delivery_http_status: number | null; delivery_error_method: string | null;
-  delivery_retry_after_seconds: number | null; delivery_error_description: string | null; delivery_failed_at: string | null;
-  delivery_attempt_count: number; delivery_failure_event_state: TicketBatchFailureEventState;
-  delivery_failure_event_message_id: number | null; delivery_failure_event_attempt_count: number;
-  delivery_failure_event_next_retry_at: string | null;
-}
-
-export interface TicketBatchRecoveryAudit {
-  successTopicEchoes: number;
-  failureEvents: number;
-  noActionFollowUpEvents: number;
-  finalSummaries: number;
-  invalidSuccessEchoes: number;
-  terminalStaffFailures: number;
-  userFacingCandidates: number;
-}
-
-export interface CreateTicketBatchAnswerPackageInput {
-  answerPackageId: string; exportId: string; staffChatId: number; packageHash: string;
-  sourceChatId?: number | null; sourceMessageId?: number | null; packageCreatedAt: string;
-  items: Array<Pick<TicketBatchAnswerItemRecord, "ticket_id" | "snapshot_token" | "action" | "reply_text"> & Partial<Pick<TicketBatchAnswerItemRecord, "follow_up_state" | "internal_note" | "escalation_target">>>;
-}
-
-export interface LanguageModerationUserState {
-  chat_id: number; user_telegram_id: number; username: string | null; current_strikes: number;
-  sanction_tier: number; first_strike_at: string | null; updated_at: string;
-}
-
-export interface LanguageModerationViolation {
-  chat_id: number; user_telegram_id: number; message_id: number; username: string | null;
-  message_thread_id: number | null;
-  detected_at: string; cycle_tier: number; moderation_cycle_id: string | null; cleanup_state: LanguageModerationViolationCleanupState;
-  cleanup_attempt_count: number; cleanup_last_error_category: string | null; cleanup_last_error_code: number | null;
-  cleanup_last_error_description: string | null; cleanup_completed_at: string | null;
-}
-
-export interface LanguageModerationWarningState {
-  chat_id: number;
-  message_thread_id: number;
-  last_warning_message_id: number | null;
-  last_warning_at: string | null;
-  ordinary_messages_since_warning: number;
-  pending_warning_due_at: string | null;
-  pending_warning_started_at: string | null;
-  updated_at: string;
-}
-
-export type LanguageModerationViolationCleanupState = "PENDING" | "DELETED" | "ALREADY_ABSENT" | "TERMINAL_FAILED";
-
-export interface LanguageModerationCleanupJob {
-  id: number; staff_chat_id: number | null; chat_id: number; user_telegram_id: number; username: string | null; chat_title: string | null;
-  sanction_tier: number; sanction_kind: string; violation_cycle_id: string | null; cleanup_due_at: string; state: "PENDING" | "CLEANING" | "LOG_PENDING" | "COMPLETED";
-  created_at: string; updated_at: string;
-}
-
-export type EntityNotificationPublicationState = "CLAIMED" | "PUBLISHED" | "FAILED" | "UNKNOWN_DELIVERY";
-
-export interface EntityNotificationPublication {
-  provider: string;
-  entity_type: string;
-  entity_id: string;
-  event_type: "created";
-  observed_at: string;
-  target_chat_id: number | null;
-  state: EntityNotificationPublicationState;
-  telegram_message_id: number | null;
-  first_seen_at: string;
-  published_at: string | null;
-  updated_at: string;
-  last_error: string | null;
-}
-
-export interface QuickReplyCategoryRecord {
-  id: string;
-  title: string;
-  sort_order: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface QuickReplyTemplateRecord {
-  id: string;
-  category_id: string;
-  title: string;
-  text: string;
-  sort_order: number;
-  created_at: string;
-  updated_at: string;
-}
-
-interface TableColumnInfo {
-  name: string;
-}
-
-interface Migration {
-  id: number;
-  name: string;
-  up: () => void;
-}
-
-const TICKET_STATUSES: TicketStatus[] = ["OPEN", "WAITING_USER", "IN_PROGRESS", "CLOSED"];
-
-function now(): string {
-  return new Date().toISOString();
-}
-
-function senderTypeForDirection(direction: MessageDirection): MessageSenderType {
-  if (direction === "USER_TO_STAFF") {
-    return "USER";
-  }
-
-  if (direction === "STAFF_TO_USER") {
-    return "STAFF";
-  }
-
-  return "SYSTEM";
-}
-
-export function resolveDatabasePath(databaseUrl: string): string {
-  const value = databaseUrl.trim();
-
-  if (value === ":memory:") {
-    return value;
-  }
-
-  if (value.startsWith("file://")) {
-    const url = new URL(value);
-    const pathname = decodeURIComponent(url.pathname);
-    return process.platform === "win32" && /^\/[A-Za-z]:/.test(pathname)
-      ? pathname.slice(1)
-      : pathname;
-  }
-
-  if (value.startsWith("file:")) {
-    return value.slice("file:".length);
-  }
-
-  if (value.startsWith("sqlite://")) {
-    const url = new URL(value);
-    const pathname = decodeURIComponent(url.pathname);
-    return process.platform === "win32" && /^\/[A-Za-z]:/.test(pathname)
-      ? pathname.slice(1)
-      : pathname;
-  }
-
-  return value;
-}
-
-function ensureDirectoryForDatabase(databasePath: string): void {
-  if (databasePath === ":memory:") {
-    return;
-  }
-
-  const directory = path.dirname(databasePath);
-  if (directory && directory !== ".") {
-    fs.mkdirSync(directory, { recursive: true });
-  }
-}
-
+import { InstallationRepository } from "./persistence/installationRepository.js";
+import { ModerationRepository } from "./persistence/moderationRepository.js";
+import { QuickRepliesRepository } from "./persistence/quickRepliesRepository.js";
+import { TicketBatchRepository } from "./persistence/ticketBatchRepository.js";
+import { TicketRepository } from "./persistence/ticketsRepository.js";
+import { now } from "./persistence/helpers.js";
+import type { NormalizedDeliveryError } from "./deliveryDiagnostics.js";
+import type { AddMessageInput, BanUserInput, BannedUserRecord, CloseTicketInput, CreateTicketBatchAnswerPackageInput, CreateTicketBatchExportInput, EntityNotificationPublicationState, InstallationStateRecord, LanguageModerationCleanupJob, LanguageModerationUserState, LanguageModerationViolation, LanguageModerationViolationCleanupState, LanguageModerationWarningState, ManagedPublicChatRecord, OnboardingSessionRecord, QuickReplyCategoryRecord, QuickReplyTemplateRecord, SecureTokenRecord, TeamMemberRecord, TeamRole, TicketBatchAnswerItemRecord, TicketBatchAnswerItemState, TicketBatchAnswerPackageRecord, TicketBatchDeliveryFailureContext, TicketBatchExportItemRecord, TicketBatchExportRecord, TicketBatchFailureEventState, TicketBatchRecoveryAudit, TicketBatchStaffSyncContext, TicketBatchSummaryDeliveryState, TicketBatchTopicEchoState, TicketEscalationTarget, TicketFollowUpHistoryRecord, TicketFollowUpState, TicketMessageRecord, TicketRecord, TicketStatus, TicketWithUser, UserInput, UserRecord, WorkspaceRecord } from "./persistence/types.js";
+export type * from "./persistence/types.js";
+interface TableColumnInfo { name: string; }
+interface Migration { id: number; name: string; up: () => void; }
+export function resolveDatabasePath(databaseUrl: string): string { const value = databaseUrl.trim(); if (value === ":memory:") return value; if (value.startsWith("file://")) { const url = new URL(value); const pathname = decodeURIComponent(url.pathname); return process.platform === "win32" && /^\/[A-Za-z]:/.test(pathname) ? pathname.slice(1) : pathname; } if (value.startsWith("file:")) return value.slice("file:".length); if (value.startsWith("sqlite://")) { const url = new URL(value); const pathname = decodeURIComponent(url.pathname); return process.platform === "win32" && /^\/[A-Za-z]:/.test(pathname) ? pathname.slice(1) : pathname; } return value; }
+function ensureDirectoryForDatabase(databasePath: string): void { if (databasePath === ":memory:") return; const directory = path.dirname(databasePath); if (directory && directory !== ".") fs.mkdirSync(directory, { recursive: true }); }
 export class SupportDatabase {
   private readonly db: Database.Database;
+  private readonly tickets: TicketRepository;
+  private readonly batch: TicketBatchRepository;
+  private readonly installation: InstallationRepository;
+  private readonly moderation: ModerationRepository;
+  private readonly quickReplies: QuickRepliesRepository;
   readonly databasePath: string;
-
   constructor(databaseUrl: string) {
     const databasePath = resolveDatabasePath(databaseUrl);
     ensureDirectoryForDatabase(databasePath);
-
     this.databasePath = databasePath;
     this.db = new Database(databasePath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
+    // Migration 20 reads legacy settings through the public facade.
+    this.installation = new InstallationRepository(this.db);
     this.migrate();
+    this.tickets = new TicketRepository(this.db);
+    this.batch = new TicketBatchRepository(this.db);
+    this.moderation = new ModerationRepository(this.db);
+    this.quickReplies = new QuickRepliesRepository(this.db);
+  }
+  close(): void { this.db.close(); }
+  ping(): boolean { this.db.prepare("SELECT 1").get(); return true; }
+  backupTo(destination: string): Promise<Database.BackupMetadata> { return this.db.backup(destination); }
+  upsertUser(user: UserInput): void
+  {
+    return this.tickets.upsertUser(user);
   }
 
-  close(): void {
-    this.db.close();
+  getUser(telegramId: number): UserRecord | undefined
+  {
+    return this.tickets.getUser(telegramId);
   }
 
-  ping(): boolean {
-    this.db.prepare("SELECT 1").get();
-    return true;
+  createTicket(userTelegramId: number, staffChatId: number): TicketRecord
+  {
+    return this.tickets.createTicket(userTelegramId, staffChatId);
   }
 
-  backupTo(destination: string): Promise<Database.BackupMetadata> {
-    return this.db.backup(destination);
+  getTicket(ticketId: number): TicketRecord | undefined
+  {
+    return this.tickets.getTicket(ticketId);
   }
 
-  upsertUser(user: UserInput): void {
-    const timestamp = now();
-    this.db
-      .prepare(
-        `
-        INSERT INTO users (telegram_id, username, first_name, last_name, created_at, updated_at)
-        VALUES (@telegramId, @username, @firstName, @lastName, @createdAt, @updatedAt)
-        ON CONFLICT(telegram_id) DO UPDATE SET
-          username = excluded.username,
-          first_name = excluded.first_name,
-          last_name = excluded.last_name,
-          updated_at = excluded.updated_at
-      `
-      )
-      .run({
-        telegramId: user.telegramId,
-        username: user.username ?? null,
-        firstName: user.firstName ?? null,
-        lastName: user.lastName ?? null,
-        createdAt: timestamp,
-        updatedAt: timestamp
-      });
+  getTicketWithUser(ticketId: number): TicketWithUser | undefined
+  {
+    return this.tickets.getTicketWithUser(ticketId);
   }
 
-  getUser(telegramId: number): UserRecord | undefined {
-    return this.db
-      .prepare("SELECT * FROM users WHERE telegram_id = ?")
-      .get(telegramId) as UserRecord | undefined;
+  findActiveTicketForUser(userTelegramId: number, staffChatId: number): TicketRecord | undefined
+  {
+    return this.tickets.findActiveTicketForUser(userTelegramId, staffChatId);
   }
 
-  createTicket(userTelegramId: number, staffChatId: number): TicketRecord {
-    const timestamp = now();
-    const result = this.db
-      .prepare(
-        `
-        INSERT INTO tickets (user_telegram_id, status, staff_chat_id, created_at, updated_at)
-        VALUES (?, 'OPEN', ?, ?, ?)
-      `
-      )
-      .run(userTelegramId, staffChatId, timestamp, timestamp);
-
-    return this.getTicket(Number(result.lastInsertRowid))!;
+  getLatestTicketForUser(userTelegramId: number, staffChatId: number): TicketRecord | undefined
+  {
+    return this.tickets.getLatestTicketForUser(userTelegramId, staffChatId);
   }
 
-  getTicket(ticketId: number): TicketRecord | undefined {
-    return this.db.prepare("SELECT * FROM tickets WHERE id = ?").get(ticketId) as
-      | TicketRecord
-      | undefined;
+  listTicketsForUser(userTelegramId: number, staffChatId: number, limit = 10): TicketRecord[]
+  {
+    return this.tickets.listTicketsForUser(userTelegramId, staffChatId, limit);
   }
 
-  getTicketWithUser(ticketId: number): TicketWithUser | undefined {
-    return this.db
-      .prepare(
-        `
-        SELECT
-          tickets.*,
-          users.username,
-          users.first_name,
-          users.last_name
-        FROM tickets
-        JOIN users ON users.telegram_id = tickets.user_telegram_id
-        WHERE tickets.id = ?
-      `
-      )
-      .get(ticketId) as TicketWithUser | undefined;
-  }
-
-  findActiveTicketForUser(userTelegramId: number, staffChatId: number): TicketRecord | undefined {
-    return this.db
-      .prepare(
-        `
-        SELECT * FROM tickets
-        WHERE user_telegram_id = ?
-          AND staff_chat_id = ?
-          AND status != 'CLOSED'
-        ORDER BY id DESC
-        LIMIT 1
-      `
-      )
-      .get(userTelegramId, staffChatId) as TicketRecord | undefined;
-  }
-
-  getLatestTicketForUser(userTelegramId: number, staffChatId: number): TicketRecord | undefined {
-    return this.db
-      .prepare(
-        `
-        SELECT * FROM tickets
-        WHERE user_telegram_id = ? AND staff_chat_id = ?
-        ORDER BY id DESC
-        LIMIT 1
-      `
-      )
-      .get(userTelegramId, staffChatId) as TicketRecord | undefined;
-  }
-
-  listTicketsForUser(userTelegramId: number, staffChatId: number, limit = 10): TicketRecord[] {
-    return this.db
-      .prepare(
-        `
-        SELECT * FROM tickets
-        WHERE user_telegram_id = ? AND staff_chat_id = ?
-        ORDER BY id DESC
-        LIMIT ?
-      `
-      )
-      .all(userTelegramId, staffChatId, limit) as TicketRecord[];
-  }
-
-  findTicketByStaffThread(staffChatId: number, messageThreadId: number): TicketWithUser | undefined {
-    return this.db
-      .prepare(
-        `
-        SELECT
-          tickets.*,
-          users.username,
-          users.first_name,
-          users.last_name
-        FROM tickets
-        JOIN users ON users.telegram_id = tickets.user_telegram_id
-        WHERE tickets.staff_chat_id = ? AND tickets.message_thread_id = ?
-        ORDER BY tickets.id DESC
-        LIMIT 1
-      `
-      )
-      .get(staffChatId, messageThreadId) as TicketWithUser | undefined;
+  findTicketByStaffThread(staffChatId: number, messageThreadId: number): TicketWithUser | undefined
+  {
+    return this.tickets.findTicketByStaffThread(staffChatId, messageThreadId);
   }
 
   closeOtherActiveTicketsForUserInStaffChat(
     userTelegramId: number,
     staffChatId: number,
     keepTicketId: number
-  ): number {
-    const timestamp = now();
-    const result = this.db
-      .prepare(
-        `
-        UPDATE tickets
-        SET status = 'CLOSED',
-            updated_at = ?,
-            closed_at = COALESCE(closed_at, ?),
-            follow_up_state = 'NONE',
-            internal_note = NULL,
-            escalation_target = 'NONE',
-            follow_up_updated_at = ?,
-            follow_up_source_answer_package_id = NULL
-        WHERE user_telegram_id = ?
-          AND staff_chat_id = ?
-          AND id != ?
-          AND status != 'CLOSED'
-      `
-      )
-      .run(timestamp, timestamp, timestamp, userTelegramId, staffChatId, keepTicketId);
-
-    return result.changes;
+  ): number
+  {
+    return this.tickets.closeOtherActiveTicketsForUserInStaffChat(userTelegramId, staffChatId, keepTicketId);
   }
 
-  updateTicketStaffMessage(ticketId: number, staffChatId: number, staffMessageId: number): void {
-    this.db
-      .prepare(
-        `
-        UPDATE tickets
-        SET staff_chat_id = ?, staff_message_id = ?, updated_at = ?
-        WHERE id = ?
-      `
-      )
-      .run(staffChatId, staffMessageId, now(), ticketId);
+  updateTicketStaffMessage(ticketId: number, staffChatId: number, staffMessageId: number): void
+  {
+    return this.tickets.updateTicketStaffMessage(ticketId, staffChatId, staffMessageId);
   }
 
-  updateTicketForumTopic(ticketId: number, staffChatId: number, messageThreadId: number): void {
-    this.db
-      .prepare(
-        `
-        UPDATE tickets
-        SET staff_chat_id = ?, message_thread_id = ?, updated_at = ?
-        WHERE id = ?
-      `
-      )
-      .run(staffChatId, messageThreadId, now(), ticketId);
+  updateTicketForumTopic(ticketId: number, staffChatId: number, messageThreadId: number): void
+  {
+    return this.tickets.updateTicketForumTopic(ticketId, staffChatId, messageThreadId);
   }
 
-  updateTicketStatus(ticketId: number, status: TicketStatus): TicketRecord | undefined {
-    if (!TICKET_STATUSES.includes(status)) {
-      throw new Error(`Unsupported ticket status: ${status}`);
-    }
-
-    const timestamp = now();
-    this.db
-      .prepare(
-        `
-        UPDATE tickets
-        SET status = ?,
-            updated_at = ?,
-            closed_at = CASE WHEN ? = 'CLOSED' THEN COALESCE(closed_at, ?) ELSE NULL END,
-            closed_by_type = CASE WHEN ? = 'CLOSED' THEN closed_by_type ELSE NULL END,
-            closed_by_display_name = CASE WHEN ? = 'CLOSED' THEN closed_by_display_name ELSE NULL END,
-            closed_by_username = CASE WHEN ? = 'CLOSED' THEN closed_by_username ELSE NULL END,
-            follow_up_state = CASE WHEN ? = 'CLOSED' THEN 'NONE' ELSE follow_up_state END,
-            internal_note = CASE WHEN ? = 'CLOSED' THEN NULL ELSE internal_note END,
-            escalation_target = CASE WHEN ? = 'CLOSED' THEN 'NONE' ELSE escalation_target END,
-            follow_up_updated_at = CASE WHEN ? = 'CLOSED' THEN ? ELSE follow_up_updated_at END,
-            follow_up_source_answer_package_id = CASE WHEN ? = 'CLOSED' THEN NULL ELSE follow_up_source_answer_package_id END
-        WHERE id = ?
-      `
-      )
-      .run(
-        status,
-        timestamp,
-        status,
-        status === "CLOSED" ? timestamp : null,
-        status,
-        status,
-        status,
-        status,
-        status,
-        status,
-        status,
-        status === "CLOSED" ? timestamp : null,
-        status,
-        ticketId
-      );
-
-    return this.getTicket(ticketId);
+  updateTicketStatus(ticketId: number, status: TicketStatus): TicketRecord | undefined
+  {
+    return this.tickets.updateTicketStatus(ticketId, status);
   }
 
-  listActiveTicketsForStaffChat(staffChatId: number): TicketWithUser[] {
-    return this.db
-      .prepare(
-        `
-        SELECT tickets.*, users.username, users.first_name, users.last_name
-        FROM tickets
-        JOIN users ON users.telegram_id = tickets.user_telegram_id
-        WHERE tickets.staff_chat_id = ?
-          AND tickets.status IN ('OPEN', 'IN_PROGRESS', 'WAITING_USER')
-        ORDER BY tickets.id ASC
-      `
-      )
-      .all(staffChatId) as TicketWithUser[];
+  listActiveTicketsForStaffChat(staffChatId: number): TicketWithUser[]
+  {
+    return this.tickets.listActiveTicketsForStaffChat(staffChatId);
   }
 
-  closeTicketRecord(ticketId: number, input: CloseTicketInput): TicketRecord | undefined {
-    const timestamp = now();
-    this.db
-      .prepare(
-        `
-        UPDATE tickets
-        SET status = 'CLOSED',
-            updated_at = ?,
-            closed_at = COALESCE(closed_at, ?),
-            closed_by_type = ?,
-            closed_by_display_name = ?,
-            closed_by_username = ?,
-            follow_up_state = 'NONE',
-            internal_note = NULL,
-            escalation_target = 'NONE',
-            follow_up_updated_at = ?,
-            follow_up_source_answer_package_id = NULL
-        WHERE id = ?
-      `
-      )
-      .run(
-        timestamp,
-        timestamp,
-        input.type,
-        input.displayName,
-        input.username ?? null,
-        timestamp,
-        ticketId
-      );
-
-    return this.getTicket(ticketId);
+  closeTicketRecord(ticketId: number, input: CloseTicketInput): TicketRecord | undefined
+  {
+    return this.tickets.closeTicketRecord(ticketId, input);
   }
 
   markTicketArchivedAndDeleteMessages(
     ticketId: number,
     logsMessageId: number,
     transcriptMessageId: number
-  ): void {
-    const tx = this.db.transaction(() => {
-      const timestamp = now();
-      this.db
-        .prepare(
-          `
-          UPDATE tickets
-          SET logs_message_id = ?,
-              transcript_message_id = ?,
-              archived_at = ?,
-              updated_at = ?
-          WHERE id = ?
-        `
-        )
-        .run(logsMessageId, transcriptMessageId, timestamp, timestamp, ticketId);
-
-      this.db.prepare("DELETE FROM messages WHERE ticket_id = ?").run(ticketId);
-    });
-
-    tx();
+  ): void
+  {
+    return this.tickets.markTicketArchivedAndDeleteMessages(ticketId, logsMessageId, transcriptMessageId);
   }
 
-  addMessage(input: AddMessageInput): number {
-    const tx = this.db.transaction((message: AddMessageInput) => {
-      const result = this.db
-        .prepare(
-          `
-          INSERT INTO messages (
-            ticket_id,
-            direction,
-            source_chat_id,
-            source_message_id,
-            delivery_chat_id,
-            delivery_message_id,
-            from_telegram_id,
-            from_username,
-            sender_type,
-            sender_display_name,
-            sender_username,
-            text,
-            media_type,
-            filename,
-            file_id,
-            created_at
-          )
-          VALUES (
-            @ticketId,
-            @direction,
-            @sourceChatId,
-            @sourceMessageId,
-            @deliveryChatId,
-            @deliveryMessageId,
-            @fromTelegramId,
-            @fromUsername,
-            @senderType,
-            @senderDisplayName,
-            @senderUsername,
-            @text,
-            @mediaType,
-            @filename,
-            @fileId,
-            @createdAt
-          )
-        `
-        )
-        .run({
-          ticketId: message.ticketId,
-          direction: message.direction,
-          sourceChatId: message.sourceChatId ?? null,
-          sourceMessageId: message.sourceMessageId ?? null,
-          deliveryChatId: message.deliveryChatId ?? null,
-          deliveryMessageId: message.deliveryMessageId ?? null,
-          fromTelegramId: message.fromTelegramId ?? null,
-          fromUsername: message.fromUsername ?? null,
-          senderType: message.senderType ?? senderTypeForDirection(message.direction),
-          senderDisplayName: message.senderDisplayName ?? null,
-          senderUsername: message.senderUsername ?? message.fromUsername ?? null,
-          text: message.text ?? null,
-          mediaType: message.mediaType ?? null,
-          filename: message.filename ?? null,
-          fileId: message.fileId ?? null,
-          createdAt: now()
-        });
-
-      this.db
-        .prepare("UPDATE tickets SET updated_at = ? WHERE id = ?")
-        .run(now(), message.ticketId);
-
-      return Number(result.lastInsertRowid);
-    });
-
-    return tx(input);
+  addMessage(input: AddMessageInput): number
+  {
+    return this.tickets.addMessage(input);
   }
 
-  listMessages(ticketId: number, limit = 10): TicketMessageRecord[] {
-    return this.db
-      .prepare(
-        `
-        SELECT * FROM messages
-        WHERE ticket_id = ?
-        ORDER BY id DESC
-        LIMIT ?
-      `
-      )
-      .all(ticketId, limit) as TicketMessageRecord[];
+  listMessages(ticketId: number, limit = 10): TicketMessageRecord[]
+  {
+    return this.tickets.listMessages(ticketId, limit);
   }
 
-  listMessagesChronological(ticketId: number): TicketMessageRecord[] {
-    return this.db
-      .prepare(
-        `
-        SELECT * FROM messages
-        WHERE ticket_id = ?
-        ORDER BY created_at ASC, id ASC
-      `
-      )
-      .all(ticketId) as TicketMessageRecord[];
+  listMessagesChronological(ticketId: number): TicketMessageRecord[]
+  {
+    return this.tickets.listMessagesChronological(ticketId);
   }
 
-  deleteMessagesForTicket(ticketId: number): number {
-    const result = this.db.prepare("DELETE FROM messages WHERE ticket_id = ?").run(ticketId);
-    return result.changes;
+  deleteMessagesForTicket(ticketId: number): number
+  {
+    return this.tickets.deleteMessagesForTicket(ticketId);
   }
 
-  listClosedTicketsPendingArchive(staffChatId: number, limit = 1000): TicketWithUser[] {
-    return this.db
-      .prepare(
-        `
-        SELECT
-          tickets.*,
-          users.username,
-          users.first_name,
-          users.last_name
-        FROM tickets
-        JOIN users ON users.telegram_id = tickets.user_telegram_id
-        WHERE tickets.staff_chat_id = ?
-          AND tickets.status = 'CLOSED'
-          AND tickets.archived_at IS NULL
-          AND EXISTS (
-            SELECT 1 FROM messages WHERE messages.ticket_id = tickets.id
-          )
-        ORDER BY tickets.closed_at ASC, tickets.id ASC
-        LIMIT ?
-      `
-      )
-      .all(staffChatId, limit) as TicketWithUser[];
+  listClosedTicketsPendingArchive(staffChatId: number, limit = 1000): TicketWithUser[]
+  {
+    return this.tickets.listClosedTicketsPendingArchive(staffChatId, limit);
   }
 
-  createTicketBatchExport(input: CreateTicketBatchExportInput): void {
-    const tx = this.db.transaction((value: CreateTicketBatchExportInput) => {
-      this.db
-        .prepare(
-          `
-          INSERT INTO ticket_batch_exports (
-            export_id, staff_chat_id, created_at, selection_mode, ticket_count, delivery_state
-          ) VALUES (?, ?, ?, ?, ?, ?)
-        `
-        )
-        .run(value.exportId, value.staffChatId, value.createdAt, value.selectionMode, value.ticketCount, value.deliveryState ?? "DELIVERED");
-
-      const insertItem = this.db.prepare(
-        `
-        INSERT INTO ticket_batch_export_items (export_id, ticket_id, snapshot_token)
-        VALUES (?, ?, ?)
-      `
-      );
-      for (const item of value.items) {
-        insertItem.run(value.exportId, item.ticketId, item.snapshotToken);
-      }
-    });
-
-    tx(input);
+  createTicketBatchExport(input: CreateTicketBatchExportInput): void
+  {
+    return this.batch.createTicketBatchExport(input);
   }
 
-  getTicketBatchExport(exportId: string, staffChatId: number): TicketBatchExportRecord | undefined {
-    return this.db
-      .prepare(
-        `
-        SELECT * FROM ticket_batch_exports
-        WHERE export_id = ? AND staff_chat_id = ?
-      `
-      )
-      .get(exportId, staffChatId) as TicketBatchExportRecord | undefined;
+  getTicketBatchExport(exportId: string, staffChatId: number): TicketBatchExportRecord | undefined
+  {
+    return this.batch.getTicketBatchExport(exportId, staffChatId);
   }
 
-  listTicketBatchExportItems(exportId: string): TicketBatchExportItemRecord[] {
-    return this.db
-      .prepare(
-        `
-        SELECT * FROM ticket_batch_export_items
-        WHERE export_id = ?
-        ORDER BY ticket_id ASC
-      `
-      )
-      .all(exportId) as TicketBatchExportItemRecord[];
+  listTicketBatchExportItems(exportId: string): TicketBatchExportItemRecord[]
+  {
+    return this.batch.listTicketBatchExportItems(exportId);
   }
 
-  markTicketBatchExportDelivered(exportId: string, staffChatId: number, deliveryMessageId: number): void {
-    const result = this.db.prepare(`UPDATE ticket_batch_exports
-      SET delivery_state = 'DELIVERED', delivery_message_id = ?, delivered_at = ?, last_error = NULL
-      WHERE export_id = ? AND staff_chat_id = ? AND delivery_state = 'PREPARING'`)
-      .run(deliveryMessageId, now(), exportId, staffChatId);
-    if (result.changes !== 1) {
-      throw new Error("Ticket batch export delivery state could not be confirmed.");
-    }
+  markTicketBatchExportDelivered(exportId: string, staffChatId: number, deliveryMessageId: number): void
+  {
+    return this.batch.markTicketBatchExportDelivered(exportId, staffChatId, deliveryMessageId);
   }
 
-  markTicketBatchExportFailed(exportId: string, staffChatId: number, error: string): void {
-    this.db.prepare(`UPDATE ticket_batch_exports
-      SET delivery_state = 'FAILED', last_error = ?
-      WHERE export_id = ? AND staff_chat_id = ? AND delivery_state = 'PREPARING'`)
-      .run(error.slice(0, 160), exportId, staffChatId);
+  markTicketBatchExportFailed(exportId: string, staffChatId: number, error: string): void
+  {
+    return this.batch.markTicketBatchExportFailed(exportId, staffChatId, error);
   }
 
-  markTicketBatchExportUnknownDelivery(exportId: string, staffChatId: number, error: string): void {
-    this.db.prepare(`UPDATE ticket_batch_exports
-      SET delivery_state = 'UNKNOWN_DELIVERY', last_error = ?
-      WHERE export_id = ? AND staff_chat_id = ? AND delivery_state = 'PREPARING'`)
-      .run(error.slice(0, 160), exportId, staffChatId);
+  markTicketBatchExportUnknownDelivery(exportId: string, staffChatId: number, error: string): void
+  {
+    return this.batch.markTicketBatchExportUnknownDelivery(exportId, staffChatId, error);
   }
 
-  getTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
-    return this.db.prepare("SELECT * FROM ticket_batch_answer_packages WHERE answer_package_id = ? AND staff_chat_id = ?")
-      .get(answerPackageId, staffChatId) as TicketBatchAnswerPackageRecord | undefined;
+  getTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined
+  {
+    return this.batch.getTicketBatchAnswerPackage(answerPackageId, staffChatId);
   }
 
-  getTicketBatchAnswerPackageByHash(packageHash: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
-    return this.db.prepare("SELECT * FROM ticket_batch_answer_packages WHERE package_hash = ? AND staff_chat_id = ?")
-      .get(packageHash, staffChatId) as TicketBatchAnswerPackageRecord | undefined;
+  getTicketBatchAnswerPackageByHash(packageHash: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined
+  {
+    return this.batch.getTicketBatchAnswerPackageByHash(packageHash, staffChatId);
   }
 
-  getTicketBatchAnswerPackageByPreviewToken(previewToken: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
-    return this.db.prepare("SELECT * FROM ticket_batch_answer_packages WHERE preview_token = ? AND staff_chat_id = ?")
-      .get(previewToken, staffChatId) as TicketBatchAnswerPackageRecord | undefined;
+  getTicketBatchAnswerPackageByPreviewToken(previewToken: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined
+  {
+    return this.batch.getTicketBatchAnswerPackageByPreviewToken(previewToken, staffChatId);
   }
 
-  createTicketBatchAnswerPackage(input: CreateTicketBatchAnswerPackageInput): TicketBatchAnswerPackageRecord {
-    const tx = this.db.transaction((value: CreateTicketBatchAnswerPackageInput) => {
-      const timestamp = now();
-      this.db.prepare(`INSERT INTO ticket_batch_answer_packages (answer_package_id, export_id, staff_chat_id, package_hash, source_chat_id, source_message_id, package_created_at, imported_at, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`)
-        .run(value.answerPackageId, value.exportId, value.staffChatId, value.packageHash, value.sourceChatId ?? null, value.sourceMessageId ?? null, value.packageCreatedAt, timestamp, timestamp);
-      const insert = this.db.prepare(`INSERT INTO ticket_batch_answer_items (answer_package_id, ticket_id, snapshot_token, action, reply_text, state, updated_at, follow_up_state, internal_note, escalation_target, topic_echo_state) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, 'PENDING')`);
-      for (const item of value.items) insert.run(value.answerPackageId, item.ticket_id, item.snapshot_token, item.action, item.reply_text, timestamp, item.follow_up_state ?? "NONE", item.internal_note ?? null, item.escalation_target ?? "NONE");
-    });
-    tx(input);
-    return this.getTicketBatchAnswerPackage(input.answerPackageId, input.staffChatId)!;
+  createTicketBatchAnswerPackage(input: CreateTicketBatchAnswerPackageInput): TicketBatchAnswerPackageRecord
+  {
+    return this.batch.createTicketBatchAnswerPackage(input);
   }
 
-  listTicketBatchAnswerItems(answerPackageId: string): TicketBatchAnswerItemRecord[] {
-    return this.db.prepare("SELECT * FROM ticket_batch_answer_items WHERE answer_package_id = ? ORDER BY ticket_id ASC")
-      .all(answerPackageId) as TicketBatchAnswerItemRecord[];
+  listTicketBatchAnswerItems(answerPackageId: string): TicketBatchAnswerItemRecord[]
+  {
+    return this.batch.listTicketBatchAnswerItems(answerPackageId);
   }
 
-  getLatestTicketBatchDeliveryFailure(ticketId: number, staffChatId: number): TicketBatchDeliveryFailureContext | undefined {
-    const row = this.db.prepare(`SELECT i.delivery_error_category AS category, i.delivery_error_permanence AS permanence,
-      i.delivery_failed_at AS occurred_at, i.delivery_retry_after_seconds AS retry_after_seconds,
-      i.delivery_failure_event_state = 'SENT' AS staff_failure_event_posted
-      FROM ticket_batch_answer_items i
-      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
-      WHERE i.ticket_id = ? AND p.staff_chat_id = ? AND i.delivery_error_category IS NOT NULL
-      ORDER BY i.delivery_failed_at DESC, i.updated_at DESC LIMIT 1`)
-      .get(ticketId, staffChatId) as (Omit<TicketBatchDeliveryFailureContext, "staff_failure_event_posted"> & { staff_failure_event_posted: number }) | undefined;
-    return row ? { ...row, staff_failure_event_posted: row.staff_failure_event_posted === 1 } : undefined;
+  getLatestTicketBatchDeliveryFailure(ticketId: number, staffChatId: number): TicketBatchDeliveryFailureContext | undefined
+  {
+    return this.batch.getLatestTicketBatchDeliveryFailure(ticketId, staffChatId);
   }
 
-  getLatestTicketBatchStaffSyncContext(ticketId: number, staffChatId: number): TicketBatchStaffSyncContext | undefined {
-    const row = this.db.prepare(`SELECT i.topic_echo_state AS state, i.topic_echo_message_id IS NOT NULL AS delivered,
-      i.topic_echo_error_category AS terminal_failure_category, i.follow_up_state AS intended_follow_up_state,
-      i.escalation_target AS intended_escalation_target, (i.internal_note IS NOT NULL OR i.follow_up_state != 'NONE' OR i.escalation_target != 'NONE') AS internal_context_available
-      FROM ticket_batch_answer_items i
-      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
-      WHERE i.ticket_id = ? AND p.staff_chat_id = ? AND (i.topic_echo_state = 'TERMINAL_FAILED' OR i.topic_echo_state = 'SENT')
-      ORDER BY i.updated_at DESC LIMIT 1`)
-      .get(ticketId, staffChatId) as (Omit<TicketBatchStaffSyncContext, "delivered" | "internal_context_available"> & { delivered: number; internal_context_available: number }) | undefined;
-    return row ? {
-      ...row,
-      delivered: row.delivered === 1,
-      internal_context_available: row.internal_context_available === 1
-    } : undefined;
+  getLatestTicketBatchStaffSyncContext(ticketId: number, staffChatId: number): TicketBatchStaffSyncContext | undefined
+  {
+    return this.batch.getLatestTicketBatchStaffSyncContext(ticketId, staffChatId);
   }
 
-  setTicketBatchAnswerPackagePreview(answerPackageId: string, staffChatId: number, preview: { token: string; chatId: number; messageId: number; page: number }): boolean {
-    const result = this.db.prepare(`UPDATE ticket_batch_answer_packages
-      SET preview_token = ?, preview_chat_id = ?, preview_message_id = ?, preview_page = ?, updated_at = ?
-      WHERE answer_package_id = ? AND staff_chat_id = ? AND status = 'PENDING' AND preview_message_id IS NULL`)
-      .run(preview.token, preview.chatId, preview.messageId, preview.page, now(), answerPackageId, staffChatId);
-    return result.changes === 1;
+  setTicketBatchAnswerPackagePreview(answerPackageId: string, staffChatId: number, preview: { token: string; chatId: number; messageId: number; page: number }): boolean
+  {
+    return this.batch.setTicketBatchAnswerPackagePreview(answerPackageId, staffChatId, preview);
   }
 
-  updateTicketBatchAnswerPackagePreviewPage(answerPackageId: string, staffChatId: number, page: number): void {
-    this.db.prepare("UPDATE ticket_batch_answer_packages SET preview_page = ?, updated_at = ? WHERE answer_package_id = ? AND staff_chat_id = ? AND status = 'PENDING'")
-      .run(page, now(), answerPackageId, staffChatId);
+  updateTicketBatchAnswerPackagePreviewPage(answerPackageId: string, staffChatId: number, page: number): void
+  {
+    return this.batch.updateTicketBatchAnswerPackagePreviewPage(answerPackageId, staffChatId, page);
   }
 
-  clearTicketBatchAnswerPackagePreview(answerPackageId: string, staffChatId: number): void {
-    this.db.prepare("UPDATE ticket_batch_answer_packages SET preview_token = NULL, preview_chat_id = NULL, preview_message_id = NULL, preview_page = NULL, updated_at = ? WHERE answer_package_id = ? AND staff_chat_id = ?")
-      .run(now(), answerPackageId, staffChatId);
+  clearTicketBatchAnswerPackagePreview(answerPackageId: string, staffChatId: number): void
+  {
+    return this.batch.clearTicketBatchAnswerPackagePreview(answerPackageId, staffChatId);
   }
 
-  claimTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
-    const tx = this.db.transaction(() => {
-      const item = this.getTicketBatchAnswerPackage(answerPackageId, staffChatId);
-      if (!item || item.status !== "PENDING") return item;
-      const timestamp = now();
-      this.db.prepare("UPDATE ticket_batch_answer_packages SET status = 'APPLYING', started_at = COALESCE(started_at, ?), updated_at = ? WHERE answer_package_id = ? AND status = 'PENDING'")
-        .run(timestamp, timestamp, answerPackageId);
-      return this.getTicketBatchAnswerPackage(answerPackageId, staffChatId);
-    });
-    return tx();
+  claimTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined
+  {
+    return this.batch.claimTicketBatchAnswerPackage(answerPackageId, staffChatId);
   }
 
-  cancelTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): boolean {
-    const result = this.db.prepare("UPDATE ticket_batch_answer_packages SET status = 'CANCELLED', updated_at = ? WHERE answer_package_id = ? AND staff_chat_id = ? AND status = 'PENDING'")
-      .run(now(), answerPackageId, staffChatId);
-    return result.changes === 1;
+  cancelTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): boolean
+  {
+    return this.batch.cancelTicketBatchAnswerPackage(answerPackageId, staffChatId);
   }
 
-  claimTicketBatchAnswerItem(answerPackageId: string, ticketId: number): boolean {
-    const result = this.db.prepare("UPDATE ticket_batch_answer_items SET state = 'APPLYING', updated_at = ? WHERE answer_package_id = ? AND ticket_id = ? AND state = 'PENDING'")
-      .run(now(), answerPackageId, ticketId);
-    return result.changes === 1;
+  claimTicketBatchAnswerItem(answerPackageId: string, ticketId: number): boolean
+  {
+    return this.batch.claimTicketBatchAnswerItem(answerPackageId, ticketId);
   }
 
-  updateTicketBatchAnswerItem(answerPackageId: string, ticketId: number, state: TicketBatchAnswerItemState, options: { deliveryMessageId?: number | null; lastError?: string | null; applied?: boolean } = {}): void {
-    this.db.prepare("UPDATE ticket_batch_answer_items SET state = ?, delivery_message_id = COALESCE(?, delivery_message_id), last_error = ?, applied_at = CASE WHEN ? THEN ? ELSE applied_at END, updated_at = ? WHERE answer_package_id = ? AND ticket_id = ?")
-      .run(state, options.deliveryMessageId ?? null, options.lastError ?? null, options.applied ? 1 : 0, options.applied ? now() : null, now(), answerPackageId, ticketId);
+  updateTicketBatchAnswerItem(answerPackageId: string, ticketId: number, state: TicketBatchAnswerItemState, options: { deliveryMessageId?: number | null; lastError?: string | null; applied?: boolean } = {}): void
+  {
+    return this.batch.updateTicketBatchAnswerItem(answerPackageId, ticketId, state, options);
   }
 
   recordTicketBatchDeliveryFailure(
@@ -1057,28 +258,9 @@ export class SupportDatabase {
     ticketId: number,
     state: "FAILED" | "UNKNOWN_DELIVERY",
     diagnostic: NormalizedDeliveryError
-  ): void {
-    this.db.prepare(`UPDATE ticket_batch_answer_items
-      SET state = ?, last_error = ?, delivery_error_category = ?, delivery_error_permanence = ?,
-          delivery_error_code = ?, delivery_http_status = ?, delivery_error_method = ?,
-          delivery_retry_after_seconds = ?, delivery_error_description = ?, delivery_failed_at = ?,
-          delivery_attempt_count = delivery_attempt_count + 1, updated_at = ?
-      WHERE answer_package_id = ? AND ticket_id = ?`)
-      .run(
-        state,
-        diagnostic.category,
-        diagnostic.category,
-        diagnostic.permanence,
-        diagnostic.telegramErrorCode,
-        diagnostic.httpStatus,
-        diagnostic.method,
-        diagnostic.retryAfterSeconds,
-        diagnostic.description,
-        diagnostic.occurredAt,
-        now(),
-        answerPackageId,
-        ticketId
-      );
+  ): void
+  {
+    return this.batch.recordTicketBatchDeliveryFailure(answerPackageId, ticketId, state, diagnostic);
   }
 
   recordTicketBatchFailureEvent(
@@ -1087,290 +269,168 @@ export class SupportDatabase {
     state: TicketBatchFailureEventState,
     messageId?: number | null,
     options: { nextRetryAt?: string | null; incrementAttempt?: boolean } = {}
-  ): void {
-    this.db.prepare(`UPDATE ticket_batch_answer_items
-      SET delivery_failure_event_state = ?, delivery_failure_event_message_id = COALESCE(?, delivery_failure_event_message_id), delivery_failure_event_next_retry_at = COALESCE(?, delivery_failure_event_next_retry_at), delivery_failure_event_attempt_count = delivery_failure_event_attempt_count + ?, updated_at = ?
-      WHERE answer_package_id = ? AND ticket_id = ?`)
-      .run(state, messageId ?? null, options.nextRetryAt ?? null, options.incrementAttempt ? 1 : 0, now(), answerPackageId, ticketId);
+  ): void
+  {
+    return this.batch.recordTicketBatchFailureEvent(answerPackageId, ticketId, state, messageId, options);
   }
 
-  listPendingTicketBatchFailureEvents(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[] {
-    return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
-      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
-      JOIN tickets t ON t.id = i.ticket_id
-      WHERE p.staff_chat_id = ? AND i.delivery_failure_event_state IN ('PENDING', 'FAILED')
-        AND t.status != 'CLOSED'
-        AND i.action IN ('reply_keep_open', 'reply_and_close')
-        AND i.delivery_error_category IS NOT NULL
-        AND i.delivery_message_id IS NULL
-        AND (i.delivery_failure_event_next_retry_at IS NULL OR i.delivery_failure_event_next_retry_at <= ?)
-      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
+  listPendingTicketBatchFailureEvents(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[]
+  {
+    return this.batch.listPendingTicketBatchFailureEvents(staffChatId, at, limit);
   }
 
-  recordTicketBatchSummaryDelivery(answerPackageId: string, staffChatId: number, state: TicketBatchSummaryDeliveryState, error: string | null = null): void {
-    this.db.prepare(`UPDATE ticket_batch_answer_packages
-      SET summary_delivery_state = ?, summary_delivery_error = ?, summary_delivery_attempted_at = ?, updated_at = ?
-      WHERE answer_package_id = ? AND staff_chat_id = ?`)
-      .run(state, error, now(), now(), answerPackageId, staffChatId);
+  recordTicketBatchSummaryDelivery(answerPackageId: string, staffChatId: number, state: TicketBatchSummaryDeliveryState, error: string | null = null): void
+  {
+    return this.batch.recordTicketBatchSummaryDelivery(answerPackageId, staffChatId, state, error);
   }
 
   queueTicketBatchFinalSummary(
     answerPackageId: string,
     staffChatId: number,
     input: { text: string; chatId: number; originChatId?: number | null; originMessageId?: number | null }
-  ): void {
-    this.db.prepare(`UPDATE ticket_batch_answer_packages
-      SET final_summary_state = 'PENDING', final_summary_text = ?, final_summary_chat_id = ?,
-          final_summary_origin_chat_id = ?, final_summary_origin_message_id = ?,
-          final_summary_next_retry_at = ?, final_summary_last_error = NULL, updated_at = ?
-      WHERE answer_package_id = ? AND staff_chat_id = ? AND final_summary_state != 'SENT'`)
-      .run(input.text, input.chatId, input.originChatId ?? null, input.originMessageId ?? null, now(), now(), answerPackageId, staffChatId);
+  ): void
+  {
+    return this.batch.queueTicketBatchFinalSummary(answerPackageId, staffChatId, input);
   }
 
-  queueTicketBatchFinalSummaryRefresh(answerPackageId: string, staffChatId: number, text: string): boolean {
-    const timestamp = now();
-    const result = this.db.prepare(`UPDATE ticket_batch_answer_packages
-      SET final_summary_state = 'PENDING', final_summary_text = ?,
-          final_summary_origin_chat_id = final_summary_chat_id,
-          final_summary_origin_message_id = final_summary_message_id,
-          final_summary_next_retry_at = ?, final_summary_last_error = NULL, updated_at = ?
-      WHERE answer_package_id = ? AND staff_chat_id = ? AND final_summary_state = 'SENT'
-        AND final_summary_chat_id IS NOT NULL AND final_summary_message_id IS NOT NULL`)
-      .run(text, timestamp, timestamp, answerPackageId, staffChatId);
-    return result.changes === 1;
+  queueTicketBatchFinalSummaryRefresh(answerPackageId: string, staffChatId: number, text: string): boolean
+  {
+    return this.batch.queueTicketBatchFinalSummaryRefresh(answerPackageId, staffChatId, text);
   }
 
-  listPendingTicketBatchFinalSummaries(staffChatId: number, at: string, limit = 20): TicketBatchAnswerPackageRecord[] {
-    return this.db.prepare(`SELECT * FROM ticket_batch_answer_packages
-      WHERE staff_chat_id = ? AND final_summary_state IN ('PENDING', 'FAILED')
-        AND (final_summary_next_retry_at IS NULL OR final_summary_next_retry_at <= ?)
-      ORDER BY updated_at ASC, answer_package_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerPackageRecord[];
+  listPendingTicketBatchFinalSummaries(staffChatId: number, at: string, limit = 20): TicketBatchAnswerPackageRecord[]
+  {
+    return this.batch.listPendingTicketBatchFinalSummaries(staffChatId, at, limit);
   }
 
-  recordTicketBatchFinalSummaryAttempt(answerPackageId: string, staffChatId: number): void {
-    this.db.prepare(`UPDATE ticket_batch_answer_packages SET final_summary_attempt_count = final_summary_attempt_count + 1, updated_at = ?
-      WHERE answer_package_id = ? AND staff_chat_id = ?`).run(now(), answerPackageId, staffChatId);
+  recordTicketBatchFinalSummaryAttempt(answerPackageId: string, staffChatId: number): void
+  {
+    return this.batch.recordTicketBatchFinalSummaryAttempt(answerPackageId, staffChatId);
   }
 
-  recordTicketBatchFinalSummarySent(answerPackageId: string, staffChatId: number, messageId: number): void {
-    this.db.prepare(`UPDATE ticket_batch_answer_packages
-      SET final_summary_state = 'SENT', final_summary_message_id = ?, final_summary_delivered_at = ?,
-          final_summary_next_retry_at = NULL, final_summary_last_error = NULL,
-          summary_delivery_state = 'SENT', summary_delivery_error = NULL, summary_delivery_attempted_at = ?, updated_at = ?
-      WHERE answer_package_id = ? AND staff_chat_id = ?`).run(messageId, now(), now(), now(), answerPackageId, staffChatId);
+  recordTicketBatchFinalSummarySent(answerPackageId: string, staffChatId: number, messageId: number): void
+  {
+    return this.batch.recordTicketBatchFinalSummarySent(answerPackageId, staffChatId, messageId);
   }
 
-  recordTicketBatchFinalSummaryFailure(answerPackageId: string, staffChatId: number, state: "FAILED" | "UNKNOWN_DELIVERY", error: string, nextRetryAt: string | null): void {
-    this.db.prepare(`UPDATE ticket_batch_answer_packages
-      SET final_summary_state = ?, final_summary_last_error = ?, final_summary_next_retry_at = ?,
-          summary_delivery_state = 'FAILED', summary_delivery_error = ?, summary_delivery_attempted_at = ?, updated_at = ?
-      WHERE answer_package_id = ? AND staff_chat_id = ?`).run(state, error, nextRetryAt, error, now(), now(), answerPackageId, staffChatId);
+  recordTicketBatchFinalSummaryFailure(answerPackageId: string, staffChatId: number, state: "FAILED" | "UNKNOWN_DELIVERY", error: string, nextRetryAt: string | null): void
+  {
+    return this.batch.recordTicketBatchFinalSummaryFailure(answerPackageId, staffChatId, state, error, nextRetryAt);
   }
 
-  recordTicketBatchTopicEcho(answerPackageId: string, ticketId: number, state: TicketBatchTopicEchoState, options: { chatId?: number | null; threadId?: number | null; messageId?: number | null; lastError?: string | null; nextRetryAt?: string | null; incrementAttempt?: boolean; diagnostic?: NormalizedDeliveryError } = {}): void {
-    this.db.prepare(`UPDATE ticket_batch_answer_items
-      SET topic_echo_state = ?, topic_echo_chat_id = COALESCE(?, topic_echo_chat_id), topic_echo_thread_id = COALESCE(?, topic_echo_thread_id), topic_echo_message_id = COALESCE(?, topic_echo_message_id), topic_echo_last_error = ?, topic_echo_next_retry_at = ?, topic_echo_attempt_count = topic_echo_attempt_count + ?, topic_echo_error_category = COALESCE(?, topic_echo_error_category), topic_echo_error_code = COALESCE(?, topic_echo_error_code), topic_echo_http_status = COALESCE(?, topic_echo_http_status), topic_echo_error_method = COALESCE(?, topic_echo_error_method), topic_echo_error_description = COALESCE(?, topic_echo_error_description), topic_echo_terminal_at = CASE WHEN ? THEN COALESCE(topic_echo_terminal_at, ?) ELSE topic_echo_terminal_at END, updated_at = ?
-      WHERE answer_package_id = ? AND ticket_id = ?`)
-      .run(state, options.chatId ?? null, options.threadId ?? null, options.messageId ?? null, options.lastError ?? null, options.nextRetryAt ?? null, options.incrementAttempt ? 1 : 0, options.diagnostic?.category ?? null, options.diagnostic?.telegramErrorCode ?? null, options.diagnostic?.httpStatus ?? null, options.diagnostic?.method ?? null, options.diagnostic?.description ?? null, state === "TERMINAL_FAILED" ? 1 : 0, now(), now(), answerPackageId, ticketId);
+  recordTicketBatchTopicEcho(answerPackageId: string, ticketId: number, state: TicketBatchTopicEchoState, options: { chatId?: number | null; threadId?: number | null; messageId?: number | null; lastError?: string | null; nextRetryAt?: string | null; incrementAttempt?: boolean; diagnostic?: NormalizedDeliveryError } = {}): void
+  {
+    return this.batch.recordTicketBatchTopicEcho(answerPackageId, ticketId, state, options);
   }
 
-  listPendingTicketBatchTopicEchoes(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[] {
-    return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
-      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
-      JOIN tickets t ON t.id = i.ticket_id
-      WHERE p.staff_chat_id = ? AND i.topic_echo_state IN ('PENDING', 'FAILED')
-        AND t.status != 'CLOSED'
-        AND (i.topic_echo_next_retry_at IS NULL OR i.topic_echo_next_retry_at <= ?)
-        AND (
-          (i.action = 'no_action' AND (i.follow_up_state != 'NONE' OR i.internal_note IS NOT NULL OR i.escalation_target != 'NONE'))
-          OR
-          (i.action IN ('reply_keep_open', 'reply_and_close') AND i.delivery_message_id IS NOT NULL
-            AND i.delivery_error_category IS NULL AND i.delivery_error_permanence IS NULL
-            AND i.delivery_failure_event_state != 'SENT'
-            AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING', 'COMPLETED'))
-        )
-      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
+  listPendingTicketBatchTopicEchoes(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[]
+  {
+    return this.batch.listPendingTicketBatchTopicEchoes(staffChatId, at, limit);
   }
 
-  listClosedTicketBatchReplyAndClosePendingEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {
-    return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
-      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
-      JOIN tickets t ON t.id = i.ticket_id
-      WHERE p.staff_chat_id = ? AND p.status IN ('APPLYING', 'PARTIAL')
-        AND t.status = 'CLOSED'
-        AND i.action = 'reply_and_close'
-        AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING')
-        AND i.delivery_message_id IS NOT NULL
-        AND i.delivery_error_category IS NULL
-        AND i.delivery_error_permanence IS NULL
-        AND i.delivery_failure_event_state != 'SENT'
-        AND i.topic_echo_state IN ('PENDING', 'FAILED')
-      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, limit) as TicketBatchAnswerItemRecord[];
+  listClosedTicketBatchReplyAndClosePendingEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[]
+  {
+    return this.batch.listClosedTicketBatchReplyAndClosePendingEchoes(staffChatId, limit);
   }
 
-  setTicketBatchPostDeliveryRetry(answerPackageId: string, ticketId: number, nextRetryAt: string | null, lastError: string | null): void {
-    this.db.prepare(`UPDATE ticket_batch_answer_items
-      SET topic_echo_next_retry_at = ?, last_error = ?, updated_at = ?
-      WHERE answer_package_id = ? AND ticket_id = ?`)
-      .run(nextRetryAt, lastError, now(), answerPackageId, ticketId);
+  setTicketBatchPostDeliveryRetry(answerPackageId: string, ticketId: number, nextRetryAt: string | null, lastError: string | null): void
+  {
+    return this.batch.setTicketBatchPostDeliveryRetry(answerPackageId, ticketId, nextRetryAt, lastError);
   }
 
-  listPendingTicketBatchReplyAndCloseContinuations(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[] {
-    return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
-      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
-      JOIN tickets t ON t.id = i.ticket_id
-      WHERE p.staff_chat_id = ? AND p.status IN ('APPLYING', 'PARTIAL')
-        AND i.action = 'reply_and_close'
-        AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING')
-        AND i.delivery_message_id IS NOT NULL
-        AND i.delivery_error_category IS NULL
-        AND i.delivery_error_permanence IS NULL
-        AND i.delivery_failure_event_state != 'SENT'
-        AND (i.topic_echo_state = 'SENT' OR (i.topic_echo_state = 'NOT_REQUIRED' AND t.status = 'CLOSED'))
-        AND (i.topic_echo_next_retry_at IS NULL OR i.topic_echo_next_retry_at <= ?)
-      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
+  listPendingTicketBatchReplyAndCloseContinuations(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[]
+  {
+    return this.batch.listPendingTicketBatchReplyAndCloseContinuations(staffChatId, at, limit);
   }
 
-  getNextTicketBatchStaffRetryAt(staffChatId: number): string | undefined {
-    const row = this.db.prepare(`SELECT MIN(retry_at) AS retry_at FROM (
-      SELECT i.topic_echo_next_retry_at AS retry_at
-      FROM ticket_batch_answer_items i
-      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
-      WHERE p.staff_chat_id = ? AND i.topic_echo_next_retry_at IS NOT NULL
-        AND (i.topic_echo_state IN ('PENDING', 'FAILED')
-          OR (i.action = 'reply_and_close' AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING')
-            AND i.topic_echo_state IN ('SENT', 'NOT_REQUIRED')))
-      UNION ALL
-      SELECT i.delivery_failure_event_next_retry_at
-      FROM ticket_batch_answer_items i
-      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
-      WHERE p.staff_chat_id = ? AND i.delivery_failure_event_state IN ('PENDING', 'FAILED')
-        AND i.delivery_failure_event_next_retry_at IS NOT NULL
-      UNION ALL
-      SELECT final_summary_next_retry_at
-      FROM ticket_batch_answer_packages
-      WHERE staff_chat_id = ? AND final_summary_state IN ('PENDING', 'FAILED')
-        AND final_summary_next_retry_at IS NOT NULL
-    )`).get(staffChatId, staffChatId, staffChatId) as { retry_at: string | null };
-    return row.retry_at ?? undefined;
+  getNextTicketBatchStaffRetryAt(staffChatId: number): string | undefined
+  {
+    return this.batch.getNextTicketBatchStaffRetryAt(staffChatId);
   }
 
-  listInvalidTicketBatchSuccessEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {
-    return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
-      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
-      WHERE p.staff_chat_id = ? AND i.topic_echo_state IN ('PENDING', 'FAILED')
-        AND i.action IN ('reply_keep_open', 'reply_and_close')
-        AND (i.delivery_message_id IS NULL OR i.delivery_error_category IS NOT NULL OR i.delivery_error_permanence IS NOT NULL OR i.delivery_failure_event_state = 'SENT')
-      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, limit) as TicketBatchAnswerItemRecord[];
+  listInvalidTicketBatchSuccessEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[]
+  {
+    return this.batch.listInvalidTicketBatchSuccessEchoes(staffChatId, limit);
   }
 
-  getTicketBatchRecoveryAudit(staffChatId: number, at: string): TicketBatchRecoveryAudit {
-    const due = "(i.topic_echo_next_retry_at IS NULL OR i.topic_echo_next_retry_at <= @at)";
-    const base = "p.staff_chat_id = @staffChatId";
-    const count = (where: string): number => (this.db.prepare(`SELECT COUNT(*) AS count FROM ticket_batch_answer_items i JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id WHERE ${base} AND ${where}`).get({ staffChatId, at }) as { count: number }).count;
-    const finalSummaries = (this.db.prepare(`SELECT COUNT(*) AS count FROM ticket_batch_answer_packages WHERE staff_chat_id = ? AND final_summary_state IN ('PENDING', 'FAILED') AND (final_summary_next_retry_at IS NULL OR final_summary_next_retry_at <= ?)`)
-      .get(staffChatId, at) as { count: number }).count;
-    return {
-      successTopicEchoes: count(`i.topic_echo_state IN ('PENDING','FAILED') AND ${due} AND i.action IN ('reply_keep_open','reply_and_close') AND i.delivery_message_id IS NOT NULL AND i.delivery_error_category IS NULL AND i.delivery_error_permanence IS NULL AND i.delivery_failure_event_state != 'SENT'`),
-      failureEvents: count("i.delivery_failure_event_state IN ('PENDING','FAILED') AND i.action IN ('reply_keep_open','reply_and_close') AND i.delivery_error_category IS NOT NULL AND i.delivery_message_id IS NULL AND (i.delivery_failure_event_next_retry_at IS NULL OR i.delivery_failure_event_next_retry_at <= @at)"),
-      noActionFollowUpEvents: count(`i.topic_echo_state IN ('PENDING','FAILED') AND ${due} AND i.action = 'no_action' AND (i.follow_up_state != 'NONE' OR i.internal_note IS NOT NULL OR i.escalation_target != 'NONE')`),
-      finalSummaries,
-      invalidSuccessEchoes: count(`i.topic_echo_state IN ('PENDING','FAILED') AND i.action IN ('reply_keep_open','reply_and_close') AND (i.delivery_message_id IS NULL OR i.delivery_error_category IS NOT NULL OR i.delivery_error_permanence IS NOT NULL OR i.delivery_failure_event_state = 'SENT')`),
-      terminalStaffFailures: count("i.topic_echo_state = 'TERMINAL_FAILED'"),
-      userFacingCandidates: 0
-    };
+  getTicketBatchRecoveryAudit(staffChatId: number, at: string): TicketBatchRecoveryAudit
+  {
+    return this.batch.getTicketBatchRecoveryAudit(staffChatId, at);
   }
 
-  setTicketFollowUpContext(ticketId: number, input: { followUpState: TicketFollowUpState; internalNote: string | null; escalationTarget: TicketEscalationTarget; sourceAnswerPackageId?: string | null }): TicketRecord | undefined {
-    const timestamp = now();
-    const tx = this.db.transaction(() => {
-      this.db.prepare(`UPDATE tickets SET follow_up_state = ?, internal_note = ?, escalation_target = ?, follow_up_updated_at = ?, follow_up_source_answer_package_id = ?, updated_at = ? WHERE id = ?`)
-        .run(input.followUpState, input.internalNote, input.escalationTarget, timestamp, input.sourceAnswerPackageId ?? null, timestamp, ticketId);
-      this.db.prepare(`INSERT INTO ticket_follow_up_history (ticket_id, follow_up_state, internal_note, escalation_target, source_answer_package_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-        .run(ticketId, input.followUpState, input.internalNote, input.escalationTarget, input.sourceAnswerPackageId ?? null, timestamp);
-    });
-    tx();
-    return this.getTicket(ticketId);
+  setTicketFollowUpContext(ticketId: number, input: { followUpState: TicketFollowUpState; internalNote: string | null; escalationTarget: TicketEscalationTarget; sourceAnswerPackageId?: string | null }): TicketRecord | undefined
+  {
+    return this.tickets.setTicketFollowUpContext(ticketId, input);
   }
 
-  clearWaitingUserFollowUp(ticketId: number): TicketRecord | undefined {
-    const ticket = this.getTicket(ticketId);
-    if (!ticket || ticket.follow_up_state !== "WAITING_USER") return ticket;
-    return this.setTicketFollowUpContext(ticketId, { followUpState: "NONE", internalNote: null, escalationTarget: "NONE", sourceAnswerPackageId: ticket.follow_up_source_answer_package_id });
+  clearWaitingUserFollowUp(ticketId: number): TicketRecord | undefined
+  {
+    return this.tickets.clearWaitingUserFollowUp(ticketId);
   }
 
-  listTicketFollowUpHistory(ticketId: number): TicketFollowUpHistoryRecord[] {
-    return this.db.prepare("SELECT * FROM ticket_follow_up_history WHERE ticket_id = ? ORDER BY id ASC").all(ticketId) as TicketFollowUpHistoryRecord[];
+  listTicketFollowUpHistory(ticketId: number): TicketFollowUpHistoryRecord[]
+  {
+    return this.tickets.listTicketFollowUpHistory(ticketId);
   }
 
-  finalizeTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined {
-    const items = this.listTicketBatchAnswerItems(answerPackageId);
-    const complete = items.every((item) => ["COMPLETED", "NO_ACTION", "STALE", "INACTIVE"].includes(item.state));
-    const timestamp = now();
-    this.db.prepare("UPDATE ticket_batch_answer_packages SET status = ?, completed_at = CASE WHEN ? THEN ? ELSE completed_at END, updated_at = ? WHERE answer_package_id = ? AND staff_chat_id = ?")
-      .run(complete ? "COMPLETED" : "PARTIAL", complete ? 1 : 0, complete ? timestamp : null, timestamp, answerPackageId, staffChatId);
-    return this.getTicketBatchAnswerPackage(answerPackageId, staffChatId);
+  finalizeTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined
+  {
+    return this.batch.finalizeTicketBatchAnswerPackage(answerPackageId, staffChatId);
   }
 
-  getLanguageModerationUserState(chatId: number, userId: number): LanguageModerationUserState | undefined {
-    return this.db.prepare("SELECT * FROM language_moderation_user_state WHERE chat_id = ? AND user_telegram_id = ?").get(chatId, userId) as LanguageModerationUserState | undefined;
+  getLanguageModerationUserState(chatId: number, userId: number): LanguageModerationUserState | undefined
+  {
+    return this.moderation.getLanguageModerationUserState(chatId, userId);
   }
 
-  upsertLanguageModerationUserState(input: Omit<LanguageModerationUserState, "updated_at">): void {
-    this.db.prepare(`INSERT INTO language_moderation_user_state (chat_id, user_telegram_id, username, current_strikes, sanction_tier, first_strike_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(chat_id, user_telegram_id) DO UPDATE SET username = excluded.username, current_strikes = excluded.current_strikes, sanction_tier = excluded.sanction_tier, first_strike_at = excluded.first_strike_at, updated_at = excluded.updated_at`)
-      .run(input.chat_id, input.user_telegram_id, input.username, input.current_strikes, input.sanction_tier, input.first_strike_at, now());
+  upsertLanguageModerationUserState(input: Omit<LanguageModerationUserState, "updated_at">): void
+  {
+    return this.moderation.upsertLanguageModerationUserState(input);
   }
 
-  addLanguageModerationViolation(input: Pick<LanguageModerationViolation, "chat_id" | "user_telegram_id" | "message_id" | "username" | "cycle_tier"> & { message_thread_id?: number | null }): boolean {
-    const result = this.db.prepare("INSERT OR IGNORE INTO language_moderation_violations (chat_id, user_telegram_id, message_id, username, detected_at, cycle_tier, message_thread_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(input.chat_id, input.user_telegram_id, input.message_id, input.username, now(), input.cycle_tier, input.message_thread_id ?? null);
-    return result.changes === 1;
+  addLanguageModerationViolation(input: Pick<LanguageModerationViolation, "chat_id" | "user_telegram_id" | "message_id" | "username" | "cycle_tier"> & { message_thread_id?: number | null }): boolean
+  {
+    return this.moderation.addLanguageModerationViolation(input);
   }
 
-  listLanguageModerationViolations(chatId: number, since: string): LanguageModerationViolation[] {
-    return this.db.prepare("SELECT * FROM language_moderation_violations WHERE chat_id = ? AND detected_at >= ? ORDER BY detected_at ASC, message_id ASC").all(chatId, since) as LanguageModerationViolation[];
+  listLanguageModerationViolations(chatId: number, since: string): LanguageModerationViolation[]
+  {
+    return this.moderation.listLanguageModerationViolations(chatId, since);
   }
 
-  claimLanguageModerationFirstStrikes(chatId: number, since: string, messageThreadId: number | null = null): Array<{ userId: number; username: string | null; messageId: number }> {
-    const transaction = this.db.transaction(() => {
-      const candidates = this.db.prepare(`
-        SELECT v.user_telegram_id AS userId, MAX(v.message_id) AS messageId, MAX(v.username) AS username
-        FROM language_moderation_violations v
-        LEFT JOIN language_moderation_user_state s ON s.chat_id = v.chat_id AND s.user_telegram_id = v.user_telegram_id
-        WHERE v.chat_id = ? AND v.detected_at >= ? AND COALESCE(v.message_thread_id, 0) = ? AND COALESCE(s.current_strikes, 0) = 0
-        GROUP BY v.user_telegram_id ORDER BY v.user_telegram_id ASC
-      `).all(chatId, since, messageThreadId ?? 0) as Array<{ userId: number; username: string | null; messageId: number }>;
-      const timestamp = now();
-      const update = this.db.prepare(`INSERT INTO language_moderation_user_state (chat_id, user_telegram_id, username, current_strikes, sanction_tier, first_strike_at, updated_at) VALUES (?, ?, ?, 1, 0, ?, ?) ON CONFLICT(chat_id, user_telegram_id) DO UPDATE SET current_strikes = 1, username = excluded.username, first_strike_at = excluded.first_strike_at, updated_at = excluded.updated_at WHERE language_moderation_user_state.current_strikes = 0`);
-      return candidates.filter((candidate) => update.run(chatId, candidate.userId, candidate.username, timestamp, timestamp).changes === 1);
-    });
-    return transaction();
+  claimLanguageModerationFirstStrikes(chatId: number, since: string, messageThreadId: number | null = null): Array<{ userId: number; username: string | null; messageId: number }>
+  {
+    return this.moderation.claimLanguageModerationFirstStrikes(chatId, since, messageThreadId);
   }
 
-  clearLanguageModerationViolations(chatId: number, userId: number): void {
-    this.db.prepare("DELETE FROM language_moderation_violations WHERE chat_id = ? AND user_telegram_id = ?").run(chatId, userId);
+  clearLanguageModerationViolations(chatId: number, userId: number): void
+  {
+    return this.moderation.clearLanguageModerationViolations(chatId, userId);
   }
 
-  listLanguageModerationCycleViolations(chatId: number, userId: number, cycleTier: number): LanguageModerationViolation[] {
-    return this.db.prepare("SELECT * FROM language_moderation_violations WHERE chat_id = ? AND user_telegram_id = ? AND cycle_tier = ? ORDER BY message_id ASC").all(chatId, userId, cycleTier) as LanguageModerationViolation[];
+  listLanguageModerationCycleViolations(chatId: number, userId: number, cycleTier: number): LanguageModerationViolation[]
+  {
+    return this.moderation.listLanguageModerationCycleViolations(chatId, userId, cycleTier);
   }
 
-  listPendingLanguageModerationCycleViolations(chatId: number, userId: number, cycleTier: number): LanguageModerationViolation[] {
-    return this.db.prepare("SELECT * FROM language_moderation_violations WHERE chat_id = ? AND user_telegram_id = ? AND cycle_tier = ? AND cleanup_state = 'PENDING' ORDER BY message_id ASC").all(chatId, userId, cycleTier) as LanguageModerationViolation[];
+  listPendingLanguageModerationCycleViolations(chatId: number, userId: number, cycleTier: number): LanguageModerationViolation[]
+  {
+    return this.moderation.listPendingLanguageModerationCycleViolations(chatId, userId, cycleTier);
   }
 
-  assignLanguageModerationViolationCycle(chatId: number, userId: number, cycleTier: number, cycleId: string): number {
-    const result = this.db.prepare("UPDATE language_moderation_violations SET moderation_cycle_id = ? WHERE chat_id = ? AND user_telegram_id = ? AND cycle_tier = ? AND moderation_cycle_id IS NULL")
-      .run(cycleId, chatId, userId, cycleTier);
-    return result.changes;
+  assignLanguageModerationViolationCycle(chatId: number, userId: number, cycleTier: number, cycleId: string): number
+  {
+    return this.moderation.assignLanguageModerationViolationCycle(chatId, userId, cycleTier, cycleId);
   }
 
-  listLanguageModerationCleanupCycleViolations(chatId: number, userId: number, cycleId: string): LanguageModerationViolation[] {
-    return this.db.prepare("SELECT * FROM language_moderation_violations WHERE chat_id = ? AND user_telegram_id = ? AND moderation_cycle_id = ? ORDER BY message_id ASC").all(chatId, userId, cycleId) as LanguageModerationViolation[];
+  listLanguageModerationCleanupCycleViolations(chatId: number, userId: number, cycleId: string): LanguageModerationViolation[]
+  {
+    return this.moderation.listLanguageModerationCleanupCycleViolations(chatId, userId, cycleId);
   }
 
-  listPendingLanguageModerationCleanupCycleViolations(chatId: number, userId: number, cycleId: string): LanguageModerationViolation[] {
-    return this.db.prepare("SELECT * FROM language_moderation_violations WHERE chat_id = ? AND user_telegram_id = ? AND moderation_cycle_id = ? AND cleanup_state = 'PENDING' ORDER BY message_id ASC").all(chatId, userId, cycleId) as LanguageModerationViolation[];
+  listPendingLanguageModerationCleanupCycleViolations(chatId: number, userId: number, cycleId: string): LanguageModerationViolation[]
+  {
+    return this.moderation.listPendingLanguageModerationCleanupCycleViolations(chatId, userId, cycleId);
   }
 
   recordLanguageModerationViolationCleanupResult(input: {
@@ -1381,235 +441,163 @@ export class SupportDatabase {
     errorCategory?: string | null;
     errorCode?: number | null;
     errorDescription?: string | null;
-  }): void {
-    const completedAt = input.state === "DELETED" || input.state === "ALREADY_ABSENT" ? now() : null;
-    this.db.prepare(`UPDATE language_moderation_violations
-      SET cleanup_state = ?, cleanup_attempt_count = cleanup_attempt_count + 1,
-          cleanup_last_error_category = ?, cleanup_last_error_code = ?, cleanup_last_error_description = ?,
-          cleanup_completed_at = ?
-      WHERE chat_id = ? AND user_telegram_id = ? AND message_id = ? AND cleanup_state = 'PENDING'`)
-      .run(
-        input.state,
-        input.errorCategory ?? null,
-        input.errorCode ?? null,
-        input.errorDescription ?? null,
-        completedAt,
-        input.chatId,
-        input.userId,
-        input.messageId
-      );
+  }): void
+  {
+    return this.moderation.recordLanguageModerationViolationCleanupResult(input);
   }
 
-  clearLanguageModerationCycleViolations(chatId: number, userId: number, cycleTier: number): void {
-    this.db.prepare("DELETE FROM language_moderation_violations WHERE chat_id = ? AND user_telegram_id = ? AND cycle_tier = ?").run(chatId, userId, cycleTier);
+  clearLanguageModerationCycleViolations(chatId: number, userId: number, cycleTier: number): void
+  {
+    return this.moderation.clearLanguageModerationCycleViolations(chatId, userId, cycleTier);
   }
 
-  clearLanguageModerationCleanupCycleViolations(chatId: number, userId: number, cycleId: string): void {
-    this.db.prepare("DELETE FROM language_moderation_violations WHERE chat_id = ? AND user_telegram_id = ? AND moderation_cycle_id = ?").run(chatId, userId, cycleId);
+  clearLanguageModerationCleanupCycleViolations(chatId: number, userId: number, cycleId: string): void
+  {
+    return this.moderation.clearLanguageModerationCleanupCycleViolations(chatId, userId, cycleId);
   }
 
-  getLanguageModerationChatState(chatId: number): LanguageModerationWarningState | undefined {
-    return this.getLanguageModerationWarningState(chatId, null);
+  getLanguageModerationChatState(chatId: number): LanguageModerationWarningState | undefined
+  {
+    return this.moderation.getLanguageModerationChatState(chatId);
   }
 
-  upsertLanguageModerationChatState(chatId: number, values: { lastWarningMessageId?: number | null; lastWarningAt?: string | null; ordinaryMessagesSinceWarning: number; pendingWarningDueAt?: string | null; pendingWarningStartedAt?: string | null }): void {
-    this.upsertLanguageModerationWarningState(chatId, null, values);
+  upsertLanguageModerationChatState(chatId: number, values: { lastWarningMessageId?: number | null; lastWarningAt?: string | null; ordinaryMessagesSinceWarning: number; pendingWarningDueAt?: string | null; pendingWarningStartedAt?: string | null }): void
+  {
+    return this.moderation.upsertLanguageModerationChatState(chatId, values);
   }
 
-  getLanguageModerationWarningState(chatId: number, messageThreadId: number | null): LanguageModerationWarningState | undefined {
-    return this.db.prepare("SELECT * FROM language_moderation_warning_state WHERE chat_id = ? AND message_thread_id = ?")
-      .get(chatId, messageThreadId ?? 0) as LanguageModerationWarningState | undefined;
+  getLanguageModerationWarningState(chatId: number, messageThreadId: number | null): LanguageModerationWarningState | undefined
+  {
+    return this.moderation.getLanguageModerationWarningState(chatId, messageThreadId);
   }
 
   upsertLanguageModerationWarningState(
     chatId: number,
     messageThreadId: number | null,
     values: { lastWarningMessageId?: number | null; lastWarningAt?: string | null; ordinaryMessagesSinceWarning: number; pendingWarningDueAt?: string | null; pendingWarningStartedAt?: string | null }
-  ): void {
-    this.db.prepare(`INSERT INTO language_moderation_warning_state (chat_id, message_thread_id, last_warning_message_id, last_warning_at, ordinary_messages_since_warning, pending_warning_due_at, pending_warning_started_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(chat_id, message_thread_id) DO UPDATE SET last_warning_message_id = excluded.last_warning_message_id,
-        last_warning_at = excluded.last_warning_at, ordinary_messages_since_warning = excluded.ordinary_messages_since_warning,
-        pending_warning_due_at = excluded.pending_warning_due_at, pending_warning_started_at = excluded.pending_warning_started_at,
-        updated_at = excluded.updated_at`)
-      .run(chatId, messageThreadId ?? 0, values.lastWarningMessageId ?? null, values.lastWarningAt ?? null,
-        values.ordinaryMessagesSinceWarning, values.pendingWarningDueAt ?? null, values.pendingWarningStartedAt ?? null, now());
+  ): void
+  {
+    return this.moderation.upsertLanguageModerationWarningState(chatId, messageThreadId, values);
   }
 
-  createLanguageModerationCleanupJob(input: Omit<LanguageModerationCleanupJob, "id" | "state" | "created_at" | "updated_at">): number {
-    const result = this.db.prepare("INSERT INTO language_moderation_cleanup_jobs (staff_chat_id, chat_id, user_telegram_id, username, chat_title, sanction_tier, sanction_kind, violation_cycle_id, cleanup_due_at, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)")
-      .run(input.staff_chat_id, input.chat_id, input.user_telegram_id, input.username, input.chat_title, input.sanction_tier, input.sanction_kind, input.violation_cycle_id, input.cleanup_due_at, now(), now());
-    return Number(result.lastInsertRowid);
+  createLanguageModerationCleanupJob(input: Omit<LanguageModerationCleanupJob, "id" | "state" | "created_at" | "updated_at">): number
+  {
+    return this.moderation.createLanguageModerationCleanupJob(input);
   }
 
-  getLanguageModerationCleanupJob(jobId: number): LanguageModerationCleanupJob | undefined {
-    return this.db.prepare("SELECT * FROM language_moderation_cleanup_jobs WHERE id = ?").get(jobId) as LanguageModerationCleanupJob | undefined;
+  getLanguageModerationCleanupJob(jobId: number): LanguageModerationCleanupJob | undefined
+  {
+    return this.moderation.getLanguageModerationCleanupJob(jobId);
   }
 
-  listLanguageModerationRecoveryJobs(staffChatId: number, nowIso: string): LanguageModerationCleanupJob[] {
-    return this.db.prepare("SELECT * FROM language_moderation_cleanup_jobs WHERE staff_chat_id = ? AND state IN ('PENDING', 'CLEANING', 'LOG_PENDING') AND cleanup_due_at <= ? ORDER BY id ASC").all(staffChatId, nowIso) as LanguageModerationCleanupJob[];
+  listLanguageModerationRecoveryJobs(staffChatId: number, nowIso: string): LanguageModerationCleanupJob[]
+  {
+    return this.moderation.listLanguageModerationRecoveryJobs(staffChatId, nowIso);
   }
 
-  updateLanguageModerationCleanupJob(id: number, state: LanguageModerationCleanupJob["state"]): void {
-    this.db.prepare("UPDATE language_moderation_cleanup_jobs SET state = ?, updated_at = ? WHERE id = ?").run(state, now(), id);
+  updateLanguageModerationCleanupJob(id: number, state: LanguageModerationCleanupJob["state"]): void
+  {
+    return this.moderation.updateLanguageModerationCleanupJob(id, state);
   }
 
-  claimEntityNotificationPublication(input: { provider: string; entityType: string; entityId: string; eventType: "created"; observedAt: string; targetChatId: number }): EntityNotificationPublicationState {
-    const timestamp = now();
-    const result = this.db.prepare(`INSERT OR IGNORE INTO entity_notification_publications (provider, entity_type, entity_id, event_type, observed_at, target_chat_id, state, first_seen_at, updated_at)
-      VALUES (?, ?, ?, 'created', ?, ?, 'CLAIMED', ?, ?)`).run(input.provider, input.entityType, input.entityId, input.observedAt, input.targetChatId, timestamp, timestamp);
-    if (result.changes === 1) return "CLAIMED";
-
-    const existing = this.db.prepare("SELECT state FROM entity_notification_publications WHERE provider = ? AND entity_type = ? AND entity_id = ? AND event_type = 'created'")
-      .get(input.provider, input.entityType, input.entityId) as { state: EntityNotificationPublicationState } | undefined;
-    if (existing?.state === "FAILED") {
-      const retry = this.db.prepare("UPDATE entity_notification_publications SET state = 'CLAIMED', observed_at = ?, target_chat_id = ?, updated_at = ?, last_error = NULL WHERE provider = ? AND entity_type = ? AND entity_id = ? AND event_type = 'created' AND state = 'FAILED'")
-        .run(input.observedAt, input.targetChatId, timestamp, input.provider, input.entityType, input.entityId);
-      if (retry.changes === 1) return "CLAIMED";
-    }
-    if (existing?.state === "CLAIMED") return "UNKNOWN_DELIVERY";
-    return existing?.state ?? "UNKNOWN_DELIVERY";
+  claimEntityNotificationPublication(input: { provider: string; entityType: string; entityId: string; eventType: "created"; observedAt: string; targetChatId: number }): EntityNotificationPublicationState
+  {
+    return this.installation.claimEntityNotificationPublication(input);
   }
 
-  recordEntityNotificationPublished(provider: string, entityType: string, entityId: string, eventType: "created", telegramMessageId: number): void {
-    this.db.prepare("UPDATE entity_notification_publications SET state = 'PUBLISHED', telegram_message_id = ?, published_at = ?, updated_at = ?, last_error = NULL WHERE provider = ? AND entity_type = ? AND entity_id = ? AND event_type = 'created' AND state = 'CLAIMED'")
-      .run(telegramMessageId, now(), now(), provider, entityType, entityId);
+  recordEntityNotificationPublished(provider: string, entityType: string, entityId: string, eventType: "created", telegramMessageId: number): void
+  {
+    return this.installation.recordEntityNotificationPublished(provider, entityType, entityId, eventType, telegramMessageId);
   }
 
-  recordEntityNotificationFailure(provider: string, entityType: string, entityId: string, eventType: "created", error: string): void {
-    this.db.prepare("UPDATE entity_notification_publications SET state = 'FAILED', last_error = ?, updated_at = ? WHERE provider = ? AND entity_type = ? AND entity_id = ? AND event_type = 'created' AND state = 'CLAIMED'")
-      .run(error.slice(0, 160), now(), provider, entityType, entityId);
+  recordEntityNotificationFailure(provider: string, entityType: string, entityId: string, eventType: "created", error: string): void
+  {
+    return this.installation.recordEntityNotificationFailure(provider, entityType, entityId, eventType, error);
   }
 
-  countEntityNotificationPublications(state?: EntityNotificationPublicationState): number {
-    const row = state
-      ? this.db.prepare("SELECT COUNT(*) AS count FROM entity_notification_publications WHERE state = ?").get(state) as { count: number }
-      : this.db.prepare("SELECT COUNT(*) AS count FROM entity_notification_publications").get() as { count: number };
-    return row.count;
+  countEntityNotificationPublications(state?: EntityNotificationPublicationState): number
+  {
+    return this.installation.countEntityNotificationPublications(state);
   }
 
-  getSetting(key: string): string | undefined {
-    const row = this.db
-      .prepare("SELECT value FROM settings WHERE key = ?")
-      .get(key) as { value: string } | undefined;
-
-    return row?.value;
+  getSetting(key: string): string | undefined
+  {
+    return this.installation.getSetting(key);
   }
 
-  setSetting(key: string, value: string): void {
-    this.db
-      .prepare(
-        `
-        INSERT INTO settings (key, value, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(key) DO UPDATE SET
-          value = excluded.value,
-          updated_at = excluded.updated_at
-      `
-      )
-      .run(key, value, now());
+  setSetting(key: string, value: string): void
+  {
+    return this.installation.setSetting(key, value);
   }
 
-  seedQuickReplies(categories: ReadonlyArray<{ id: string; title: string; templates: ReadonlyArray<{ id: string; title: string; text: string }> }>): void {
-    if (this.getSetting("quick_replies:seeded") === "true") return;
-    const seed = this.db.transaction(() => {
-      const timestamp = now();
-      const insertCategory = this.db.prepare(`INSERT OR IGNORE INTO quick_reply_categories (id, title, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`);
-      const insertTemplate = this.db.prepare(`INSERT OR IGNORE INTO quick_reply_templates (id, category_id, title, text, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
-      for (const [categoryOrder, category] of categories.entries()) {
-        insertCategory.run(category.id, category.title, categoryOrder, timestamp, timestamp);
-        for (const [templateOrder, template] of category.templates.entries()) {
-          insertTemplate.run(template.id, category.id, template.title, template.text, templateOrder, timestamp, timestamp);
-        }
-      }
-      this.db.prepare(`INSERT INTO settings (key, value, updated_at) VALUES ('quick_replies:seeded', 'true', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`).run(timestamp);
-    });
-    seed();
+  seedQuickReplies(categories: ReadonlyArray<{ id: string; title: string; templates: ReadonlyArray<{ id: string; title: string; text: string }> }>): void
+  {
+    return this.quickReplies.seedQuickReplies(categories);
   }
 
-  listQuickReplyCategories(): QuickReplyCategoryRecord[] {
-    return this.db.prepare(`SELECT id, title, sort_order, created_at, updated_at FROM quick_reply_categories ORDER BY sort_order, id`).all() as QuickReplyCategoryRecord[];
+  listQuickReplyCategories(): QuickReplyCategoryRecord[]
+  {
+    return this.quickReplies.listQuickReplyCategories();
   }
 
-  listQuickReplyTemplates(categoryId: string): QuickReplyTemplateRecord[] {
-    return this.db.prepare(`SELECT id, category_id, title, text, sort_order, created_at, updated_at FROM quick_reply_templates WHERE category_id = ? ORDER BY sort_order, id`).all(categoryId) as QuickReplyTemplateRecord[];
+  listQuickReplyTemplates(categoryId: string): QuickReplyTemplateRecord[]
+  {
+    return this.quickReplies.listQuickReplyTemplates(categoryId);
   }
 
-  getQuickReplyTemplate(templateId: string): QuickReplyTemplateRecord | undefined {
-    return this.db.prepare(`SELECT id, category_id, title, text, sort_order, created_at, updated_at FROM quick_reply_templates WHERE id = ?`).get(templateId) as QuickReplyTemplateRecord | undefined;
+  getQuickReplyTemplate(templateId: string): QuickReplyTemplateRecord | undefined
+  {
+    return this.quickReplies.getQuickReplyTemplate(templateId);
   }
 
-  updateQuickReplyTemplate(templateId: string, input: { title: string; text: string }): QuickReplyTemplateRecord | undefined {
-    const timestamp = now();
-    const updated = this.db.prepare(`UPDATE quick_reply_templates SET title = ?, text = ?, updated_at = ? WHERE id = ?`).run(input.title, input.text, timestamp, templateId);
-    return updated.changes === 1 ? this.getQuickReplyTemplate(templateId) : undefined;
+  updateQuickReplyTemplate(templateId: string, input: { title: string; text: string }): QuickReplyTemplateRecord | undefined
+  {
+    return this.quickReplies.updateQuickReplyTemplate(templateId, input);
   }
 
-  createQuickReplyTemplate(input: { id: string; categoryId: string; title: string; text: string }): QuickReplyTemplateRecord {
-    const category = this.db.prepare(`SELECT COALESCE(MAX(sort_order), -1) AS maximum FROM quick_reply_templates WHERE category_id = ?`).get(input.categoryId) as { maximum: number };
-    const timestamp = now();
-    this.db.prepare(`INSERT INTO quick_reply_templates (id, category_id, title, text, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-      .run(input.id, input.categoryId, input.title, input.text, category.maximum + 1, timestamp, timestamp);
-    return this.getQuickReplyTemplate(input.id)!;
+  createQuickReplyTemplate(input: { id: string; categoryId: string; title: string; text: string }): QuickReplyTemplateRecord
+  {
+    return this.quickReplies.createQuickReplyTemplate(input);
   }
 
-  deleteQuickReplyTemplate(templateId: string): "DELETED" | "NOT_FOUND" | "LAST_TEMPLATE" {
-    const remove = this.db.transaction(() => {
-      const existing = this.getQuickReplyTemplate(templateId);
-      if (!existing) return "NOT_FOUND" as const;
-      const count = this.db.prepare(`SELECT COUNT(*) AS count FROM quick_reply_templates WHERE category_id = ?`).get(existing.category_id) as { count: number };
-      if (count.count <= 1) return "LAST_TEMPLATE" as const;
-      this.db.prepare(`DELETE FROM quick_reply_templates WHERE id = ?`).run(templateId);
-      return "DELETED" as const;
-    });
-    return remove();
+  deleteQuickReplyTemplate(templateId: string): "DELETED" | "NOT_FOUND" | "LAST_TEMPLATE"
+  {
+    return this.quickReplies.deleteQuickReplyTemplate(templateId);
   }
 
-  getInstallationState(): InstallationStateRecord {
-    return this.db.prepare("SELECT setup_state, authorization_mode, active_workspace_id, updated_at FROM installation_state WHERE id = 1")
-      .get() as InstallationStateRecord;
+  getInstallationState(): InstallationStateRecord
+  {
+    return this.installation.getInstallationState();
   }
 
-  setInstallationState(input: Partial<Pick<InstallationStateRecord, "setup_state" | "authorization_mode" | "active_workspace_id">>): void {
-    const current = this.getInstallationState();
-    this.db.prepare(`UPDATE installation_state SET setup_state = ?, authorization_mode = ?, active_workspace_id = ?, updated_at = ? WHERE id = 1`)
-      .run(input.setup_state ?? current.setup_state, input.authorization_mode ?? current.authorization_mode,
-        input.active_workspace_id === undefined ? current.active_workspace_id : input.active_workspace_id, now());
+  setInstallationState(input: Partial<Pick<InstallationStateRecord, "setup_state" | "authorization_mode" | "active_workspace_id">>): void
+  {
+    return this.installation.setInstallationState(input);
   }
 
-  upsertWorkspace(input: { telegramChatId: number; title?: string | null; username?: string | null; importedFromLegacy?: boolean }): WorkspaceRecord {
-    const timestamp = now();
-    this.db.prepare(`INSERT INTO workspaces (telegram_chat_id, title, username, active, imported_from_legacy, created_at, updated_at)
-      VALUES (?, ?, ?, 1, ?, ?, ?)
-      ON CONFLICT(telegram_chat_id) DO UPDATE SET title = COALESCE(excluded.title, workspaces.title), username = COALESCE(excluded.username, workspaces.username), active = 1, updated_at = excluded.updated_at`)
-      .run(input.telegramChatId, input.title ?? null, input.username ?? null, input.importedFromLegacy ? 1 : 0, timestamp, timestamp);
-    return this.getWorkspaceByChatId(input.telegramChatId)!;
+  upsertWorkspace(input: { telegramChatId: number; title?: string | null; username?: string | null; importedFromLegacy?: boolean }): WorkspaceRecord
+  {
+    return this.installation.upsertWorkspace(input);
   }
 
-  getWorkspaceByChatId(chatId: number): WorkspaceRecord | undefined {
-    return this.db.prepare("SELECT * FROM workspaces WHERE telegram_chat_id = ?").get(chatId) as WorkspaceRecord | undefined;
+  getWorkspaceByChatId(chatId: number): WorkspaceRecord | undefined
+  {
+    return this.installation.getWorkspaceByChatId(chatId);
   }
 
-  getActiveWorkspace(): WorkspaceRecord | undefined {
-    return this.db.prepare(`SELECT w.* FROM workspaces w JOIN installation_state i ON i.active_workspace_id = w.id WHERE i.id = 1 AND w.active = 1`).get() as WorkspaceRecord | undefined;
+  getActiveWorkspace(): WorkspaceRecord | undefined
+  {
+    return this.installation.getActiveWorkspace();
   }
 
-  listWorkspaces(): WorkspaceRecord[] {
-    return this.db.prepare("SELECT * FROM workspaces ORDER BY id").all() as WorkspaceRecord[];
+  listWorkspaces(): WorkspaceRecord[]
+  {
+    return this.installation.listWorkspaces();
   }
 
-  importManagedPublicChat(chatId: number, workspaceId: number): void {
-    const legacy = this.legacyManagedPublicChatConfig();
-    const timestamp = now();
-    this.db.prepare(`INSERT INTO managed_public_chats (
-        chat_id, workspace_id, active, imported_from_legacy, moderation_enabled, warning_text, allowlist_json,
-        warning_cooldown_minutes, warning_message_threshold, lookback_minutes, created_at, updated_at
-      ) VALUES (?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(chat_id) DO UPDATE SET
-        workspace_id = COALESCE(managed_public_chats.workspace_id, excluded.workspace_id),
-        active = 1, updated_at = excluded.updated_at`)
-      .run(chatId, workspaceId, legacy.enabled ? 1 : 0, legacy.warningText, JSON.stringify(legacy.allowlist),
-        legacy.warningCooldownMinutes, legacy.warningMessageThreshold, legacy.lookbackMinutes, timestamp, timestamp);
+  importManagedPublicChat(chatId: number, workspaceId: number): void
+  {
+    return this.installation.importManagedPublicChat(chatId, workspaceId);
   }
 
   upsertManagedPublicChat(input: {
@@ -1618,27 +606,19 @@ export class SupportDatabase {
     title?: string | null;
     username?: string | null;
     isForum?: boolean;
-  }): ManagedPublicChatRecord {
-    const timestamp = now();
-    this.db.prepare(`INSERT INTO managed_public_chats (chat_id, workspace_id, title, username, is_forum, active, imported_from_legacy, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?)
-      ON CONFLICT(chat_id) DO UPDATE SET workspace_id = COALESCE(excluded.workspace_id, managed_public_chats.workspace_id),
-        title = COALESCE(excluded.title, managed_public_chats.title), username = COALESCE(excluded.username, managed_public_chats.username),
-        is_forum = excluded.is_forum, active = 1, updated_at = excluded.updated_at`)
-      .run(input.chatId, input.workspaceId ?? null, input.title ?? null, input.username ?? null, input.isForum ? 1 : 0, timestamp, timestamp);
-    return this.getManagedPublicChat(input.chatId, true)!;
+  }): ManagedPublicChatRecord
+  {
+    return this.installation.upsertManagedPublicChat(input);
   }
 
-  getManagedPublicChat(chatId: number, includeInactive = false): ManagedPublicChatRecord | undefined {
-    const row = this.db.prepare(`SELECT * FROM managed_public_chats WHERE chat_id = ?${includeInactive ? "" : " AND active = 1"}`)
-      .get(chatId) as Omit<ManagedPublicChatRecord, "allowlist"> | undefined;
-    return row ? this.hydrateManagedPublicChat(row) : undefined;
+  getManagedPublicChat(chatId: number, includeInactive = false): ManagedPublicChatRecord | undefined
+  {
+    return this.installation.getManagedPublicChat(chatId, includeInactive);
   }
 
-  listManagedPublicChats(includeInactive = false): ManagedPublicChatRecord[] {
-    const rows = this.db.prepare(`SELECT * FROM managed_public_chats${includeInactive ? "" : " WHERE active = 1"} ORDER BY title COLLATE NOCASE, chat_id`)
-      .all() as Array<Omit<ManagedPublicChatRecord, "allowlist">>;
-    return rows.map((row) => this.hydrateManagedPublicChat(row));
+  listManagedPublicChats(includeInactive = false): ManagedPublicChatRecord[]
+  {
+    return this.installation.listManagedPublicChats(includeInactive);
   }
 
   updateManagedPublicChatConfig(chatId: number, input: {
@@ -1647,18 +627,14 @@ export class SupportDatabase {
     warningCooldownMinutes: number;
     warningMessageThreshold: number;
     lookbackMinutes: number;
-  }): boolean {
-    const result = this.db.prepare(`UPDATE managed_public_chats SET warning_text = ?, allowlist_json = ?,
-      warning_cooldown_minutes = ?, warning_message_threshold = ?, lookback_minutes = ?, updated_at = ?
-      WHERE chat_id = ? AND active = 1`)
-      .run(input.warningText.trim(), JSON.stringify(normalizeManagedChatAllowlist(input.allowlist)), input.warningCooldownMinutes,
-        input.warningMessageThreshold, input.lookbackMinutes, now(), chatId);
-    return result.changes === 1;
+  }): boolean
+  {
+    return this.installation.updateManagedPublicChatConfig(chatId, input);
   }
 
-  setManagedPublicChatModerationEnabled(chatId: number, enabled: boolean): boolean {
-    return this.db.prepare("UPDATE managed_public_chats SET moderation_enabled = ?, updated_at = ? WHERE chat_id = ? AND active = 1")
-      .run(enabled ? 1 : 0, now(), chatId).changes === 1;
+  setManagedPublicChatModerationEnabled(chatId: number, enabled: boolean): boolean
+  {
+    return this.installation.setManagedPublicChatModerationEnabled(chatId, enabled);
   }
 
   recordManagedPublicChatPermissionHealth(input: {
@@ -1669,213 +645,119 @@ export class SupportDatabase {
     title?: string | null;
     username?: string | null;
     isForum?: boolean;
-  }): boolean {
-    return this.db.prepare(`UPDATE managed_public_chats SET permission_status = ?, reaction_status = ?,
-      connection_status = COALESCE(?, connection_status),
-      title = CASE WHEN ? = 1 THEN ? ELSE title END,
-      username = CASE WHEN ? = 1 THEN ? ELSE username END,
-      is_forum = CASE WHEN ? = 1 THEN ? ELSE is_forum END,
-      permissions_checked_at = ?, updated_at = ? WHERE chat_id = ? AND active = 1`)
-      .run(input.healthy ? "HEALTHY" : "UNHEALTHY", input.reactionsAvailable === null ? "UNKNOWN" : input.reactionsAvailable ? "AVAILABLE" : "UNAVAILABLE",
-        input.connected === undefined ? null : input.connected ? "CONNECTED" : "UNREACHABLE",
-        input.title === undefined ? 0 : 1, input.title ?? null,
-        input.username === undefined ? 0 : 1, input.username ?? null,
-        input.isForum === undefined ? 0 : 1, input.isForum ? 1 : 0,
-        now(), now(), input.chatId).changes === 1;
+  }): boolean
+  {
+    return this.installation.recordManagedPublicChatPermissionHealth(input);
   }
 
-  recordManagedPublicChatUnreachable(chatId: number): boolean {
-    return this.db.prepare(`UPDATE managed_public_chats SET connection_status = 'UNREACHABLE',
-      permission_status = 'UNHEALTHY', permissions_checked_at = ?, updated_at = ? WHERE chat_id = ? AND active = 1`)
-      .run(now(), now(), chatId).changes === 1;
+  recordManagedPublicChatUnreachable(chatId: number): boolean
+  {
+    return this.installation.recordManagedPublicChatUnreachable(chatId);
   }
 
-  deactivateManagedPublicChat(chatId: number): boolean {
-    return this.db.prepare("UPDATE managed_public_chats SET active = 0, moderation_enabled = 0, updated_at = ? WHERE chat_id = ? AND active = 1")
-      .run(now(), chatId).changes === 1;
+  deactivateManagedPublicChat(chatId: number): boolean
+  {
+    return this.installation.deactivateManagedPublicChat(chatId);
   }
 
-  getTeamMember(userId: number): TeamMemberRecord | undefined {
-    return this.db.prepare("SELECT * FROM team_members WHERE user_telegram_id = ? AND active = 1").get(userId) as TeamMemberRecord | undefined;
+  getTeamMember(userId: number): TeamMemberRecord | undefined
+  {
+    return this.installation.getTeamMember(userId);
   }
 
-  listTeamMembers(): TeamMemberRecord[] {
-    return this.db.prepare("SELECT * FROM team_members WHERE active = 1 ORDER BY CASE role WHEN 'OWNER' THEN 0 WHEN 'ADMIN' THEN 1 WHEN 'SENIOR_AGENT' THEN 2 ELSE 3 END, user_telegram_id").all() as TeamMemberRecord[];
+  listTeamMembers(): TeamMemberRecord[]
+  {
+    return this.installation.listTeamMembers();
   }
 
-  upsertTeamMember(input: { userId: number; username?: string | null; displayName?: string | null; role: TeamRole; addedBy?: number | null }): void {
-    const timestamp = now();
-    this.db.prepare(`INSERT INTO team_members (user_telegram_id, username, display_name, role, active, added_by, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 1, ?, ?, ?)
-      ON CONFLICT(user_telegram_id) DO UPDATE SET username = COALESCE(excluded.username, team_members.username), display_name = COALESCE(excluded.display_name, team_members.display_name), role = excluded.role, active = 1, added_by = excluded.added_by, updated_at = excluded.updated_at`)
-      .run(input.userId, input.username ?? null, input.displayName ?? null, input.role, input.addedBy ?? null, timestamp, timestamp);
+  upsertTeamMember(input: { userId: number; username?: string | null; displayName?: string | null; role: TeamRole; addedBy?: number | null }): void
+  {
+    return this.installation.upsertTeamMember(input);
   }
 
-  revokeTeamMember(userId: number): boolean {
-    return this.db.prepare("UPDATE team_members SET active = 0, updated_at = ? WHERE user_telegram_id = ? AND active = 1 AND role != 'OWNER'").run(now(), userId).changes > 0;
+  revokeTeamMember(userId: number): boolean
+  {
+    return this.installation.revokeTeamMember(userId);
   }
 
-  transferOwner(newOwnerId: number): void {
-    this.db.transaction(() => {
-      const oldOwner = this.db.prepare("SELECT user_telegram_id FROM team_members WHERE role = 'OWNER' AND active = 1").get() as { user_telegram_id: number } | undefined;
-      if (!oldOwner) throw new Error("An active owner is required for transfer.");
-      const timestamp = now();
-      this.db.prepare("UPDATE team_members SET role = 'ADMIN', updated_at = ? WHERE user_telegram_id = ?").run(timestamp, oldOwner.user_telegram_id);
-      this.db.prepare(`INSERT INTO team_members (user_telegram_id, role, active, created_at, updated_at) VALUES (?, 'OWNER', 1, ?, ?)
-        ON CONFLICT(user_telegram_id) DO UPDATE SET role = 'OWNER', active = 1, updated_at = excluded.updated_at`).run(newOwnerId, timestamp, timestamp);
-    })();
+  transferOwner(newOwnerId: number): void
+  {
+    return this.installation.transferOwner(newOwnerId);
   }
 
-  invalidateUnconsumedTokens(kind: SecureTokenRecord["kind"]): void {
-    this.db.prepare("UPDATE secure_setup_tokens SET consumed_at = ? WHERE kind = ? AND consumed_at IS NULL").run(now(), kind);
+  invalidateUnconsumedTokens(kind: SecureTokenRecord["kind"]): void
+  {
+    return this.installation.invalidateUnconsumedTokens(kind);
   }
 
-  insertSecureToken(input: { tokenHash: string; kind: SecureTokenRecord["kind"]; role?: TeamRole | null; createdBy?: number | null; expiresAt: string }): void {
-    this.db.prepare(`INSERT INTO secure_setup_tokens (token_hash, kind, role, created_by, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(input.tokenHash, input.kind, input.role ?? null, input.createdBy ?? null, input.expiresAt, now());
+  insertSecureToken(input: { tokenHash: string; kind: SecureTokenRecord["kind"]; role?: TeamRole | null; createdBy?: number | null; expiresAt: string }): void
+  {
+    return this.installation.insertSecureToken(input);
   }
 
-  listUnconsumedTokens(kind?: SecureTokenRecord["kind"]): SecureTokenRecord[] {
-    return (kind
-      ? this.db.prepare("SELECT * FROM secure_setup_tokens WHERE kind = ? AND consumed_at IS NULL").all(kind)
-      : this.db.prepare("SELECT * FROM secure_setup_tokens WHERE consumed_at IS NULL").all()) as SecureTokenRecord[];
+  listUnconsumedTokens(kind?: SecureTokenRecord["kind"]): SecureTokenRecord[]
+  {
+    return this.installation.listUnconsumedTokens(kind);
   }
 
-  consumeOwnerTokenAndCreateOwner(tokenId: number, user: UserInput, at: string): "PAIRED" | "TRANSFER_PENDING" | "INVALID" {
-    return this.db.transaction(() => {
-      const token = this.db.prepare("SELECT * FROM secure_setup_tokens WHERE id = ? AND consumed_at IS NULL AND expires_at > ?").get(tokenId, at) as SecureTokenRecord | undefined;
-      if (!token || (token.kind !== "OWNER_PAIRING" && token.kind !== "OWNER_RECOVERY")) return "INVALID";
-      const existing = this.db.prepare("SELECT user_telegram_id FROM team_members WHERE role = 'OWNER' AND active = 1").get() as { user_telegram_id: number } | undefined;
-      const timestamp = now();
-      this.db.prepare("UPDATE secure_setup_tokens SET consumed_at = ?, claimed_by = ? WHERE id = ? AND consumed_at IS NULL").run(timestamp, user.telegramId, tokenId);
-      this.upsertUser(user);
-      if (existing) {
-        this.db.prepare("INSERT OR REPLACE INTO owner_transfer_confirmations (claimant_telegram_id, token_id, created_at) VALUES (?, ?, ?)").run(user.telegramId, tokenId, timestamp);
-        return "TRANSFER_PENDING";
-      }
-      this.upsertTeamMember({ userId: user.telegramId, username: user.username, displayName: [user.firstName, user.lastName].filter(Boolean).join(" ") || null, role: "OWNER" });
-      this.db.prepare("UPDATE secure_setup_tokens SET consumed_at = ? WHERE kind IN ('OWNER_PAIRING','OWNER_RECOVERY') AND consumed_at IS NULL").run(timestamp);
-      return "PAIRED";
-    })();
+  consumeOwnerTokenAndCreateOwner(tokenId: number, user: UserInput, at: string): "PAIRED" | "TRANSFER_PENDING" | "INVALID"
+  {
+    return this.installation.consumeOwnerTokenAndCreateOwner(tokenId, user, at);
   }
 
-  invalidateTokenAndAssignMember(tokenId: number, user: UserInput, role: TeamRole, at: string): void {
-    this.db.transaction(() => {
-      const token = this.db.prepare("SELECT id FROM secure_setup_tokens WHERE id = ? AND kind = 'TEAM_INVITE' AND consumed_at IS NULL AND expires_at > ?").get(tokenId, at);
-      if (!token) throw new Error("Invitation is no longer available.");
-      this.upsertUser(user);
-      this.upsertTeamMember({ userId: user.telegramId, username: user.username, displayName: [user.firstName, user.lastName].filter(Boolean).join(" ") || null, role });
-      this.db.prepare("UPDATE secure_setup_tokens SET consumed_at = ?, claimed_by = ? WHERE id = ? AND consumed_at IS NULL").run(now(), user.telegramId, tokenId);
-    })();
+  invalidateTokenAndAssignMember(tokenId: number, user: UserInput, role: TeamRole, at: string): void
+  {
+    return this.installation.invalidateTokenAndAssignMember(tokenId, user, role, at);
   }
 
-  hasPendingOwnerTransfer(userId: number): boolean {
-    return Boolean(this.db.prepare("SELECT 1 FROM owner_transfer_confirmations WHERE claimant_telegram_id = ?").get(userId));
+  hasPendingOwnerTransfer(userId: number): boolean
+  {
+    return this.installation.hasPendingOwnerTransfer(userId);
   }
 
-  confirmOwnerTransfer(userId: number): void {
-    this.db.transaction(() => {
-      if (!this.hasPendingOwnerTransfer(userId)) throw new Error("No pending owner transfer exists.");
-      this.transferOwner(userId);
-      this.db.prepare("DELETE FROM owner_transfer_confirmations").run();
-    })();
+  confirmOwnerTransfer(userId: number): void
+  {
+    return this.installation.confirmOwnerTransfer(userId);
   }
 
-  saveOnboardingSession(userId: number, stage: string, state = "ACTIVE", candidateChatId?: number | null): void {
-    this.db.prepare(`INSERT INTO onboarding_sessions (user_telegram_id, stage, state, candidate_chat_id, updated_at) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(user_telegram_id) DO UPDATE SET stage = excluded.stage, state = excluded.state, candidate_chat_id = COALESCE(excluded.candidate_chat_id, onboarding_sessions.candidate_chat_id), updated_at = excluded.updated_at`)
-      .run(userId, stage, state, candidateChatId ?? null, now());
+  saveOnboardingSession(userId: number, stage: string, state = "ACTIVE", candidateChatId?: number | null): void
+  {
+    return this.installation.saveOnboardingSession(userId, stage, state, candidateChatId);
   }
 
-  getOnboardingSession(userId: number): OnboardingSessionRecord | undefined {
-    return this.db.prepare("SELECT * FROM onboarding_sessions WHERE user_telegram_id = ?").get(userId) as OnboardingSessionRecord | undefined;
+  getOnboardingSession(userId: number): OnboardingSessionRecord | undefined
+  {
+    return this.installation.getOnboardingSession(userId);
   }
 
-  setOnboardingPrimaryMessage(userId: number, chatId: number | null, messageId: number | null): void {
-    this.db.prepare("UPDATE onboarding_sessions SET primary_message_chat_id = ?, primary_message_id = ?, updated_at = ? WHERE user_telegram_id = ?")
-      .run(chatId, messageId, now(), userId);
+  setOnboardingPrimaryMessage(userId: number, chatId: number | null, messageId: number | null): void
+  {
+    return this.installation.setOnboardingPrimaryMessage(userId, chatId, messageId);
   }
 
-  getInstallationOperationalCounts(): { publicChats: number; moderationEnabled: number; unhealthyModerationChats: number; pendingCleanup: number; pendingArchives: number; pendingBatchStaffOperations: number } {
-    const scalar = (sql: string): number => (this.db.prepare(sql).get() as { count: number }).count;
-    return {
-      publicChats: scalar("SELECT COUNT(*) AS count FROM managed_public_chats WHERE active = 1"),
-      moderationEnabled: scalar("SELECT COUNT(*) AS count FROM managed_public_chats WHERE active = 1 AND moderation_enabled = 1"),
-      unhealthyModerationChats: scalar("SELECT COUNT(*) AS count FROM managed_public_chats WHERE active = 1 AND permission_status = 'UNHEALTHY'"),
-      pendingCleanup: scalar("SELECT COUNT(*) AS count FROM language_moderation_cleanup_jobs WHERE state != 'COMPLETED'"),
-      pendingArchives: scalar("SELECT COUNT(*) AS count FROM tickets WHERE status = 'CLOSED' AND archived_at IS NULL"),
-      pendingBatchStaffOperations: scalar("SELECT COUNT(*) AS count FROM ticket_batch_answer_packages WHERE final_summary_state IN ('PENDING','FAILED')")
-    };
+  getInstallationOperationalCounts(): { publicChats: number; moderationEnabled: number; unhealthyModerationChats: number; pendingCleanup: number; pendingArchives: number; pendingBatchStaffOperations: number }
+  {
+    return this.installation.getInstallationOperationalCounts();
   }
 
-  getBannedUser(userTelegramId: number): BannedUserRecord | undefined {
-    return this.db
-      .prepare("SELECT * FROM banned_users WHERE user_telegram_id = ?")
-      .get(userTelegramId) as BannedUserRecord | undefined;
+  getBannedUser(userTelegramId: number): BannedUserRecord | undefined
+  {
+    return this.tickets.getBannedUser(userTelegramId);
   }
 
-  banUser(input: BanUserInput): void {
-    this.db
-      .prepare(
-        `
-        INSERT INTO banned_users (user_telegram_id, username, reason, banned_by, created_at)
-        VALUES (@userTelegramId, @username, @reason, @bannedBy, @createdAt)
-        ON CONFLICT(user_telegram_id) DO UPDATE SET
-          username = excluded.username,
-          reason = excluded.reason,
-          banned_by = excluded.banned_by,
-          created_at = excluded.created_at
-      `
-      )
-      .run({
-        userTelegramId: input.userTelegramId,
-        username: input.username ?? null,
-        reason: input.reason,
-        bannedBy: input.bannedBy ?? null,
-        createdAt: now()
-      });
+  banUser(input: BanUserInput): void
+  {
+    return this.tickets.banUser(input);
   }
 
-  unbanUser(userTelegramId: number): boolean {
-    const result = this.db
-      .prepare("DELETE FROM banned_users WHERE user_telegram_id = ?")
-      .run(userTelegramId);
-
-    return result.changes > 0;
+  unbanUser(userTelegramId: number): boolean
+  {
+    return this.tickets.unbanUser(userTelegramId);
   }
 
-  listBannedUsers(limit = 50): BannedUserRecord[] {
-    return this.db
-      .prepare(
-        `
-        SELECT * FROM banned_users
-        ORDER BY created_at DESC
-        LIMIT ?
-      `
-      )
-      .all(limit) as BannedUserRecord[];
-  }
-
-  private hydrateManagedPublicChat(row: Omit<ManagedPublicChatRecord, "allowlist">): ManagedPublicChatRecord {
-    return { ...row, allowlist: normalizeManagedChatAllowlist(parseJsonStringArray(row.allowlist_json)) };
-  }
-
-  private legacyManagedPublicChatConfig(): {
-    enabled: boolean;
-    warningText: string;
-    allowlist: readonly string[];
-    warningCooldownMinutes: number;
-    warningMessageThreshold: number;
-    lookbackMinutes: number;
-  } {
-    return {
-      enabled: this.getSetting("language_moderation:enabled") === "true",
-      warningText: this.getSetting("language_moderation:warning_text")?.trim() || "Please use English in the main chat. Further violations may be reviewed by an authorized moderator under the current community policy.",
-      allowlist: normalizeManagedChatAllowlist(parseJsonStringArray(this.getSetting("language_moderation:allowlist") ?? "[]")),
-      warningCooldownMinutes: positiveIntegerOr(this.getSetting("language_moderation:warning_cooldown_minutes"), 10),
-      warningMessageThreshold: positiveIntegerOr(this.getSetting("language_moderation:warning_message_threshold"), 15),
-      lookbackMinutes: positiveIntegerOr(this.getSetting("language_moderation:lookback_minutes"), 5)
-    };
+  listBannedUsers(limit = 50): BannedUserRecord[]
+  {
+    return this.tickets.listBannedUsers(limit);
   }
 
   private migrate(): void {
@@ -2544,7 +1426,7 @@ export class SupportDatabase {
 
           const target = this.hasTable("settings") ? Number(this.getSetting("language_moderation:target")) : Number.NaN;
           if (Number.isSafeInteger(target) && target !== 0) {
-            const legacy = this.legacyManagedPublicChatConfig();
+            const legacy = this.installation.getLegacyManagedPublicChatConfig();
             this.db.prepare(`UPDATE managed_public_chats SET moderation_enabled = ?, warning_text = ?, allowlist_json = ?,
               warning_cooldown_minutes = ?, warning_message_threshold = ?, lookback_minutes = ?, updated_at = ?
               WHERE chat_id = ? AND imported_from_legacy = 1`)
