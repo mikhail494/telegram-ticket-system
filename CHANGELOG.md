@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-15
+
 ### Added
 
 - Verified SQLite online backups with safe retention, restore verification tooling, and an operational restore drill.
