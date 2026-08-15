@@ -13,7 +13,24 @@ flowchart LR
   O --> T
 ```
 
-`src/index.ts` owns process startup: it loads configuration, opens `SupportDatabase`, initializes persistent Quick Replies and the installation service, composes the bot, then performs ready-workspace recovery before long polling starts.
+`src/index.ts` owns process startup: it loads configuration, opens `SupportDatabase`, initializes persistent Quick Replies and the installation service, composes the bot, then performs ready-workspace recovery before long polling starts. `SupportDatabase` owns the single better-sqlite3 connection, migrations, backup, and lifecycle. It is also an intentional compatibility facade over concrete persistence domains, so existing application callers retain the established `db.method()` API.
+
+```mermaid
+flowchart TD
+  A[Application and domain code] --> F[SupportDatabase facade]
+  F --> T[TicketRepository]
+  F --> B[TicketBatchRepository]
+  F --> I[InstallationRepository]
+  F --> M[ModerationRepository]
+  F --> Q[QuickRepliesRepository]
+  T --> D[(One SQLite connection)]
+  B --> D
+  I --> D
+  M --> D
+  Q --> D
+```
+
+The repositories are persistence-only modules. They share the connection owned by the facade, do not import Telegram libraries, and do not close the database. This is an incremental boundary: application code still uses `SupportDatabase` directly until narrower repository interfaces are justified by a later change.
 
 `src/bot.ts` remains the grammY composition root and routes four distinct update paths: customer ticket ingress, the staff workspace, managed public-chat moderation, and private operator control. `PrivateControlPlane` owns private operator dashboard/navigation rendering, authoritative-screen lifecycle, stale callback rejection, editor and picker sessions, and callback/input dispatch for Team, public chats, moderation, Support settings, and Quick Replies. It deliberately remains grammY-aware because it is the Telegram adapter for OWNER and staff administration, while installation, Quick Reply, moderation, and Batch services retain their business state.
 
@@ -95,6 +112,6 @@ Migrations are idempotent and recorded in `schema_migrations`. The database uses
 
 ## Deliberate Tradeoffs and Future Direction
 
-The application favors a compact single-process deployment: `createBot` is still a large composition closure and `SupportDatabase` spans several domains. The extracted private control-plane boundary removes ownership of private UI state from that closure, but it does not attempt to redesign the product flows. Some short-lived interaction state, such as active picker or input sessions, remains in memory while durable business outcomes are persisted in SQLite. These choices reduce moving parts for the current operating model, but they make navigation and future scaling harder.
+The application favors a compact single-process deployment: `createBot` is still a large composition closure, and the `SupportDatabase` facade intentionally remains the public persistence entry point even though SQL implementation is now separated by domain. The extracted private control-plane and persistence boundaries do not attempt to redesign product flows. Some short-lived interaction state, such as active picker or input sessions, remains in memory while durable business outcomes are persisted in SQLite. These choices reduce moving parts for the current operating model, but they make navigation and future scaling harder.
 
 The intended direction is incremental extraction behind existing seams, not a rewrite: isolate focused application services, narrow database ownership by domain, and persist only interaction state that demonstrably needs restart durability.
