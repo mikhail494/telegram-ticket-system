@@ -47,13 +47,13 @@ npm run setup
 npm run dev
 ```
 
-`npm run setup` securely prompts for the BotFather token, validates it with Telegram, and atomically creates an ignored local `.env`. The token is masked and never printed. Open the one-use OWNER link shown by the bot, then select the staff forum group by title through Telegram's native picker. New installations do not enter numeric chat IDs.
+`npm run setup` securely prompts for the BotFather token, validates it with Telegram, and atomically creates an ignored local `.env`. The token is masked and never printed. For an installation without an OWNER, run `npm run owner:pair` in an interactive terminal, confirm the prompt, and open the one-use link printed only in that terminal. Then select the staff forum group by title through Telegram's native picker. New installations do not enter numeric chat IDs.
 
 Explicit process environment variables take precedence over `.env`; existing `.env` deployments remain compatible. For owner recovery, run `npm run owner:recover` locally. The current OWNER remains active until the transfer is explicitly confirmed in the private bot UI.
 
 ## Operations
 
-Native and PM2 deployments keep the operational HTTP listener disabled by default. When explicitly enabled, it binds to `127.0.0.1:3000` and exposes `/healthz`, `/readyz`, and `/metrics`; see [docs/OPERATIONS.md](docs/OPERATIONS.md) for safe network exposure guidance. The Docker image enables these endpoints, runs as the non-root `node` user, and stores the SQLite database and local backups under `/data`; persist that volume for durable deployments.
+Native and PM2 deployments keep the operational HTTP listener disabled by default. When explicitly enabled, it binds to `127.0.0.1:3000` and exposes `/healthz`, `/readyz`, and `/metrics`; see [docs/OPERATIONS.md](docs/OPERATIONS.md) for safe network exposure guidance. On `SIGINT` or `SIGTERM`, the service stops polling and drains durable work before SQLite closes. The Docker image enables these endpoints, runs as the non-root `node` user, and stores the SQLite database and local backups under `/data`; persist that volume for durable deployments.
 
 ## Ticket Workflow
 
@@ -207,7 +207,7 @@ Entity-notification controls are `/questnotify status`, `/questnotify target <ch
 - `SENIOR_AGENT`: ticket work, closure, and senior ban tools.
 - `AGENT`: ticket replies, Quick Replies, status, and closure.
 
-Invitations are hashed, one-use, 30-minute private deep links. Invitees must also join the configured staff workspace. Before RBAC activation, a legacy installation keeps its current trusted-group behavior even after OWNER pairing. After explicit OWNER confirmation, both an assigned application role and staff-group membership are required. Private staff dashboards include `Open test ticket as user`; ordinary staff text cannot accidentally create tickets or change configuration.
+Invitations are hashed, one-use, 30-minute private deep links. Invitees must also join the configured staff workspace. A READY installation with an OWNER and an active valid staff workspace automatically uses role-based access; both an assigned application role and staff-workspace membership are required. Private staff dashboards include `Open test ticket as user`; ordinary staff text cannot accidentally create tickets or change configuration.
 
 OWNER and ADMIN batch operations, public-chat management, and Support settings are available through the private operator UI. Support settings control the expected response time and the complete new-ticket acknowledgement; use `{{response_time}}` in the acknowledgement wherever the configured response time should appear. Staff-group commands remain available where the active authorization mode permits them.
 
@@ -215,9 +215,9 @@ OWNER and ADMIN batch operations, public-chat management, and Support settings a
 
 ### Guided Owner Setup
 
-On first startup the console prints a 30-minute, one-use OWNER pairing link. The link works only in private chat and only its hash is stored. Pairing starts a durable nine-stage onboarding flow covering bot identity, staff workspace, rights validation, Support Logs, optional public-chat guidance, team roles, summary, and activation. Setup can be exited and resumed after restart.
+Runtime startup never prints an OWNER pairing link. For an installation without an OWNER, run `npm run owner:pair` in an interactive terminal and type the requested confirmation. The command prints a 30-minute, one-use private-chat link and stores only its hash. Pairing starts a durable nine-stage onboarding flow covering bot identity, staff workspace, rights validation, Support Logs, optional public-chat guidance, team roles, summary, and activation. Setup can be exited and resumed after restart.
 
-OWNER pairing does not activate role-based access on legacy installations. Existing trusted-group authorization remains active until the OWNER reviews the retained-role summary and explicitly confirms `Activate role-based access` in private chat.
+For a READY installation with an OWNER and an active valid staff workspace, role-based access activates automatically. `npm run owner:recover` remains the explicit recovery flow when an OWNER already exists.
 
 ### Staff Supergroup
 
@@ -333,9 +333,9 @@ Long polling must not run from multiple replicas simultaneously. SQLite needs th
 ## Security Model
 
 - Never commit `.env` or log `BOT_TOKEN`.
-- Legacy mode treats every participant in the configured staff workspace as trusted staff. Pair the OWNER and assign roles before explicitly activating RBAC.
+- Legacy mode treats every participant in the configured staff workspace as trusted staff until the installation is READY with an OWNER and an active valid workspace, at which point role-based access activates automatically.
 - RBAC mode requires both configured staff-workspace membership and an active application role. Telegram administrator status is not an application role.
-- Pairing and invitation tokens are random, expiring, one-use, and stored only as hashes. Keep console setup links private.
+- Pairing and invitation tokens are random, expiring, one-use, and stored only as hashes. Keep terminal pairing links private.
 - Ticket exports contain complete support data and must remain inside the trusted staff chat.
 - Public moderation requires delete, restrict, and ban permissions in its configured target chat; its sanctions remain separate from private support bans.
 - Entity notification publication requires an authoritative, available provider and an explicitly configured target.
