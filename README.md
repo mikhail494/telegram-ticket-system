@@ -386,30 +386,30 @@ Use `DATABASE_URL=file:/data/support.db` with a persistent volume mounted at `/d
 <table>
   <tr>
     <td width="50%" valign="top">
-      <strong>User Intake</strong><br />
-      <img src="docs/screenshots/user-intake.png" alt="Private user conversation with ticket creation and self-service closure" width="100%" />
+      <strong>Customer Flow</strong><br />
+      <img src="docs/screenshots/customer-flow.png" alt="Private user intake with configurable acknowledgement and self-service closure" width="100%" />
       <br />
-      <sub>Private user conversation with ticket creation and self-service closure.</sub>
+      <sub>Private user intake with configurable acknowledgement and self-service closure.</sub>
     </td>
     <td width="50%" valign="top">
-      <strong>Ticket Workspace</strong><br />
-      <img src="docs/screenshots/ticket-workspace.png" alt="Dedicated forum topic with pinned ticket context and staff controls" width="100%" />
+      <strong>Owner Dashboard</strong><br />
+      <img src="docs/screenshots/owner-dashboard.png" alt="Private operator control plane for workspace, team, moderation, settings, Batch, and system status" width="100%" />
       <br />
-      <sub>Dedicated forum topic with pinned ticket context and staff controls.</sub>
+      <sub>Private operator control plane for workspace, team, moderation, settings, Batch, and system status.</sub>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <strong>Quick Replies</strong><br />
-      <img src="docs/screenshots/quick-replies.png" alt="Config-driven response categories inside a ticket topic" width="100%" />
+      <strong>Ticket Workspace</strong><br />
+      <img src="docs/screenshots/ticket-workspace.png" alt="Dedicated forum topic with ticket context and staff controls" width="100%" />
       <br />
-      <sub>Config-driven response categories available directly inside the ticket topic.</sub>
+      <sub>Dedicated forum topic with ticket context and staff controls.</sub>
     </td>
     <td width="50%" valign="top">
-      <strong>Support Logs</strong><br />
-      <img src="docs/screenshots/support-logs.png" alt="Closed ticket summaries and transcript files in Support Logs" width="100%" />
+      <strong>Batch Operations</strong><br />
+      <img src="docs/screenshots/batch-operations.png" alt="ZIP export and resumable answer-package workflow for active tickets" width="100%" />
       <br />
-      <sub>Closed-ticket summaries and transcript files archived in a dedicated topic.</sub>
+      <sub>ZIP export and resumable answer-package workflow for active tickets.</sub>
     </td>
   </tr>
 </table>
