@@ -25,7 +25,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^11.9.1",
-    "dotenv": "^16.4.7",
+    "dotenv": "^17.4.2",
     "fflate": "^0.8.3",
     "franc-min": "^6.2.0",
     "grammy": "^1.45.1",
