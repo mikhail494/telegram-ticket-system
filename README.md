@@ -3,11 +3,14 @@
 A Telegram-native support desk that turns private user messages into structured staff forum topics, replies, and archived transcripts.
 
 [![CI](https://github.com/mikhail494/telegram-ticket-system/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mikhail494/telegram-ticket-system/actions/workflows/ci.yml)
+[![Latest Release](https://img.shields.io/github/v/release/mikhail494/telegram-ticket-system)](https://github.com/mikhail494/telegram-ticket-system/releases/latest)
 [![Node.js 20](https://img.shields.io/badge/Node.js-20-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-7A3E9D.svg)](LICENSE)
 
-Version: `1.3.0`
+Version: `1.4.0`
+
+[Architecture](docs/ARCHITECTURE.md) · [Operations](docs/OPERATIONS.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [Latest release](https://github.com/mikhail494/telegram-ticket-system/releases/latest)
 
 Users contact the bot in private chat, while staff work entirely in a dedicated Telegram forum supergroup. Each ticket receives its own topic, Quick Replies speed up routine responses, and closed conversations are archived as text transcripts in Support Logs.
 
@@ -152,9 +155,9 @@ Notifications are disabled by default. Configure their target and provider throu
 
 ## Support Logs And Transcripts
 
-The bot maintains one `📜 Support Logs` forum topic per `STAFF_CHAT_ID`. It records ticket closure summaries, transcript files, and ban-related events.
+The bot maintains one `📜 Support Logs` forum topic for the configured staff workspace. It records ticket closure summaries, transcript files, and ban-related events.
 
-On startup, the bot reuses the configured topic when it is valid, reopens it when possible, and creates a replacement when it is missing, deleted, unavailable, or incorrectly points to a ticket topic. Settings are scoped per staff chat, so changing `STAFF_CHAT_ID` never reuses a topic ID from another group.
+On startup, the bot reuses the configured topic when it is valid, reopens it when possible, and creates a replacement when it is missing, deleted, unavailable, or incorrectly points to a ticket topic. Settings are scoped per staff chat, so changing the active staff workspace never reuses a topic ID from another group.
 
 Use `/logs` in the staff group to show or create the current topic. Use `/setlogs` inside a non-ticket forum topic to assign it manually. Ticket topics cannot be assigned because they may be closed or deleted during archive processing; a legacy setting that points to one is automatically replaced with a safe Support Logs topic.
 
@@ -291,18 +294,21 @@ The automated suite covers ticket routing, Quick Replies, Support Logs safety, s
 ## Project Structure
 
 ```text
-src/                 Bot handlers, ticket routing, SQLite access, archives, and feature modules
-src/db.ts            SQLite schema migrations and persistent ticket, batch, moderation, and publication state
-src/ticketBatch.ts   Ticket export and answer-package validation/apply workflow
-src/languageModeration.ts  Public English-only moderation and recovery logic
-src/entityNotifications.ts Generic created-event validation, rendering, and publication state
-src/installation.ts   Setup state, workspaces, OWNER pairing, team roles, invitations, and authorization
-src/workspaceValidation.ts  Telegram forum-group and administrator-rights validation
-src/setup.ts          Local token bootstrap and atomic ignored configuration writer
-config/              Editable Quick Replies template configuration
-test/                Node test suites and Telegram API harness
-.github/workflows/   Continuous integration workflow
-Dockerfile           Production container build
+src/                         grammY composition, ticket/customer/staff routing, delivery, archives, and feature modules
+src/privateControlPlane.ts   Private operator dashboard, navigation, configuration, and ephemeral UI state
+src/db.ts                    SQLite connection, migrations, backup/ping lifecycle, and compatibility facade
+src/persistence/             Ticket, Batch, installation, moderation, and Quick Reply persistence repositories
+src/ticketBatch.ts           Ticket export and answer-package validation/apply workflow
+src/languageModeration.ts    Public English-only moderation and recovery logic
+src/entityNotifications.ts   Generic created-event validation, rendering, and publication state
+src/installation.ts          Setup state, workspaces, OWNER pairing, team roles, invitations, and authorization
+src/workspaceValidation.ts   Telegram forum-group and administrator-rights validation
+src/operationsHttp.ts        Health, readiness, and process metrics HTTP server
+src/setup.ts                 Local token bootstrap and atomic ignored configuration writer
+config/                      Editable Quick Replies template configuration
+test/                        Node test suites and Telegram API harness
+.github/workflows/           Continuous integration workflow
+Dockerfile                   Production container build
 ```
 
 Runtime data belongs in the ignored `data/` directory locally, or on persistent storage in production.
@@ -332,16 +338,18 @@ Long polling must not run from multiple replicas simultaneously. SQLite needs th
 
 ## Security Model
 
+See [SECURITY.md](SECURITY.md) for supported versions and private vulnerability reporting.
+
 - Never commit `.env` or log `BOT_TOKEN`.
 - Legacy mode treats every participant in the configured staff workspace as trusted staff until the installation is READY with an OWNER and an active valid workspace, at which point role-based access activates automatically.
 - RBAC mode requires both configured staff-workspace membership and an active application role. Telegram administrator status is not an application role.
 - Pairing and invitation tokens are random, expiring, one-use, and stored only as hashes. Keep terminal pairing links private.
-- Ticket exports contain complete support data and must remain inside the trusted staff chat.
+- Ticket exports, transcripts, Support Logs, and backups contain support data and must remain inside the trusted operator boundary.
 - Public moderation requires delete, restrict, and ban permissions in its configured target chat; its sanctions remain separate from private support bans.
 - Entity notification publication requires an authoritative, available provider and an explicitly configured target.
 - Select only a controlled staff workspace; `STAFF_CHAT_ID` is a legacy compatibility input.
-- Keep SQLite on persistent storage and review staff access before making the repository public.
-- Support Logs is the durable archive; the bot does not download or duplicate user media into application storage.
+- Keep SQLite and backups on persistent, access-controlled storage.
+- Keep operational HTTP on localhost or behind trusted network controls unless public exposure is intentionally secured.
 
 ## Troubleshooting
 
@@ -407,6 +415,8 @@ Use `DATABASE_URL=file:/data/support.db` with a persistent volume mounted at `/d
 </table>
 
 ## Release
+
+Latest stable release: [v1.4.0](https://github.com/mikhail494/telegram-ticket-system/releases/tag/v1.4.0).
 
 See [CHANGELOG.md](CHANGELOG.md) for release history and [LICENSE](LICENSE) for licensing terms.
 
