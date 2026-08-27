@@ -19,8 +19,8 @@ export interface LanguageModerationConfig {
 export type LanguageClassification = "violation" | "ignored";
 export type ModerationLanguage = "english" | "non_english" | "uncertain";
 
-const MIN_LATIN_LANGUAGE_LETTERS = 24;
-const MIN_LATIN_LANGUAGE_WORDS = 5;
+const MIN_LATIN_LANGUAGE_LETTERS = 44;
+const MIN_LATIN_LANGUAGE_WORDS = 7;
 const MIN_LANGUAGE_CONFIDENCE_GAP = 0.08;
 const DISTINCTIVE_CHAT_SIGNAL_SCORE = 4;
 const CORROBORATED_CHAT_SIGNAL_SCORE = 4;
@@ -30,6 +30,7 @@ const INDONESIAN_MALAY_CHAT_NORMALIZATIONS: Readonly<Record<string, readonly str
   gk: ["tidak"],
   ga: ["tidak"],
   gak: ["tidak"],
+  tau: ["tahu"],
   gatau: ["tidak", "tahu"],
   skarang: ["sekarang"],
   udh: ["sudah"],
@@ -49,20 +50,35 @@ const INDONESIAN_MALAY_CHAT_NORMALIZATIONS: Readonly<Record<string, readonly str
 const INDONESIAN_MALAY_CHAT_SIGNAL_WEIGHTS: Readonly<Record<string, number>> = {
   setuju: 4,
   maksud: 4,
-  maksudnya: 4,
+  maksudnya: 5,
+  ngapain: 5,
   nunggu: 4,
   emang: 4,
   gimana: 4,
+  soalnya: 4,
+  nyampe: 4,
+  dapet: 4,
+  faham: 4,
   ngetik: 4,
   apaan: 4,
   kocak: 4,
+  banget: 4,
   cepu: 3,
   tunggu: 3,
+  belum: 2,
+  disini: 2,
+  masuk: 1,
+  dong: 1,
+  kok: 1,
+  sudah: 2,
+  langsung: 2,
+  dulu: 2,
+  nanti: 1,
+  baru: 1,
   banyak: 2,
   yang: 2,
   mana: 2,
   sekarang: 2,
-  sudah: 2,
   kalau: 2,
   kalian: 2,
   bahasa: 2,

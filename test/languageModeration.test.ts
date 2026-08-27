@@ -93,7 +93,7 @@ describe("language moderation classifier", () => {
   });
 
   it("keeps low-signal and mixed English text uncertain or English", () => {
-    for (const value of ["ok", "gm", "hi", "lol", "BTC", "USDT", "ga", "di", "jd", "bg", "wd", "123456", "https://example.com", "@support_bot", "😀😀", "Alex"]) {
+    for (const value of ["ok", "gm", "hi", "lol", "BTC", "USDT", "ga", "di", "lu", "jd", "bg", "wd", "123456", "https://example.com", "@support_bot", "😀😀", "Alex"]) {
       assert.equal(classifyModerationLanguage(value), "uncertain", value);
       assert.equal(classifyEnglishOnlyMessage(value), "ignored", value);
     }
@@ -118,6 +118,40 @@ describe("language moderation classifier", () => {
     ];
     for (const value of [...REAL_ALLOWED_LATIN_CHAT_CORPUS, ...adversarialEnglish]) {
       assert.equal(classifyEnglishOnlyMessage(value), "ignored", value);
+    }
+  });
+
+  it("keeps short noisy and grammatically broken English chat non-actionable", () => {
+    const brokenEnglish = [
+      "Hello Dev, do you need chatter service?",
+      "Can’t received in fluxa wallet",
+      "30 minutes in reviews lol still refresh but same 😂",
+      "wallet still not received",
+      "dev please check again",
+      "still review same status",
+      "need help with fluxa wallet",
+      "why still pending bro",
+      "can you check my withdrawal"
+    ];
+    for (const value of brokenEnglish) {
+      assert.notEqual(classifyModerationLanguage(value), "non_english", value);
+      assert.equal(classifyEnglishOnlyMessage(value), "ignored", value);
+    }
+  });
+
+  it("detects short Indonesian and Malay chat only with distinctive or corroborated signals", () => {
+    for (const value of [
+      "ngapain lu disini",
+      "belum dapet",
+      "ngapain disini",
+      "gimana dong",
+      "udah belum",
+      "kok belum masuk",
+      "maksudnya gimana",
+      "soalnya belum nyampe"
+    ]) {
+      assert.equal(classifyModerationLanguage(value), "non_english", value);
+      assert.equal(classifyEnglishOnlyMessage(value), "violation", value);
     }
   });
 });
