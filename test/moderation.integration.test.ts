@@ -6,17 +6,18 @@ import {
   createBotHarness,
   type ApiMockSuccess,
   type BotHarness,
-  type RecordedApiCall
+  type RecordedApiCall,
 } from "./helpers/botHarness.js";
 import {
   processModerationCleanupJob,
   processModerationRecovery,
-  scheduleModerationCleanup
+  scheduleModerationCleanup,
 } from "../src/languageModeration.js";
 
 const PUBLIC_CHAT_ID = -100777;
 const FIXED_NOW = new Date("2026-07-31T12:00:00.000Z");
-const CYRILLIC = "\u041f\u043e\u0436\u0430\u043b\u0443\u0439\u0441\u0442\u0430 \u043f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043c\u043e\u0439 \u0430\u043a\u043a\u0430\u0443\u043d\u0442";
+const CYRILLIC =
+  "\u041f\u043e\u0436\u0430\u043b\u0443\u0439\u0441\u0442\u0430 \u043f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043c\u043e\u0439 \u0430\u043a\u043a\u0430\u0443\u043d\u0442";
 const SUPPORT_LOGS_KEY = `support_logs_message_thread_id:${TEST_STAFF_CHAT_ID}`;
 
 const harnesses: BotHarness[] = [];
@@ -45,8 +46,8 @@ function publicMessage(messageId: number, userId: number, text = CYRILLIC): Upda
       date: Math.floor(FIXED_NOW.getTime() / 1000),
       from: { id: userId, is_bot: false, first_name: "Public User", username: `public_${userId}` },
       chat: { id: PUBLIC_CHAT_ID, type: "supergroup", title: "Public Community" },
-      text
-    }
+      text,
+    },
   };
 }
 
@@ -58,8 +59,8 @@ function privateMessage(messageId: number, userId: number, text = "I need privat
       date: Math.floor(FIXED_NOW.getTime() / 1000),
       from: { id: userId, is_bot: false, first_name: "Private User", username: `private_${userId}` },
       chat: { id: userId, type: "private", first_name: "Private User" },
-      text
-    }
+      text,
+    },
   };
 }
 
@@ -70,12 +71,13 @@ function moderationCommand(command: string, chatId = TEST_STAFF_CHAT_ID): Update
       message_id: 9000,
       date: Math.floor(FIXED_NOW.getTime() / 1000),
       from: { id: 42, is_bot: false, first_name: "Staff", username: "staff" },
-      chat: chatId === TEST_STAFF_CHAT_ID
-        ? { id: chatId, type: "supergroup", title: "Staff" }
-        : { id: chatId, type: "private", first_name: "Not Staff" },
+      chat:
+        chatId === TEST_STAFF_CHAT_ID
+          ? { id: chatId, type: "supergroup", title: "Staff" }
+          : { id: chatId, type: "private", first_name: "Not Staff" },
       text: command,
-      entities: [{ offset: 0, length: (command.split(" ")[0] ?? command).length, type: "bot_command" }]
-    }
+      entities: [{ offset: 0, length: (command.split(" ")[0] ?? command).length, type: "bot_command" }],
+    },
   };
 }
 
@@ -86,7 +88,7 @@ function seedSanctionState(harness: BotHarness, userId: number, sanctionTier: nu
     username: `public_${userId}`,
     current_strikes: 2,
     sanction_tier: sanctionTier,
-    first_strike_at: "2026-07-31T11:00:00.000Z"
+    first_strike_at: "2026-07-31T11:00:00.000Z",
   });
 }
 
@@ -108,32 +110,45 @@ function createDueJob(
     sanction_tier: sanctionTier,
     sanction_kind: sanctionTier === 1 ? "24-hour mute" : sanctionTier === 2 ? "7-day mute" : "permanent ban",
     violation_cycle_id: violationCycleId,
-    cleanup_due_at: cleanupDueAt
+    cleanup_due_at: cleanupDueAt,
   });
   if (state) harness.db.updateLanguageModerationCleanupJob(jobId, state);
   return jobId;
 }
 
-function seedCycleViolation(harness: BotHarness, userId: number, messageId: number, cycleTier = 0, violationCycleId = `test-cycle:${userId}:${cycleTier}`, messageThreadId: number | null = null): void {
-  assert.equal(harness.db.addLanguageModerationViolation({
-    chat_id: PUBLIC_CHAT_ID,
-    user_telegram_id: userId,
-    message_id: messageId,
-    message_thread_id: messageThreadId,
-    username: `public_${userId}`,
-    cycle_tier: cycleTier
-  }), true);
+function seedCycleViolation(
+  harness: BotHarness,
+  userId: number,
+  messageId: number,
+  cycleTier = 0,
+  violationCycleId = `test-cycle:${userId}:${cycleTier}`,
+  messageThreadId: number | null = null
+): void {
+  assert.equal(
+    harness.db.addLanguageModerationViolation({
+      chat_id: PUBLIC_CHAT_ID,
+      user_telegram_id: userId,
+      message_id: messageId,
+      message_thread_id: messageThreadId,
+      username: `public_${userId}`,
+      cycle_tier: cycleTier,
+    }),
+    true
+  );
   harness.db.assignLanguageModerationViolationCycle(PUBLIC_CHAT_ID, userId, cycleTier, violationCycleId);
 }
 
 function seedUnboundCycleViolation(harness: BotHarness, userId: number, messageId: number, cycleTier: number): void {
-  assert.equal(harness.db.addLanguageModerationViolation({
-    chat_id: PUBLIC_CHAT_ID,
-    user_telegram_id: userId,
-    message_id: messageId,
-    username: `public_${userId}`,
-    cycle_tier: cycleTier
-  }), true);
+  assert.equal(
+    harness.db.addLanguageModerationViolation({
+      chat_id: PUBLIC_CHAT_ID,
+      user_telegram_id: userId,
+      message_id: messageId,
+      username: `public_${userId}`,
+      cycle_tier: cycleTier,
+    }),
+    true
+  );
 }
 
 function publicLogMessages(harness: BotHarness): RecordedApiCall[] {
@@ -144,7 +159,12 @@ function moderationReactionEmoji(harness: BotHarness): string | undefined {
   const reaction = harness.findApiCalls("setMessageReaction")[0]?.payload.reaction;
   if (!Array.isArray(reaction)) return undefined;
   const firstReaction = reaction[0];
-  return typeof firstReaction === "object" && firstReaction !== null && "emoji" in firstReaction && typeof firstReaction.emoji === "string" ? firstReaction.emoji : undefined;
+  return typeof firstReaction === "object" &&
+    firstReaction !== null &&
+    "emoji" in firstReaction &&
+    typeof firstReaction.emoji === "string"
+    ? firstReaction.emoji
+    : undefined;
 }
 
 function administrator(canDelete = true, canRestrict = true): ApiMockSuccess {
@@ -154,8 +174,8 @@ function administrator(canDelete = true, canRestrict = true): ApiMockSuccess {
       status: "administrator",
       user: { id: 777, is_bot: true, first_name: "Test Support Bot" },
       can_delete_messages: canDelete,
-      can_restrict_members: canRestrict
-    }
+      can_restrict_members: canRestrict,
+    },
   };
 }
 
@@ -187,7 +207,10 @@ describe("public language moderation sanctions", () => {
     enable(harness);
     seedSanctionState(harness, 11, 1);
     await harness.bot.handleUpdate(publicMessage(102, 11));
-    assert.equal(harness.findApiCalls("restrictChatMember")[0]?.payload.until_date, Math.floor(FIXED_NOW.getTime() / 1000) + 604_800);
+    assert.equal(
+      harness.findApiCalls("restrictChatMember")[0]?.payload.until_date,
+      Math.floor(FIXED_NOW.getTime() / 1000) + 604_800
+    );
     assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 11)?.sanction_tier, 2);
 
     seedSanctionState(harness, 11, 2);
@@ -266,7 +289,12 @@ describe("public language moderation sanctions", () => {
     enable(harness);
     const userId = 18;
     const cleanupTime = new Date(FIXED_NOW.getTime() + 11_000);
-    const cycleMessages = [[301, 302, 303], [311, 312, 313], [321, 322, 323], [331, 332, 333]];
+    const cycleMessages = [
+      [301, 302, 303],
+      [311, 312, 313],
+      [321, 322, 323],
+      [331, 332, 333],
+    ];
     const cycleIds: string[] = [];
 
     for (const [sourceTier, messageIds] of cycleMessages.entries()) {
@@ -282,17 +310,26 @@ describe("public language moderation sanctions", () => {
       const job = harness.db.getLanguageModerationCleanupJob(jobId!);
       assert.ok(job?.violation_cycle_id);
       cycleIds.push(job!.violation_cycle_id!);
-      assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, userId)?.sanction_tier, Math.min(tier + 1, 3));
+      assert.equal(
+        harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, userId)?.sanction_tier,
+        Math.min(tier + 1, 3)
+      );
 
       harness.clearApiCalls();
       await processModerationCleanupJob(harness.bot.api, harness.db, jobId!, cleanupTime);
-      assert.deepEqual(harness.findApiCalls("deleteMessage").map((call) => call.payload.message_id), messageIds);
+      assert.deepEqual(
+        harness.findApiCalls("deleteMessage").map((call) => call.payload.message_id),
+        messageIds
+      );
       assert.equal(harness.db.getLanguageModerationCleanupJob(jobId!)?.state, "COMPLETED");
     }
 
     assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, userId)?.sanction_tier, 3);
     assert.notEqual(cycleIds[2], cycleIds[3]);
-    assert.equal(harness.findApiCalls("deleteMessage").some((call) => call.payload.message_id === 999), false);
+    assert.equal(
+      harness.findApiCalls("deleteMessage").some((call) => call.payload.message_id === 999),
+      false
+    );
   });
 });
 
@@ -309,7 +346,10 @@ describe("moderation cleanup and Support Logs recovery", () => {
     scheduleModerationCleanup(harness.bot.api, harness.db, 70_001, 10_000, createTimer);
     scheduleModerationCleanup(harness.bot.api, harness.db, 70_002, 10_000, createTimer);
 
-    assert.deepEqual(scheduled.map((item) => item.delayMs), [10_000, 10_000]);
+    assert.deepEqual(
+      scheduled.map((item) => item.delayMs),
+      [10_000, 10_000]
+    );
   });
 
   it("does nothing before a job is due and cleans only the completed sanction cycle once due", async () => {
@@ -326,7 +366,10 @@ describe("moderation cleanup and Support Logs recovery", () => {
     assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "PENDING");
 
     await processModerationCleanupJob(harness.bot.api, harness.db, jobId, FIXED_NOW);
-    assert.deepEqual(harness.findApiCalls("deleteMessage").map((call) => call.payload.message_id), [201, 202, 203]);
+    assert.deepEqual(
+      harness.findApiCalls("deleteMessage").map((call) => call.payload.message_id),
+      [201, 202, 203]
+    );
     assert.equal(harness.db.listLanguageModerationCycleViolations(PUBLIC_CHAT_ID, 20, 0).length, 0);
     assert.equal(harness.db.listLanguageModerationCycleViolations(PUBLIC_CHAT_ID, 20, 1).length, 1);
     assert.equal(harness.db.listLanguageModerationCycleViolations(PUBLIC_CHAT_ID, 21, 0).length, 1);
@@ -340,7 +383,13 @@ describe("moderation cleanup and Support Logs recovery", () => {
   it("retains retryable deletion work until recovery deletes it and emits one Support Logs event", async () => {
     const harness = createHarness();
     enable(harness);
-    harness.db.upsertManagedPublicChat({ chatId: PUBLIC_CHAT_ID, workspaceId: harness.db.getActiveWorkspace()?.id, title: "Public Community", username: "synthetic_community", isForum: true });
+    harness.db.upsertManagedPublicChat({
+      chatId: PUBLIC_CHAT_ID,
+      workspaceId: harness.db.getActiveWorkspace()?.id,
+      title: "Public Community",
+      username: "synthetic_community",
+      isForum: true,
+    });
     const jobId = createDueJob(harness, 22);
     seedCycleViolation(harness, 22, 205, 0, "test-cycle:22:0", 101);
     seedCycleViolation(harness, 22, 206, 0, "test-cycle:22:0", 202);
@@ -374,13 +423,20 @@ describe("moderation cleanup and Support Logs recovery", () => {
     const harness = createHarness();
     const jobId = createDueJob(harness, 28);
     seedCycleViolation(harness, 28, 212);
-    harness.setApiResponseOverride("deleteMessage", () => ({ ok: false, error_code: 400, description: "Bad Request: message to delete not found" }));
+    harness.setApiResponseOverride("deleteMessage", () => ({
+      ok: false,
+      error_code: 400,
+      description: "Bad Request: message to delete not found",
+    }));
     harness.failNextApiCall("sendMessage");
 
     await processModerationCleanupJob(harness.bot.api, harness.db, jobId, FIXED_NOW);
 
     assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "LOG_PENDING");
-    assert.equal(harness.db.listLanguageModerationCycleViolations(PUBLIC_CHAT_ID, 28, 0)[0]?.cleanup_state, "ALREADY_ABSENT");
+    assert.equal(
+      harness.db.listLanguageModerationCycleViolations(PUBLIC_CHAT_ID, 28, 0)[0]?.cleanup_state,
+      "ALREADY_ABSENT"
+    );
 
     harness.clearApiCalls();
     await processModerationRecovery(harness.bot.api, harness.db, new Date("2026-07-31T12:01:00.000Z"));
@@ -477,7 +533,10 @@ describe("moderation commands and public/private isolation", () => {
 
   it("persists only reachable targets and enables only with the required moderation rights", async () => {
     const harness = createHarness();
-    harness.setApiResponseOverride("getChat", () => ({ ok: true, result: { id: PUBLIC_CHAT_ID, type: "supergroup", title: "Public Community" } }));
+    harness.setApiResponseOverride("getChat", () => ({
+      ok: true,
+      result: { id: PUBLIC_CHAT_ID, type: "supergroup", title: "Public Community" },
+    }));
     await harness.bot.handleUpdate(moderationCommand(`/moderation target ${PUBLIC_CHAT_ID}`));
     assert.equal(harness.db.getSetting("language_moderation:target"), String(PUBLIC_CHAT_ID));
     assert.notEqual(harness.db.getSetting("language_moderation:enabled"), "true");
@@ -509,7 +568,14 @@ describe("moderation commands and public/private isolation", () => {
     assert.equal(harness.db.getSetting("language_moderation:allowlist"), "[]");
 
     harness.db.setSetting("language_moderation:target", String(PUBLIC_CHAT_ID));
-    harness.db.upsertLanguageModerationUserState({ chat_id: PUBLIC_CHAT_ID, user_telegram_id: 31, username: "public_31", current_strikes: 2, sanction_tier: 1, first_strike_at: "2026-07-31T11:00:00.000Z" });
+    harness.db.upsertLanguageModerationUserState({
+      chat_id: PUBLIC_CHAT_ID,
+      user_telegram_id: 31,
+      username: "public_31",
+      current_strikes: 2,
+      sanction_tier: 1,
+      first_strike_at: "2026-07-31T11:00:00.000Z",
+    });
     seedCycleViolation(harness, 31, 211, 0);
     seedCycleViolation(harness, 31, 212, 1);
     await harness.bot.handleUpdate(moderationCommand("/moderation resetstrikes 31"));
@@ -548,7 +614,16 @@ describe("moderation commands and public/private isolation", () => {
     harness.db.banUser({ userTelegramId: 41, username: "private_41", reason: "Support abuse", bannedBy: 42 });
     await harness.bot.handleUpdate(privateMessage(303, 41));
     assert.equal(harness.db.getLatestTicketForUser(41, TEST_STAFF_CHAT_ID), undefined);
-    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === 41 && call.payload.text === "You are currently restricted from opening support tickets."), true);
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some(
+          (call) =>
+            call.payload.chat_id === 41 &&
+            call.payload.text === "You are currently restricted from opening support tickets."
+        ),
+      true
+    );
   });
 
   it("keeps staff help complete without exposing staff commands to private users", async () => {

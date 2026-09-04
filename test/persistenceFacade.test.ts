@@ -18,7 +18,7 @@ test("SupportDatabase preserves its facade across extracted persistence domains"
       createdAt: "2026-08-15T00:00:00.000Z",
       selectionMode: "all_active",
       ticketCount: 1,
-      items: [{ ticketId: ticket.id, snapshotToken: "facade-token" }]
+      items: [{ ticketId: ticket.id, snapshotToken: "facade-token" }],
     });
     assert.equal(db.getTicketBatchExport("export_facade", -100501)?.ticket_count, 1);
 
@@ -26,7 +26,7 @@ test("SupportDatabase preserves its facade across extracted persistence domains"
     const publicChat = db.upsertManagedPublicChat({
       chatId: -100502,
       workspaceId: workspace.id,
-      title: "Facade public chat"
+      title: "Facade public chat",
     });
     assert.equal(db.getManagedPublicChat(publicChat.chat_id)?.title, "Facade public chat");
 
@@ -36,21 +36,18 @@ test("SupportDatabase preserves its facade across extracted persistence domains"
         user_telegram_id: 501,
         message_id: 9,
         username: "facade_user",
-        cycle_tier: 0
+        cycle_tier: 0,
       }),
       true
     );
-    assert.equal(
-      db.listLanguageModerationViolations(publicChat.chat_id, "1970-01-01T00:00:00.000Z").length,
-      1
-    );
+    assert.equal(db.listLanguageModerationViolations(publicChat.chat_id, "1970-01-01T00:00:00.000Z").length, 1);
 
     db.seedQuickReplies([
       {
         id: "facade",
         title: "Facade",
-        templates: [{ id: "facade-template", title: "Template", text: "Facade quick reply" }]
-      }
+        templates: [{ id: "facade-template", title: "Template", text: "Facade quick reply" }],
+      },
     ]);
     assert.equal(db.getQuickReplyTemplate("facade-template")?.text, "Facade quick reply");
   } finally {

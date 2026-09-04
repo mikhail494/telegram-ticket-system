@@ -8,19 +8,42 @@ test("lifecycle stops polling and drains middleware, background work, and backup
   let releaseTask!: () => void;
   let releaseBackup!: () => void;
   let taskStarted!: () => void;
-  const polling = new Promise<void>((resolve) => { releasePolling = resolve; });
-  const task = new Promise<void>((resolve) => { releaseTask = resolve; });
-  const backup = new Promise<void>((resolve) => { releaseBackup = resolve; });
-  const started = new Promise<void>((resolve) => { taskStarted = resolve; });
+  const polling = new Promise<void>((resolve) => {
+    releasePolling = resolve;
+  });
+  const task = new Promise<void>((resolve) => {
+    releaseTask = resolve;
+  });
+  const backup = new Promise<void>((resolve) => {
+    releaseBackup = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    taskStarted = resolve;
+  });
   const tasks = new BackgroundTaskRegistry();
-  tasks.run(async () => { events.push("task-start"); taskStarted(); await task; events.push("task-end"); });
+  tasks.run(async () => {
+    events.push("task-start");
+    taskStarted();
+    await task;
+    events.push("task-end");
+  });
   const lifecycle = new ApplicationLifecycle({
-    stopPolling: () => { events.push("stop-polling"); releasePolling(); },
-    pollingCompletion: () => polling.then(() => { events.push("polling-drained"); }),
+    stopPolling: () => {
+      events.push("stop-polling");
+      releasePolling();
+    },
+    pollingCompletion: () =>
+      polling.then(() => {
+        events.push("polling-drained");
+      }),
     stopBackgroundWork: () => events.push("stop-background-work"),
     backgroundTasks: tasks,
-    stopAndDrainBackups: async () => { events.push("backup-drain"); await backup; events.push("backup-drained"); },
-    closeDatabase: () => events.push("db-close")
+    stopAndDrainBackups: async () => {
+      events.push("backup-drain");
+      await backup;
+      events.push("backup-drained");
+    },
+    closeDatabase: () => events.push("db-close"),
   });
 
   await started;
@@ -41,15 +64,22 @@ test("duplicate shutdown signals and startup failure close SQLite only once", as
   let closes = 0;
   const tasks = new BackgroundTaskRegistry();
   const lifecycle = new ApplicationLifecycle({
-    stopPolling: () => { stops += 1; },
+    stopPolling: () => {
+      stops += 1;
+    },
     pollingCompletion: () => null,
     backgroundTasks: tasks,
-    closeDatabase: () => { closes += 1; }
+    closeDatabase: () => {
+      closes += 1;
+    },
   });
   await Promise.all([lifecycle.shutdown(), lifecycle.shutdown(), lifecycle.startupFailed()]);
   assert.equal(stops, 1);
   assert.equal(closes, 1);
-  assert.equal(tasks.run(async () => undefined), false);
+  assert.equal(
+    tasks.run(async () => undefined),
+    false
+  );
 });
 
 test("backup drain failure is logged and does not leave SQLite open", async () => {
@@ -59,9 +89,15 @@ test("backup drain failure is logged and does not leave SQLite open", async () =
     stopPolling: () => undefined,
     pollingCompletion: () => null,
     backgroundTasks: new BackgroundTaskRegistry(),
-    stopAndDrainBackups: async () => { throw new Error("backup unavailable"); },
-    closeDatabase: () => { closes += 1; },
-    onDrainFailure: (stage) => { failures.push(stage); }
+    stopAndDrainBackups: async () => {
+      throw new Error("backup unavailable");
+    },
+    closeDatabase: () => {
+      closes += 1;
+    },
+    onDrainFailure: (stage) => {
+      failures.push(stage);
+    },
   });
   await lifecycle.shutdown();
   assert.deepEqual(failures, ["backup"]);
@@ -72,11 +108,17 @@ test("a polling stop failure is isolated while remaining shutdown work still com
   const failures: string[] = [];
   let closes = 0;
   const lifecycle = new ApplicationLifecycle({
-    stopPolling: () => { throw new Error("stop failed"); },
+    stopPolling: () => {
+      throw new Error("stop failed");
+    },
     pollingCompletion: () => null,
     backgroundTasks: new BackgroundTaskRegistry(),
-    closeDatabase: () => { closes += 1; },
-    onDrainFailure: (stage) => { failures.push(stage); }
+    closeDatabase: () => {
+      closes += 1;
+    },
+    onDrainFailure: (stage) => {
+      failures.push(stage);
+    },
   });
   await lifecycle.shutdown();
   assert.deepEqual(failures, ["polling"]);
@@ -90,8 +132,13 @@ test("a database close failure is logged without reopening shutdown", async () =
     stopPolling: () => undefined,
     pollingCompletion: () => null,
     backgroundTasks: new BackgroundTaskRegistry(),
-    closeDatabase: () => { closes += 1; throw new Error("close failed"); },
-    onDrainFailure: (stage) => { failures.push(stage); }
+    closeDatabase: () => {
+      closes += 1;
+      throw new Error("close failed");
+    },
+    onDrainFailure: (stage) => {
+      failures.push(stage);
+    },
   });
   await Promise.all([lifecycle.shutdown(), lifecycle.shutdown()]);
   assert.deepEqual(failures, ["database"]);
@@ -101,8 +148,12 @@ test("a database close failure is logged without reopening shutdown", async () =
 test("top-level runtime completion remains pending until shutdown drains background work", async () => {
   let releasePolling!: () => void;
   let releaseTask!: () => void;
-  const polling = new Promise<void>((resolve) => { releasePolling = resolve; });
-  const task = new Promise<void>((resolve) => { releaseTask = resolve; });
+  const polling = new Promise<void>((resolve) => {
+    releasePolling = resolve;
+  });
+  const task = new Promise<void>((resolve) => {
+    releaseTask = resolve;
+  });
   const tasks = new BackgroundTaskRegistry();
   tasks.run(async () => task);
   let closed = false;
@@ -110,10 +161,14 @@ test("top-level runtime completion remains pending until shutdown drains backgro
     stopPolling: releasePolling,
     pollingCompletion: () => polling,
     backgroundTasks: tasks,
-    closeDatabase: () => { closed = true; }
+    closeDatabase: () => {
+      closed = true;
+    },
   });
   let completed = false;
-  const runtime = awaitApplicationCompletion(polling, lifecycle).then(() => { completed = true; });
+  const runtime = awaitApplicationCompletion(polling, lifecycle).then(() => {
+    completed = true;
+  });
   const shutdown = lifecycle.shutdown();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(completed, false);
@@ -128,10 +183,14 @@ test("normal polling completion drains resources without stopping an already-end
   let stops = 0;
   let closes = 0;
   const lifecycle = new ApplicationLifecycle({
-    stopPolling: () => { stops += 1; },
+    stopPolling: () => {
+      stops += 1;
+    },
     pollingCompletion: () => Promise.resolve(),
     backgroundTasks: new BackgroundTaskRegistry(),
-    closeDatabase: () => { closes += 1; }
+    closeDatabase: () => {
+      closes += 1;
+    },
   });
   await awaitApplicationCompletion(Promise.resolve(), lifecycle);
   assert.equal(stops, 0);
@@ -145,7 +204,9 @@ test("lifecycle keeps readiness in shutdown before closing the operational liste
     pollingCompletion: () => null,
     backgroundTasks: new BackgroundTaskRegistry(),
     closeDatabase: () => events.push("db-close"),
-    closeOperationalServer: async () => { events.push("server-close"); }
+    closeOperationalServer: async () => {
+      events.push("server-close");
+    },
   });
   const shutdown = lifecycle.shutdown();
   assert.equal(lifecycle.getState(), "SHUTTING_DOWN");

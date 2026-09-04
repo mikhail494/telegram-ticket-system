@@ -9,14 +9,21 @@ test("shutdown makes readiness unavailable before closing SQLite and the operati
   let releaseTask!: () => void;
   let taskStarted!: () => void;
   const backgroundTasks = new BackgroundTaskRegistry();
-  const task = new Promise<void>((resolve) => { releaseTask = resolve; });
-  const started = new Promise<void>((resolve) => { taskStarted = resolve; });
-  backgroundTasks.run(async () => { taskStarted(); await task; });
+  const task = new Promise<void>((resolve) => {
+    releaseTask = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    taskStarted = resolve;
+  });
+  backgroundTasks.run(async () => {
+    taskStarted();
+    await task;
+  });
   const server = new OperationalServer({
     host: "127.0.0.1",
     port: 0,
     getState: () => state,
-    checkDatabase: () => !databaseClosed
+    checkDatabase: () => !databaseClosed,
   });
   await server.start();
   await started;
@@ -28,8 +35,10 @@ test("shutdown makes readiness unavailable before closing SQLite and the operati
     stopPolling: () => undefined,
     pollingCompletion: () => null,
     backgroundTasks,
-    closeDatabase: () => { databaseClosed = true; },
-    closeOperationalServer: () => server.stop()
+    closeDatabase: () => {
+      databaseClosed = true;
+    },
+    closeOperationalServer: () => server.stop(),
   });
   state = "SHUTTING_DOWN";
   const shutdown = lifecycle.shutdown();

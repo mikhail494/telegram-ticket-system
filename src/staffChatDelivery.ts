@@ -34,7 +34,13 @@ export class StaffChatDeliveryCoordinator {
   run<T>(chatId: number, operation: () => Promise<T>): Promise<StaffDeliveryResult<T>> {
     const previous = this.queues.get(chatId) ?? Promise.resolve();
     const task = previous.catch(() => undefined).then(() => this.execute(chatId, operation));
-    this.queues.set(chatId, task.then(() => undefined, () => undefined));
+    this.queues.set(
+      chatId,
+      task.then(
+        () => undefined,
+        () => undefined
+      )
+    );
     return task;
   }
 
@@ -59,7 +65,11 @@ export class StaffChatDeliveryCoordinator {
         const diagnostic = normalizeTelegramDeliveryError(error, this.now());
         const delay = retryDelay(diagnostic, attempt);
         if (diagnostic.permanence !== "TEMPORARY" || delay === null) {
-          return { diagnostic, retryAt: diagnostic.permanence === "TEMPORARY" ? futureIso(this.now(), retryDelay(diagnostic, 1) ?? 1_000) : null };
+          return {
+            diagnostic,
+            retryAt:
+              diagnostic.permanence === "TEMPORARY" ? futureIso(this.now(), retryDelay(diagnostic, 1) ?? 1_000) : null,
+          };
         }
         if (delay > MAX_INLINE_DELAY_MS || attempt === MAX_ATTEMPTS) {
           const retryAt = futureIso(this.now(), delay);
@@ -70,13 +80,17 @@ export class StaffChatDeliveryCoordinator {
         await this.sleep(delay);
       }
     }
-    return { diagnostic: normalizeTelegramDeliveryError(new Error("Staff delivery retry exhausted"), this.now()), retryAt: futureIso(this.now(), 1_000) };
+    return {
+      diagnostic: normalizeTelegramDeliveryError(new Error("Staff delivery retry exhausted"), this.now()),
+      retryAt: futureIso(this.now(), 1_000),
+    };
   }
 }
 
 function retryDelay(diagnostic: NormalizedDeliveryError, attempt: number): number | null {
-  if (diagnostic.category === "RATE_LIMITED") return ((diagnostic.retryAfterSeconds ?? 1) * 1_000) + 250;
-  if (diagnostic.category === "TELEGRAM_SERVER_ERROR" || diagnostic.category === "NETWORK_ERROR") return 500 * 2 ** (attempt - 1);
+  if (diagnostic.category === "RATE_LIMITED") return (diagnostic.retryAfterSeconds ?? 1) * 1_000 + 250;
+  if (diagnostic.category === "TELEGRAM_SERVER_ERROR" || diagnostic.category === "NETWORK_ERROR")
+    return 500 * 2 ** (attempt - 1);
   return null;
 }
 

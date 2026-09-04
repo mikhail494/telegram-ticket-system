@@ -76,11 +76,17 @@ export class ApplicationLifecycle {
         this.dependencies.onDrainFailure?.("polling", error);
       }
     }
-    await this.drain("polling", async () => { if (polling) await polling; });
+    await this.drain("polling", async () => {
+      if (polling) await polling;
+    });
     await this.drain("background", () => this.dependencies.backgroundTasks.drain());
-    await this.drain("backup", async () => { await backupDrain; });
+    await this.drain("backup", async () => {
+      await backupDrain;
+    });
     this.closeDatabase();
-    await this.drain("server", async () => { await this.dependencies.closeOperationalServer?.(); });
+    await this.drain("server", async () => {
+      await this.dependencies.closeOperationalServer?.();
+    });
     this.state = "STOPPED";
   }
 
@@ -88,7 +94,10 @@ export class ApplicationLifecycle {
     await this.shutdown();
   }
 
-  private async drain(stage: "polling" | "background" | "backup" | "server", operation: () => Promise<void>): Promise<void> {
+  private async drain(
+    stage: "polling" | "background" | "backup" | "server",
+    operation: () => Promise<void>
+  ): Promise<void> {
     try {
       await operation();
     } catch (error) {

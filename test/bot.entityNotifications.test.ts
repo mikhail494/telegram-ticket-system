@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { Update } from "grammy/types";
 import type { EntityNotificationProvider } from "../src/entityNotifications.js";
-import { processEntityNotificationEvent, createEntityNotificationProviderRegistry } from "../src/entityNotifications.js";
+import {
+  processEntityNotificationEvent,
+  createEntityNotificationProviderRegistry,
+} from "../src/entityNotifications.js";
 import { TEST_STAFF_CHAT_ID, createBotHarness, type BotHarness } from "./helpers/botHarness.js";
 
 const TARGET_CHAT_ID = -100811;
@@ -12,7 +15,7 @@ const EVENT = {
   entity_id: "quest-456",
   event_type: "created",
   observed_at: "2026-07-30T18:00:00Z",
-  payload: { title: "New quest", canonicalLink: "https://example.com/quest-456" }
+  payload: { title: "New quest", canonicalLink: "https://example.com/quest-456" },
 };
 
 const harnesses: BotHarness[] = [];
@@ -22,12 +25,17 @@ afterEach(() => {
 });
 
 function provider(available = true): EntityNotificationProvider {
-  return { key: "fixture_test", authoritative: true, isAvailable: () => available, status: () => available ? "available" : "unavailable" };
+  return {
+    key: "fixture_test",
+    authoritative: true,
+    isAvailable: () => available,
+    status: () => (available ? "available" : "unavailable"),
+  };
 }
 
 function createHarness(available = true): BotHarness {
   const harness = createBotHarness({
-    entityNotificationProviders: createEntityNotificationProviderRegistry([provider(available)])
+    entityNotificationProviders: createEntityNotificationProviderRegistry([provider(available)]),
   });
   harnesses.push(harness);
   return harness;
@@ -40,15 +48,21 @@ function command(text: string, chatId = TEST_STAFF_CHAT_ID): Update {
       message_id: 8000,
       date: 1,
       from: { id: 42, is_bot: false, first_name: "Staff", username: "staff" },
-      chat: chatId === TEST_STAFF_CHAT_ID ? { id: chatId, type: "supergroup", title: "Staff" } : { id: chatId, type: "private", first_name: "User" },
+      chat:
+        chatId === TEST_STAFF_CHAT_ID
+          ? { id: chatId, type: "supergroup", title: "Staff" }
+          : { id: chatId, type: "private", first_name: "User" },
       text,
-      entities: [{ offset: 0, length: text.split(" ")[0]?.length ?? text.length, type: "bot_command" }]
-    }
+      entities: [{ offset: 0, length: text.split(" ")[0]?.length ?? text.length, type: "bot_command" }],
+    },
   };
 }
 
 function mockReachableTarget(harness: BotHarness): void {
-  harness.setApiResponseOverride("getChat", () => ({ ok: true, result: { id: TARGET_CHAT_ID, type: "supergroup", title: "Public Announcements" } }));
+  harness.setApiResponseOverride("getChat", () => ({
+    ok: true,
+    result: { id: TARGET_CHAT_ID, type: "supergroup", title: "Public Announcements" },
+  }));
 }
 
 describe("/questnotify controls", () => {
@@ -83,7 +97,9 @@ describe("/questnotify controls", () => {
     assert.equal(unknown.db.getSetting("entity_notifications:provider"), undefined);
 
     const nonAuthoritative = createBotHarness({
-      entityNotificationProviders: createEntityNotificationProviderRegistry([{ key: "fixture_test", authoritative: false, isAvailable: () => true }])
+      entityNotificationProviders: createEntityNotificationProviderRegistry([
+        { key: "fixture_test", authoritative: false, isAvailable: () => true },
+      ]),
     });
     harnesses.push(nonAuthoritative);
     await nonAuthoritative.bot.handleUpdate(command("/questnotify provider fixture_test"));
@@ -113,11 +129,17 @@ describe("/questnotify controls", () => {
       enabled: true,
       targetChatId: TARGET_CHAT_ID,
       providerKey: "fixture_test",
-      providers: createEntityNotificationProviderRegistry([provider()])
+      providers: createEntityNotificationProviderRegistry([provider()]),
     });
     assert.equal(result.status, "PUBLISHED");
-    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TARGET_CHAT_ID).length, 1);
-    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID), false);
+    assert.equal(
+      harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TARGET_CHAT_ID).length,
+      1
+    );
+    assert.equal(
+      harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID),
+      false
+    );
     assert.equal(harness.db.listMessagesChronological(1).length, 0);
   });
 
@@ -128,13 +150,24 @@ describe("/questnotify controls", () => {
     await harness.bot.handleUpdate(command("/questnotify provider fixture_test"));
     await harness.bot.handleUpdate(command("/questnotify enable"));
     const first = await processEntityNotificationEvent(harness.bot.api, harness.db, EVENT, {
-      enabled: true, targetChatId: TARGET_CHAT_ID, providerKey: "fixture_test", providers: createEntityNotificationProviderRegistry([provider()])
+      enabled: true,
+      targetChatId: TARGET_CHAT_ID,
+      providerKey: "fixture_test",
+      providers: createEntityNotificationProviderRegistry([provider()]),
     });
     assert.equal(first.status, "PUBLISHED");
     await harness.bot.handleUpdate(command("/questnotify disable"));
-    const second = await processEntityNotificationEvent(harness.bot.api, harness.db, { ...EVENT, entity_id: "quest-disabled" }, {
-      enabled: false, targetChatId: TARGET_CHAT_ID, providerKey: "fixture_test", providers: createEntityNotificationProviderRegistry([provider()])
-    });
+    const second = await processEntityNotificationEvent(
+      harness.bot.api,
+      harness.db,
+      { ...EVENT, entity_id: "quest-disabled" },
+      {
+        enabled: false,
+        targetChatId: TARGET_CHAT_ID,
+        providerKey: "fixture_test",
+        providers: createEntityNotificationProviderRegistry([provider()]),
+      }
+    );
     assert.equal(second.status, "DISABLED");
     assert.equal(harness.db.getSetting("entity_notifications:provider"), "fixture_test");
   });
@@ -145,7 +178,10 @@ describe("/questnotify controls", () => {
     assert.match(String(harness.findApiCalls("sendMessage").at(-1)?.payload.text), /target|provider|enable|disable/i);
     await harness.bot.handleUpdate(command("/questnotify target 123", 999));
     assert.equal(harness.db.getSetting("entity_notifications:target_chat_id"), undefined);
-    await harness.bot.handleUpdate({ ...command("/help", 999), message: { ...command("/help", 999).message!, chat: { id: 999, type: "private", first_name: "User" } } });
+    await harness.bot.handleUpdate({
+      ...command("/help", 999),
+      message: { ...command("/help", 999).message!, chat: { id: 999, type: "private", first_name: "User" } },
+    });
     assert.doesNotMatch(String(harness.findApiCalls("sendMessage").at(-1)?.payload.text), /questnotify/i);
   });
 });

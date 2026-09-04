@@ -9,7 +9,7 @@ import {
   createBotHarness,
   type BotHarness,
   type RecordedApiCall,
-  type StaffMediaType
+  type StaffMediaType,
 } from "./helpers/botHarness.js";
 
 const harnesses: BotHarness[] = [];
@@ -33,13 +33,15 @@ function userSendMessages(harness: BotHarness, userId = TEST_USER_ID): RecordedA
 }
 
 function assertFailureNotice(harness: BotHarness, ticketId: number, messageThreadId: number): void {
-  const notices = harness.findApiCalls("sendMessage").filter(
-    (call) =>
-      call.payload.chat_id === TEST_STAFF_CHAT_ID &&
-      call.payload.message_thread_id === messageThreadId &&
-      typeof call.payload.text === "string" &&
-      call.payload.text.toLowerCase().includes(`ticket #${ticketId}`)
-  );
+  const notices = harness
+    .findApiCalls("sendMessage")
+    .filter(
+      (call) =>
+        call.payload.chat_id === TEST_STAFF_CHAT_ID &&
+        call.payload.message_thread_id === messageThreadId &&
+        typeof call.payload.text === "string" &&
+        call.payload.text.toLowerCase().includes(`ticket #${ticketId}`)
+    );
 
   assert.equal(notices.length, 1);
 }
@@ -52,8 +54,8 @@ function buildStaffTextUpdateWithoutTopic(text: string): Update {
       date: 1,
       from: { id: 42, is_bot: false, first_name: "Test Staff", username: "test_staff" },
       chat: { id: TEST_STAFF_CHAT_ID, type: "supergroup", title: "Test Staff Chat" },
-      text
-    }
+      text,
+    },
   };
 }
 
@@ -66,8 +68,8 @@ function buildUnsupportedStaffMessageUpdate(): Update {
       from: { id: 42, is_bot: false, first_name: "Test Staff", username: "test_staff" },
       chat: { id: TEST_STAFF_CHAT_ID, type: "supergroup", title: "Test Staff Chat" },
       message_thread_id: 5000,
-      location: { latitude: 0, longitude: 0 }
-    }
+      location: { latitude: 0, longitude: 0 },
+    },
   };
 }
 
@@ -122,14 +124,14 @@ describe("Staff ticket replies", () => {
       type: "photo" as StaffMediaType,
       fileId: "photo-file",
       fileName: undefined,
-      caption: "Photo evidence"
+      caption: "Photo evidence",
     },
     {
       type: "document" as StaffMediaType,
       fileId: "document-file",
       fileName: "evidence.pdf",
-      caption: "Document evidence"
-    }
+      caption: "Document evidence",
+    },
   ]) {
     it(`copies and records a ${mediaCase.type} reply`, async () => {
       const harness = createHarness();
@@ -141,7 +143,7 @@ describe("Staff ticket replies", () => {
           fileId: mediaCase.fileId,
           fileName: mediaCase.fileName,
           messageId: 7010,
-          text: mediaCase.caption
+          text: mediaCase.caption,
         })
       );
 
@@ -170,12 +172,12 @@ describe("Staff ticket replies", () => {
   for (const replyCase of [
     {
       name: "text",
-      update: () => buildStaffTextMessageUpdate({ text: "Closed ticket reply" })
+      update: () => buildStaffTextMessageUpdate({ text: "Closed ticket reply" }),
     },
     {
       name: "media",
-      update: () => buildStaffMediaMessageUpdate({ mediaType: "photo", text: "Closed photo" })
-    }
+      update: () => buildStaffMediaMessageUpdate({ mediaType: "photo", text: "Closed photo" }),
+    },
   ]) {
     it(`does not deliver or record ${replyCase.name} replies for closed tickets`, async () => {
       const harness = createHarness();

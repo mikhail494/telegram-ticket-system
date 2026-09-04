@@ -33,7 +33,7 @@ function createReplyAndClosePackage(
     createdAt,
     selectionMode: "all_active",
     ticketCount: tickets.length,
-    items: tickets.map((ticket) => ({ ticketId: ticket.id, snapshotToken: `snapshot_${ticket.id}` }))
+    items: tickets.map((ticket) => ({ ticketId: ticket.id, snapshotToken: `snapshot_${ticket.id}` })),
   });
   db.createTicketBatchAnswerPackage({
     answerPackageId,
@@ -45,12 +45,17 @@ function createReplyAndClosePackage(
       ticket_id: ticket.id,
       snapshot_token: `snapshot_${ticket.id}`,
       action: "reply_and_close" as const,
-      reply_text: `Synthetic reply ${ticket.id}`
-    }))
+      reply_text: `Synthetic reply ${ticket.id}`,
+    })),
   });
 }
 
-function recordConfirmedReply(db: SupportDatabase, answerPackageId: string, ticket: TicketWithUser, messageId: number): void {
+function recordConfirmedReply(
+  db: SupportDatabase,
+  answerPackageId: string,
+  ticket: TicketWithUser,
+  messageId: number
+): void {
   db.addMessage({
     ticketId: ticket.id,
     direction: "STAFF_TO_USER",
@@ -58,11 +63,11 @@ function recordConfirmedReply(db: SupportDatabase, answerPackageId: string, tick
     deliveryMessageId: messageId,
     senderType: "STAFF",
     senderDisplayName: "Synthetic Staff",
-    text: `Synthetic reply ${ticket.id}`
+    text: `Synthetic reply ${ticket.id}`,
   });
   db.updateTicketBatchAnswerItem(answerPackageId, ticket.id, "STAFF_SYNC_PENDING", {
     deliveryMessageId: messageId,
-    applied: true
+    applied: true,
   });
 }
 
@@ -83,14 +88,26 @@ describe("reply_and_close post-delivery recovery", () => {
     const restarted = harness({ databasePath });
     await restarted.bot.recoverPendingTicketBatchStaffOperations();
 
-    assert.equal(restarted.findApiCalls("sendMessage").some((call) =>
-      call.payload.chat_id === ticket.user_telegram_id && call.payload.text === `Synthetic reply ${ticket.id}`
-    ), false);
-    assert.equal(restarted.findApiCalls("sendMessage").filter((call) =>
-      call.payload.chat_id === TEST_STAFF_CHAT_ID
-        && call.payload.message_thread_id === ticket.message_thread_id
-        && String(call.payload.text).includes("Batch reply sent to user")
-    ).length, 1);
+    assert.equal(
+      restarted
+        .findApiCalls("sendMessage")
+        .some(
+          (call) =>
+            call.payload.chat_id === ticket.user_telegram_id && call.payload.text === `Synthetic reply ${ticket.id}`
+        ),
+      false
+    );
+    assert.equal(
+      restarted
+        .findApiCalls("sendMessage")
+        .filter(
+          (call) =>
+            call.payload.chat_id === TEST_STAFF_CHAT_ID &&
+            call.payload.message_thread_id === ticket.message_thread_id &&
+            String(call.payload.text).includes("Batch reply sent to user")
+        ).length,
+      1
+    );
     assert.equal(restarted.db.getTicket(ticket.id)?.status, "CLOSED");
     assert.ok(restarted.db.getTicket(ticket.id)?.archived_at);
     assert.equal(restarted.db.listTicketBatchAnswerItems("restart_recovery")[0]?.state, "COMPLETED");
@@ -102,17 +119,25 @@ describe("reply_and_close post-delivery recovery", () => {
     await restarted.bot.recoverPendingTicketBatchStaffOperations();
     assert.equal(restarted.countApiCalls("sendDocument"), 0);
     assert.equal(restarted.countApiCalls("deleteForumTopic"), 0);
-    assert.equal(restarted.findApiCalls("sendMessage").some((call) =>
-      call.payload.chat_id === ticket.user_telegram_id && call.payload.text === `Synthetic reply ${ticket.id}`
-    ), false);
+    assert.equal(
+      restarted
+        .findApiCalls("sendMessage")
+        .some(
+          (call) =>
+            call.payload.chat_id === ticket.user_telegram_id && call.payload.text === `Synthetic reply ${ticket.id}`
+        ),
+      false
+    );
   });
 
   it("normalizes sixteen already closed and archived items without duplicate Telegram work", async () => {
     const current = harness();
-    const tickets = Array.from({ length: 16 }, (_, index) => current.seedTicket({
-      user: { id: 4200 + index },
-      messageThreadId: 74200 + index
-    }));
+    const tickets = Array.from({ length: 16 }, (_, index) =>
+      current.seedTicket({
+        user: { id: 4200 + index },
+        messageThreadId: 74200 + index,
+      })
+    );
     createReplyAndClosePackage(current.db, "sixteen_reconciliation", tickets);
 
     for (const [index, ticket] of tickets.entries()) {
@@ -120,12 +145,12 @@ describe("reply_and_close post-delivery recovery", () => {
       current.db.recordTicketBatchTopicEcho("sixteen_reconciliation", ticket.id, "SENT", {
         chatId: TEST_STAFF_CHAT_ID,
         threadId: ticket.message_thread_id,
-        messageId: 9900 + index
+        messageId: 9900 + index,
       });
       current.db.closeTicketRecord(ticket.id, {
         type: "STAFF",
         displayName: "Synthetic Staff",
-        username: "synthetic_staff"
+        username: "synthetic_staff",
       });
       current.db.markTicketArchivedAndDeleteMessages(ticket.id, 10_000 + index, 11_000 + index);
     }
@@ -134,8 +159,14 @@ describe("reply_and_close post-delivery recovery", () => {
 
     await current.bot.recoverPendingTicketBatchStaffOperations();
 
-    assert.equal(current.db.listTicketBatchAnswerItems("sixteen_reconciliation").every((item) => item.state === "COMPLETED"), true);
-    assert.equal(current.db.getTicketBatchAnswerPackage("sixteen_reconciliation", TEST_STAFF_CHAT_ID)?.status, "COMPLETED");
+    assert.equal(
+      current.db.listTicketBatchAnswerItems("sixteen_reconciliation").every((item) => item.state === "COMPLETED"),
+      true
+    );
+    assert.equal(
+      current.db.getTicketBatchAnswerPackage("sixteen_reconciliation", TEST_STAFF_CHAT_ID)?.status,
+      "COMPLETED"
+    );
     assert.equal(current.countApiCalls("sendMessage"), 0);
     assert.equal(current.countApiCalls("sendDocument"), 0);
     assert.equal(current.countApiCalls("deleteForumTopic"), 0);
@@ -150,23 +181,32 @@ describe("reply_and_close post-delivery recovery", () => {
     current.db.recordTicketBatchTopicEcho("closed_archive_pending", ticket.id, "SENT", {
       chatId: TEST_STAFF_CHAT_ID,
       threadId: ticket.message_thread_id,
-      messageId: 9921
+      messageId: 9921,
     });
     current.db.closeTicketRecord(ticket.id, {
       type: "STAFF",
       displayName: "Synthetic Staff",
-      username: "synthetic_staff"
+      username: "synthetic_staff",
     });
     current.db.finalizeTicketBatchAnswerPackage("closed_archive_pending", TEST_STAFF_CHAT_ID);
     current.clearApiCalls();
 
     await current.bot.recoverPendingTicketBatchStaffOperations();
 
-    assert.equal(current.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
-    assert.equal(current.findApiCalls("sendMessage").some((call) =>
-      call.payload.message_thread_id === ticket.message_thread_id
-        && String(call.payload.text).includes("Batch reply sent to user")
-    ), false);
+    assert.equal(
+      current.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id),
+      false
+    );
+    assert.equal(
+      current
+        .findApiCalls("sendMessage")
+        .some(
+          (call) =>
+            call.payload.message_thread_id === ticket.message_thread_id &&
+            String(call.payload.text).includes("Batch reply sent to user")
+        ),
+      false
+    );
     assert.equal(current.countApiCalls("sendDocument"), 1);
     assert.equal(current.countApiCalls("deleteForumTopic"), 1);
     assert.ok(current.db.getTicket(ticket.id)?.archived_at);
@@ -179,22 +219,25 @@ describe("reply_and_close post-delivery recovery", () => {
     createReplyAndClosePackage(current.db, "summary_stages", [ticket]);
     recordConfirmedReply(current.db, "summary_stages", ticket, 8951);
     current.db.recordTicketBatchTopicEcho("summary_stages", ticket.id, "TERMINAL_FAILED", {
-      lastError: "TELEGRAM_BAD_REQUEST"
+      lastError: "TELEGRAM_BAD_REQUEST",
     });
     current.db.claimTicketBatchAnswerPackage("summary_stages", TEST_STAFF_CHAT_ID);
     current.db.finalizeTicketBatchAnswerPackage("summary_stages", TEST_STAFF_CHAT_ID);
     current.db.queueTicketBatchFinalSummary("summary_stages", TEST_STAFF_CHAT_ID, {
       text: "stale summary",
-      chatId: TEST_STAFF_CHAT_ID
+      chatId: TEST_STAFF_CHAT_ID,
     });
 
     await current.bot.recoverPendingTicketBatchStaffOperations();
 
-    const summary = current.findApiCalls("sendMessage").find((call) =>
-      call.payload.chat_id === TEST_STAFF_CHAT_ID
-        && call.payload.message_thread_id === undefined
-        && String(call.payload.text).includes("Delivered replies: 1")
-    );
+    const summary = current
+      .findApiCalls("sendMessage")
+      .find(
+        (call) =>
+          call.payload.chat_id === TEST_STAFF_CHAT_ID &&
+          call.payload.message_thread_id === undefined &&
+          String(call.payload.text).includes("Delivered replies: 1")
+      );
     assert.ok(summary);
     assert.match(String(summary.payload.text), /Staff echoes terminal failures: 1/);
     assert.match(String(summary.payload.text), /Tickets closed: 0/);
@@ -213,24 +256,27 @@ describe("reply_and_close post-delivery recovery", () => {
     current.db.recordTicketBatchTopicEcho("concurrent_recovery", ticket.id, "SENT", {
       chatId: TEST_STAFF_CHAT_ID,
       threadId: ticket.message_thread_id,
-      messageId: 9961
+      messageId: 9961,
     });
     current.db.closeTicketRecord(ticket.id, {
       type: "STAFF",
       displayName: "Synthetic Staff",
-      username: "synthetic_staff"
+      username: "synthetic_staff",
     });
     current.db.finalizeTicketBatchAnswerPackage("concurrent_recovery", TEST_STAFF_CHAT_ID);
     current.clearApiCalls();
 
     await Promise.all([
       current.bot.recoverPendingTicketBatchStaffOperations(),
-      current.bot.recoverPendingTicketBatchStaffOperations()
+      current.bot.recoverPendingTicketBatchStaffOperations(),
     ]);
 
     assert.equal(current.countApiCalls("sendDocument"), 1);
     assert.equal(current.countApiCalls("deleteForumTopic"), 1);
-    assert.equal(current.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(
+      current.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id),
+      false
+    );
     assert.equal(current.db.listTicketBatchAnswerItems("concurrent_recovery")[0]?.state, "COMPLETED");
   });
 
@@ -240,12 +286,12 @@ describe("reply_and_close post-delivery recovery", () => {
     createReplyAndClosePackage(current.db, "closed_pending_echo", [ticket]);
     recordConfirmedReply(current.db, "closed_pending_echo", ticket, 8971);
     current.db.recordTicketBatchTopicEcho("closed_pending_echo", ticket.id, "FAILED", {
-      nextRetryAt: "2020-01-01T00:00:00.000Z"
+      nextRetryAt: "2020-01-01T00:00:00.000Z",
     });
     current.db.closeTicketRecord(ticket.id, {
       type: "STAFF",
       displayName: "Synthetic Staff",
-      username: "synthetic_staff"
+      username: "synthetic_staff",
     });
     current.db.finalizeTicketBatchAnswerPackage("closed_pending_echo", TEST_STAFF_CHAT_ID);
     current.clearApiCalls();
@@ -256,11 +302,20 @@ describe("reply_and_close post-delivery recovery", () => {
     assert.equal(item?.topic_echo_state, "NOT_REQUIRED");
     assert.equal(item?.state, "COMPLETED");
     assert.equal(current.countApiCalls("sendDocument"), 1);
-    assert.equal(current.findApiCalls("sendMessage").some((call) =>
-      call.payload.message_thread_id === ticket.message_thread_id
-        && String(call.payload.text).includes("Batch reply sent to user")
-    ), false);
-    assert.equal(current.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(
+      current
+        .findApiCalls("sendMessage")
+        .some(
+          (call) =>
+            call.payload.message_thread_id === ticket.message_thread_id &&
+            String(call.payload.text).includes("Batch reply sent to user")
+        ),
+      false
+    );
+    assert.equal(
+      current.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id),
+      false
+    );
   });
 
   it("persists archive retry_after and does not retry continuation before it is due", async () => {
@@ -271,14 +326,14 @@ describe("reply_and_close post-delivery recovery", () => {
     current.db.recordTicketBatchTopicEcho("archive_retry_after", ticket.id, "SENT", {
       chatId: TEST_STAFF_CHAT_ID,
       threadId: ticket.message_thread_id,
-      messageId: 9981
+      messageId: 9981,
     });
     current.db.finalizeTicketBatchAnswerPackage("archive_retry_after", TEST_STAFF_CHAT_ID);
     current.setApiResponseOverride("sendDocument", () => ({
       ok: false,
       error_code: 429,
       description: "Too Many Requests",
-      parameters: { retry_after: 120 }
+      parameters: { retry_after: 120 },
     }));
 
     await current.bot.recoverPendingTicketBatchStaffOperations();
@@ -296,11 +351,14 @@ describe("reply_and_close post-delivery recovery", () => {
     assert.equal(current.db.getTicket(ticket.id)?.archived_at, null);
 
     current.db.recordTicketBatchTopicEcho("archive_retry_after", ticket.id, "SENT", {
-      nextRetryAt: "2020-01-01T00:00:00.000Z"
+      nextRetryAt: "2020-01-01T00:00:00.000Z",
     });
     await current.bot.recoverPendingTicketBatchStaffOperations();
     assert.equal(current.countApiCalls("sendDocument"), 1);
     assert.ok(current.db.getTicket(ticket.id)?.archived_at);
-    assert.equal(current.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(
+      current.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id),
+      false
+    );
   });
 });

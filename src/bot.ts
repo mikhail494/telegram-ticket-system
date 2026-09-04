@@ -10,7 +10,7 @@ import {
   logBanEvent,
   setSupportLogsTopicOverride,
   type SupportLogsTopicInfo,
-  type ArchiveActor
+  type ArchiveActor,
 } from "./archive.js";
 import { config, hostConfig, setRuntimeStaffChatId } from "./config.js";
 import {
@@ -21,7 +21,7 @@ import {
   type TicketWithUser,
   type TeamMemberRecord,
   type LanguageModerationUserState,
-  type LanguageModerationViolation
+  type LanguageModerationViolation,
 } from "./db.js";
 import {
   CLOSED_TEXT,
@@ -40,7 +40,7 @@ import {
   formatUserTicketList,
   SUPPORT_RESPONSE_TIME_PLACEHOLDER,
   truncate,
-  validateRenderedSupportAcknowledgement
+  validateRenderedSupportAcknowledgement,
 } from "./format.js";
 import { logger } from "./logger.js";
 import { createQuickRepliesManager, type QuickRepliesRegistry } from "./quickReplies.js";
@@ -55,43 +55,39 @@ import {
   getTicketSnapshotToken,
   parseAndValidateAnswerPackage,
   type TicketAnswerPackage,
-  type TicketBatchAttachmentDownloadResult
+  type TicketBatchAttachmentDownloadResult,
 } from "./ticketBatch.js";
-import {
-  displayTelegramUser,
-  getMessageContent,
-  isCommandText,
-  usernameOf
-} from "./telegram.js";
+import { displayTelegramUser, getMessageContent, isCommandText, usernameOf } from "./telegram.js";
 import {
   classifyEnglishOnlyMessage,
   parseModerationConfig,
   scheduleModerationCleanup,
-  type ModerationCleanupScheduler
+  type ModerationCleanupScheduler,
 } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
 import {
   formatDeliveryFailureCategory,
   normalizeTelegramDeliveryError,
-  type NormalizedDeliveryError
+  type NormalizedDeliveryError,
 } from "./deliveryDiagnostics.js";
 import { StaffChatDeliveryCoordinator, type StaffChatDeliveryOptions } from "./staffChatDelivery.js";
 import { InstallationService, type Permission } from "./installation.js";
 import { BackgroundTaskRegistry, type BackgroundTaskTracker } from "./lifecycle.js";
 import { SupportIngressLimiter, type SupportIngressDecision } from "./supportIngressLimiter.js";
-import { formatWorkspaceChecklist, isPrivateInviteLink, parsePublicSupergroupReference, validateStaffWorkspace, type WorkspaceValidationResult } from "./workspaceValidation.js";
 import {
-  formatPublicChatPermissionChecklist,
-  validatePublicModerationChat
-} from "./publicChatModeration.js";
-import {
-  PrivateControlPlane,
-  type PublicChatConfigurationField
-} from "./privateControlPlane.js";
+  formatWorkspaceChecklist,
+  isPrivateInviteLink,
+  parsePublicSupergroupReference,
+  validateStaffWorkspace,
+  type WorkspaceValidationResult,
+} from "./workspaceValidation.js";
+import { formatPublicChatPermissionChecklist, validatePublicModerationChat } from "./publicChatModeration.js";
+import { PrivateControlPlane, type PublicChatConfigurationField } from "./privateControlPlane.js";
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
-const SUPPORT_INGRESS_THROTTLED_TEXT = "You're sending messages too quickly.\n\nSome recent messages were not added to your ticket. Please wait a few seconds, then resend anything that did not go through.";
+const SUPPORT_INGRESS_THROTTLED_TEXT =
+  "You're sending messages too quickly.\n\nSome recent messages were not added to your ticket. Please wait a few seconds, then resend anything that did not go through.";
 const DEFAULT_BAN_REASON = "No reason provided.";
 const STAFF_HELP_SENT_SETTING_PREFIX = "staff_help_sent";
 const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
@@ -104,9 +100,26 @@ const STAFF_TEST_TICKET_MODE_SETTING_PREFIX = "staff_test_ticket_mode:";
 const STAFF_TEST_TICKET_ID_SETTING_PREFIX = "staff_test_ticket_id:";
 export const TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query", "chat_member", "message_reaction"] as const;
 const ORDINARY_MODERATION_MESSAGE_FIELDS = [
-  "text", "rich_message", "animation", "audio", "document", "live_photo", "paid_media", "photo",
-  "sticker", "story", "video", "video_note", "voice", "contact", "dice", "game", "poll", "venue",
-  "location", "checklist"
+  "text",
+  "rich_message",
+  "animation",
+  "audio",
+  "document",
+  "live_photo",
+  "paid_media",
+  "photo",
+  "sticker",
+  "story",
+  "video",
+  "video_note",
+  "voice",
+  "contact",
+  "dice",
+  "game",
+  "poll",
+  "venue",
+  "location",
+  "checklist",
 ] as const satisfies readonly (keyof Message)[];
 type ModerationReactionEmoji = "\u{1F440}" | "\u{1F621}";
 const MODERATION_STRIKE_REACTION: ModerationReactionEmoji = "\u{1F440}";
@@ -127,7 +140,7 @@ const USER_HELP_TEXT = [
   "/start - show the initial instructions",
   "/status - show your latest ticket status",
   "/mytickets - show your recent tickets",
-  "/help - show this help"
+  "/help - show this help",
 ].join("\n");
 
 const STAFF_HELP_TEXT = [
@@ -160,7 +173,7 @@ const STAFF_HELP_TEXT = [
   "/moderation <subcommand> - configure public English-only moderation",
   "/questnotify <subcommand> - configure new-entity notifications",
   "",
-  "OWNER/ADMIN setup, team invitations, and role-based access are managed from the private staff dashboard."
+  "OWNER/ADMIN setup, team invitations, and role-based access are managed from the private staff dashboard.",
 ].join("\n");
 
 const STAFF_ONBOARDING_TEXT = [
@@ -183,7 +196,7 @@ const STAFF_ONBOARDING_TEXT = [
   "Run /setlogs inside any topic to make it Support Logs.",
   "Run /logs to show or create the current Support Logs topic.",
   "",
-  "This onboarding message is sent only once per STAFF_CHAT_ID."
+  "This onboarding message is sent only once per STAFF_CHAT_ID.",
 ].join("\n");
 
 type BotApi = Context["api"];
@@ -248,22 +261,25 @@ export function createBot(
   const bot = new Bot<Context>(config.botToken);
   const installation = runtime.installationService ?? new InstallationService(db);
   if (!runtime.installationService && !installation.getActiveWorkspace()) {
-    if (hostConfig.staffChatId !== null) { installation.adoptLegacyInstallation(hostConfig.staffChatId); setRuntimeStaffChatId(hostConfig.staffChatId); }
+    if (hostConfig.staffChatId !== null) {
+      installation.adoptLegacyInstallation(hostConfig.staffChatId);
+      setRuntimeStaffChatId(hostConfig.staffChatId);
+    }
   }
   installationServicesByApi.set(bot.api, installation);
   bot.use(async (ctx, next) => {
     installationServicesByContext.set(ctx, installation);
     if (
-      ctx.from
-      && !ctx.from.is_bot
-      && installation.getState().setupState === "READY"
-      && ctx.chat?.id === installation.getStaffChatId()
+      ctx.from &&
+      !ctx.from.is_bot &&
+      installation.getState().setupState === "READY" &&
+      ctx.chat?.id === installation.getStaffChatId()
     ) {
       installation.ensureBaselineAgent({
         telegramId: ctx.from.id,
         username: ctx.from.username,
         firstName: ctx.from.first_name,
-        lastName: ctx.from.last_name
+        lastName: ctx.from.last_name,
       });
     }
     await next();
@@ -272,8 +288,10 @@ export function createBot(
   const moderationNow = runtime.now ?? (() => new Date());
   const backgroundTasks = runtime.backgroundTasks ?? new BackgroundTaskRegistry();
   const supportIngressLimiter = runtime.supportIngressLimiter ?? new SupportIngressLimiter();
-  const moderationCleanupScheduler = runtime.scheduleModerationCleanup ?? ((api, moderationDb, jobId, delayMs) =>
-    scheduleModerationCleanup(api, moderationDb, jobId, delayMs, undefined, backgroundTasks));
+  const moderationCleanupScheduler =
+    runtime.scheduleModerationCleanup ??
+    ((api, moderationDb, jobId, delayMs) =>
+      scheduleModerationCleanup(api, moderationDb, jobId, delayMs, undefined, backgroundTasks));
   const entityNotificationProviders = runtime.entityNotificationProviders ?? new Map();
   const runningTicketBatchExports = new Set<number>();
   const staffChatDelivery = new StaffChatDeliveryCoordinator(runtime.staffChatDelivery);
@@ -285,8 +303,14 @@ export function createBot(
 
   const requirePermission = async (ctx: Context, permission: Permission): Promise<boolean> => {
     if (!isStaffChat(ctx) || !ctx.from) return false;
-    if (installation.getState().authorizationMode === "LEGACY_TRUSTED_GROUP" || installation.can(ctx.from.id, permission)) return true;
-    await ctx.reply(`Your application role does not allow this action (${permission.toLowerCase().replaceAll("_", " ")}).`);
+    if (
+      installation.getState().authorizationMode === "LEGACY_TRUSTED_GROUP" ||
+      installation.can(ctx.from.id, permission)
+    )
+      return true;
+    await ctx.reply(
+      `Your application role does not allow this action (${permission.toLowerCase().replaceAll("_", " ")}).`
+    );
     return false;
   };
 
@@ -305,16 +329,24 @@ export function createBot(
 
   const enrollBaselineStaffMember = (user: User | undefined): boolean => {
     if (!user || user.is_bot || installation.getState().setupState !== "READY") return false;
-    return installation.ensureBaselineAgent({
-      telegramId: user.id,
-      username: user.username,
-      firstName: user.first_name,
-      lastName: user.last_name
-    }) !== null;
+    return (
+      installation.ensureBaselineAgent({
+        telegramId: user.id,
+        username: user.username,
+        firstName: user.first_name,
+        lastName: user.last_name,
+      }) !== null
+    );
   };
 
   const enrollPrivateWorkspaceMember = async (ctx: Context): Promise<boolean> => {
-    if (!ctx.from || ctx.from.is_bot || installation.getMember(ctx.from.id) || installation.getState().setupState !== "READY") return Boolean(ctx.from && installation.getMember(ctx.from.id));
+    if (
+      !ctx.from ||
+      ctx.from.is_bot ||
+      installation.getMember(ctx.from.id) ||
+      installation.getState().setupState !== "READY"
+    )
+      return Boolean(ctx.from && installation.getMember(ctx.from.id));
     const staffChatId = installation.getStaffChatId();
     if (staffChatId === null) return false;
     try {
@@ -331,7 +363,7 @@ export function createBot(
       if (isPrivateChat(ctx)) await ctx.reply("Your application role does not allow this action.");
       return false;
     }
-    if (!await hasRequiredPrivateWorkspaceMembership(ctx)) {
+    if (!(await hasRequiredPrivateWorkspaceMembership(ctx))) {
       await ctx.reply("Staff workspace membership required for role-based access.");
       return false;
     }
@@ -349,7 +381,11 @@ export function createBot(
       if (!ctx.from) return;
       setStaffTestTicketId(ctx.from.id, undefined);
       db.setSetting(`${STAFF_TEST_TICKET_MODE_SETTING_PREFIX}${ctx.from.id}`, "true");
-      await privateControlPlane.refreshScreen(ctx, "Test-ticket mode enabled for your next message. Send harmless test content now.", new InlineKeyboard().text("Cancel", "dashboard:home"));
+      await privateControlPlane.refreshScreen(
+        ctx,
+        "Test-ticket mode enabled for your next message. Send harmless test content now.",
+        new InlineKeyboard().text("Cancel", "dashboard:home")
+      );
     },
     onShowWorkspace: (ctx) => showStaffWorkspaceSettings(ctx),
     onShowBatch: async (ctx) => {
@@ -360,11 +396,14 @@ export function createBot(
     },
     packageVersion: packageMetadata.version,
     botUsername: () => bot.botInfo?.username,
-    botId: () => bot.botInfo?.id
+    botId: () => bot.botInfo?.id,
   });
 
   class StaffOnlyDeliveryError extends Error {
-    constructor(readonly diagnostic: NormalizedDeliveryError, readonly retryAt: string | null) {
+    constructor(
+      readonly diagnostic: NormalizedDeliveryError,
+      readonly retryAt: string | null
+    ) {
       super(diagnostic.category);
     }
   }
@@ -372,7 +411,10 @@ export function createBot(
   async function runStaffChatOperation<T>(operation: () => Promise<T>, chatId = config.staffChatId): Promise<T> {
     const outcome = await staffChatDelivery.run(chatId, operation);
     if (outcome.value !== undefined) return outcome.value;
-    throw new StaffOnlyDeliveryError(outcome.diagnostic ?? normalizeTelegramDeliveryError(new Error("Staff operation failed")), outcome.retryAt);
+    throw new StaffOnlyDeliveryError(
+      outcome.diagnostic ?? normalizeTelegramDeliveryError(new Error("Staff operation failed")),
+      outcome.retryAt
+    );
   }
 
   async function deliverAndRecordStaffTextReply(
@@ -398,7 +440,7 @@ export function createBot(
       text,
       mediaType: null,
       filename: null,
-      fileId: null
+      fileId: null,
     });
     return sent.message_id;
   }
@@ -407,7 +449,12 @@ export function createBot(
     ticket: TicketWithUser,
     item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]
   ): Promise<void> {
-    if (item.topic_echo_state === "SENT" || item.topic_echo_state === "NOT_REQUIRED" || item.topic_echo_state === "TERMINAL_FAILED") return;
+    if (
+      item.topic_echo_state === "SENT" ||
+      item.topic_echo_state === "NOT_REQUIRED" ||
+      item.topic_echo_state === "TERMINAL_FAILED"
+    )
+      return;
     if (ticket.staff_chat_id !== config.staffChatId || ticket.message_thread_id === null) {
       throw new Error("Ticket topic is unavailable for batch echo.");
     }
@@ -418,30 +465,39 @@ export function createBot(
       db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
       return;
     }
-    const persistedItem = db.listTicketBatchAnswerItems(item.answer_package_id)
-      .find((candidate) => candidate.ticket_id === item.ticket_id) ?? item;
+    const persistedItem =
+      db
+        .listTicketBatchAnswerItems(item.answer_package_id)
+        .find((candidate) => candidate.ticket_id === item.ticket_id) ?? item;
     if (item.action !== "no_action" && !isConfirmedBatchReply(persistedItem)) {
       db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED", {
-        lastError: "Success echo is not applicable after an unconfirmed user delivery."
+        lastError: "Success echo is not applicable after an unconfirmed user delivery.",
       });
-      logger.warn({ answerPackageId: item.answer_package_id, ticketId: item.ticket_id }, "Skipped contradictory ticket batch success echo");
+      logger.warn(
+        { answerPackageId: item.answer_package_id, ticketId: item.ticket_id },
+        "Skipped contradictory ticket batch success echo"
+      );
       return;
     }
-    const lines = [item.action === "no_action" ? "ℹ️ Batch follow-up updated — no user message sent" : "✅ Batch reply sent to user"];
+    const lines = [
+      item.action === "no_action" ? "ℹ️ Batch follow-up updated — no user message sent" : "✅ Batch reply sent to user",
+    ];
     if (item.action !== "no_action" && item.reply_text) lines.push("", item.reply_text);
     if (item.follow_up_state !== "NONE") lines.push("", `Follow-up: ${formatFollowUpState(item.follow_up_state)}`);
     if (item.escalation_target !== "NONE") lines.push(`Escalation: ${formatEscalationTarget(item.escalation_target)}`);
     if (item.internal_note) lines.push(`Internal note: ${item.internal_note}`);
     let echoed: Awaited<ReturnType<typeof bot.api.sendMessage>>;
     try {
-      echoed = await runStaffChatOperation(() => bot.api.sendMessage(staffChatId, truncate(lines.join("\n"), 3500), { message_thread_id: threadId }));
+      echoed = await runStaffChatOperation(() =>
+        bot.api.sendMessage(staffChatId, truncate(lines.join("\n"), 3500), { message_thread_id: threadId })
+      );
     } catch (error) {
       throw error;
     }
     db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "SENT", {
       chatId: staffChatId,
       threadId,
-      messageId: echoed.message_id
+      messageId: echoed.message_id,
     });
   }
 
@@ -465,46 +521,56 @@ export function createBot(
         ? "⚠️ Batch delivery outcome is unknown"
         : "⚠️ Batch reply was not delivered",
       "",
-      `Category: ${formatDeliveryFailureCategory(diagnostic.category)}`
+      `Category: ${formatDeliveryFailureCategory(diagnostic.category)}`,
     ];
     if (diagnostic.telegramErrorCode !== null) lines.push(`Telegram code: ${diagnostic.telegramErrorCode}`);
     if (diagnostic.retryAfterSeconds !== null) lines.push(`Retry after: ${diagnostic.retryAfterSeconds}s`);
     lines.push("Action: Ticket remains open");
-    lines.push(diagnostic.category === "USER_BLOCKED_BOT" || diagnostic.category === "USER_DEACTIVATED"
-      ? "Next step: Contact is not possible until the user restores bot access."
-      : diagnostic.category === "CHAT_UNAVAILABLE"
-        ? "Next step: Verify that the user can receive bot messages before a controlled retry."
-        : diagnostic.permanence === "PERMANENT"
-          ? "Next step: Manual review required before a controlled retry."
-      : diagnostic.permanence === "TEMPORARY"
-        ? "Next step: Prepare a controlled retry later."
-        : "Next step: Do not resend automatically; manual review required.");
+    lines.push(
+      diagnostic.category === "USER_BLOCKED_BOT" || diagnostic.category === "USER_DEACTIVATED"
+        ? "Next step: Contact is not possible until the user restores bot access."
+        : diagnostic.category === "CHAT_UNAVAILABLE"
+          ? "Next step: Verify that the user can receive bot messages before a controlled retry."
+          : diagnostic.permanence === "PERMANENT"
+            ? "Next step: Manual review required before a controlled retry."
+            : diagnostic.permanence === "TEMPORARY"
+              ? "Next step: Prepare a controlled retry later."
+              : "Next step: Do not resend automatically; manual review required."
+    );
     let sent: Awaited<ReturnType<typeof bot.api.sendMessage>>;
     try {
-      sent = await runStaffChatOperation(() => bot.api.sendMessage(staffChatId, lines.join("\n"), {
-        message_thread_id: threadId
-      }));
+      sent = await runStaffChatOperation(() =>
+        bot.api.sendMessage(staffChatId, lines.join("\n"), {
+          message_thread_id: threadId,
+        })
+      );
     } catch (error) {
       const failure = batchStaffFailure(error);
       db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "FAILED", null, {
         nextRetryAt: staffNextRetryAt(error),
-        incrementAttempt: true
+        incrementAttempt: true,
       });
       scheduleTicketBatchStaffRecovery(failure.retryAt);
       throw error;
     }
-    db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "SENT", sent.message_id, { incrementAttempt: true });
+    db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "SENT", sent.message_id, {
+      incrementAttempt: true,
+    });
   }
 
-  function persistBatchFollowUp(ticket: TicketWithUser, item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]): void {
+  function persistBatchFollowUp(
+    ticket: TicketWithUser,
+    item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]
+  ): void {
     db.setTicketFollowUpContext(ticket.id, {
       followUpState: item.follow_up_state,
       internalNote: item.internal_note,
       escalationTarget: item.escalation_target,
-      sourceAnswerPackageId: item.answer_package_id
+      sourceAnswerPackageId: item.answer_package_id,
     });
     if (item.follow_up_state === "WAITING_USER") db.updateTicketStatus(ticket.id, "WAITING_USER");
-    else if (item.follow_up_state !== "NONE" && ticket.status !== "CLOSED") db.updateTicketStatus(ticket.id, "IN_PROGRESS");
+    else if (item.follow_up_state !== "NONE" && ticket.status !== "CLOSED")
+      db.updateTicketStatus(ticket.id, "IN_PROGRESS");
     else if (item.action !== "no_action" && ticket.status === "OPEN") db.updateTicketStatus(ticket.id, "IN_PROGRESS");
   }
 
@@ -513,11 +579,13 @@ export function createBot(
   }
 
   function isConfirmedBatchReply(item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]): boolean {
-    return item.action !== "no_action"
-      && item.delivery_message_id !== null
-      && item.delivery_error_category === null
-      && item.delivery_error_permanence === null
-      && item.delivery_failure_event_state !== "SENT";
+    return (
+      item.action !== "no_action" &&
+      item.delivery_message_id !== null &&
+      item.delivery_error_category === null &&
+      item.delivery_error_permanence === null &&
+      item.delivery_failure_event_state !== "SENT"
+    );
   }
 
   function quickRepliesCategoryKeyboard(ticketId: number): InlineKeyboard {
@@ -564,7 +632,7 @@ export function createBot(
     if (!isStaffChat(ctx)) {
       await ctx.answerCallbackQuery({
         text: "Quick Replies are available to staff only.",
-        show_alert: true
+        show_alert: true,
       });
       return null;
     }
@@ -593,9 +661,7 @@ export function createBot(
     const callbackMessage = ctx.callbackQuery?.message;
     const ticketMessageThreadId = ticket.message_thread_id;
     const callbackMessageThreadId =
-      callbackMessage && "message_thread_id" in callbackMessage
-        ? callbackMessage.message_thread_id
-        : undefined;
+      callbackMessage && "message_thread_id" in callbackMessage ? callbackMessage.message_thread_id : undefined;
 
     if (
       !callbackMessage ||
@@ -611,7 +677,7 @@ export function createBot(
       ticket,
       messageChatId: callbackMessage.chat.id,
       messageId: callbackMessage.message_id,
-      messageThreadId: ticketMessageThreadId
+      messageThreadId: ticketMessageThreadId,
     };
   }
 
@@ -639,7 +705,7 @@ export function createBot(
         ctx,
         {
           text: "Could not update Quick Replies.",
-          show_alert: true
+          show_alert: true,
         },
         "Could not answer failed Quick Replies callback"
       );
@@ -676,7 +742,7 @@ export function createBot(
       await runQuickRepliesCallbackOperation(ctx, "Quick replies opened.", async () => {
         await ctx.api.sendMessage(config.staffChatId, "Quick replies\nChoose a category:", {
           message_thread_id: target.messageThreadId,
-          reply_markup: quickRepliesCategoryKeyboard(target.ticket.id)
+          reply_markup: quickRepliesCategoryKeyboard(target.ticket.id),
         });
       });
       return;
@@ -685,7 +751,7 @@ export function createBot(
     if (action === "cancel") {
       await runQuickRepliesCallbackOperation(ctx, "Quick replies closed.", async () => {
         await ctx.api.editMessageReplyMarkup(target.messageChatId, target.messageId, {
-          reply_markup: undefined
+          reply_markup: undefined,
         });
       });
       return;
@@ -694,7 +760,7 @@ export function createBot(
     if (action === "back") {
       await runQuickRepliesCallbackOperation(ctx, "Quick replies opened.", async () => {
         await ctx.api.editMessageText(target.messageChatId, target.messageId, "Quick replies\nChoose a category:", {
-          reply_markup: quickRepliesCategoryKeyboard(target.ticket.id)
+          reply_markup: quickRepliesCategoryKeyboard(target.ticket.id),
         });
       });
       return;
@@ -718,7 +784,7 @@ export function createBot(
         );
         await ctx.answerCallbackQuery({
           text: "Could not send quick reply.",
-          show_alert: true
+          show_alert: true,
         });
         return;
       }
@@ -733,12 +799,9 @@ export function createBot(
       }
 
       try {
-        await ctx.api.editMessageText(
-          target.messageChatId,
-          target.messageId,
-          `Quick reply sent\n${template.title}`,
-          { reply_markup: undefined }
-        );
+        await ctx.api.editMessageText(target.messageChatId, target.messageId, `Quick reply sent\n${template.title}`, {
+          reply_markup: undefined,
+        });
       } catch (error) {
         logger.warn({ err: error, ticketId: target.ticket.id }, "Could not clean up Quick Replies menu");
       }
@@ -776,7 +839,7 @@ export function createBot(
         target.messageId,
         `Quick replies\n${category.title}\nChoose a reply:`,
         {
-          reply_markup: quickRepliesTemplateKeyboard(target.ticket.id, category.id, page)
+          reply_markup: quickRepliesTemplateKeyboard(target.ticket.id, category.id, page),
         }
       );
     });
@@ -831,20 +894,43 @@ export function createBot(
   }
 
   function privateBatchWaitingText(exportId: string, notice?: string): string {
-    return ["Waiting for answers", "", "Your ticket export is ready.", `Send the completed ticket-answers_${exportId}.json file here. Only a valid answer package for this export will continue.`, ...(notice ? ["", notice] : [])].join("\n");
+    return [
+      "Waiting for answers",
+      "",
+      "Your ticket export is ready.",
+      `Send the completed ticket-answers_${exportId}.json file here. Only a valid answer package for this export will continue.`,
+      ...(notice ? ["", notice] : []),
+    ].join("\n");
   }
 
-  async function showPrivateBatchWaiting(ctx: Context, exportId: string, refresh = false, notice?: string): Promise<void> {
+  async function showPrivateBatchWaiting(
+    ctx: Context,
+    exportId: string,
+    refresh = false,
+    notice?: string
+  ): Promise<void> {
     const render = refresh ? refreshPrivateScreen : renderPrivateScreen;
     await render(ctx, privateBatchWaitingText(exportId, notice), privateBatchWaitingKeyboard());
   }
 
   async function showPrivateBatchHelp(ctx: Context): Promise<void> {
-    await renderPrivateScreen(ctx, ["Preparing batch answers", "", "1. Give your chosen AI assistant the product documentation, support policies, FAQ, tone guidance, and any other authoritative context it needs.", "2. Upload this ticket export ZIP to that assistant.", "3. Ask it to follow the instructions included in the archive and prepare the completed import file.", "4. Send the returned answer file here for preview and explicit approval."].join("\n"), new InlineKeyboard().text("Back", "batch-ui:continue"));
+    await renderPrivateScreen(
+      ctx,
+      [
+        "Preparing batch answers",
+        "",
+        "1. Give your chosen AI assistant the product documentation, support policies, FAQ, tone guidance, and any other authoritative context it needs.",
+        "2. Upload this ticket export ZIP to that assistant.",
+        "3. Ask it to follow the instructions included in the archive and prepare the completed import file.",
+        "4. Send the returned answer file here for preview and explicit approval.",
+      ].join("\n"),
+      new InlineKeyboard().text("Back", "batch-ui:continue")
+    );
   }
 
   const showDashboard = privateControlPlane.showDashboard.bind(privateControlPlane);
-  const showDashboardAfterStaffTestTicketClose = privateControlPlane.showDashboardAfterStaffTestTicketClose.bind(privateControlPlane);
+  const showDashboardAfterStaffTestTicketClose =
+    privateControlPlane.showDashboardAfterStaffTestTicketClose.bind(privateControlPlane);
   const showSystemStatus = privateControlPlane.showSystemStatus.bind(privateControlPlane);
   const showModerationDashboard = privateControlPlane.showModerationDashboard.bind(privateControlPlane);
   function supportExpectedResponseTime(): string {
@@ -852,20 +938,37 @@ export function createBot(
   }
 
   function supportTicketReceivedTemplate(): string {
-    return db.getSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE;
+    return (
+      db.getSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE
+    );
   }
   async function showStaffWorkspaceSettings(ctx: Context, notice?: string, refresh = false): Promise<void> {
     const workspace = installation.getActiveWorkspace();
     const current = workspace
-      ? [workspace.title ?? "Unnamed workspace", workspace.username ? `@${workspace.username}` : String(workspace.telegram_chat_id)].join("\n")
+      ? [
+          workspace.title ?? "Unnamed workspace",
+          workspace.username ? `@${workspace.username}` : String(workspace.telegram_chat_id),
+        ].join("\n")
       : "Not configured";
     const render = refresh ? refreshPrivateScreen : renderPrivateScreen;
-    await render(ctx, ["Staff workspace", "", `Current:\n${current}`, ...(notice ? ["", notice] : [])].join("\n"), new InlineKeyboard()
-      .text("Choose staff workspace", "workspace:select").row()
-      .text("Back", "dashboard:home"));
+    await render(
+      ctx,
+      ["Staff workspace", "", `Current:\n${current}`, ...(notice ? ["", notice] : [])].join("\n"),
+      new InlineKeyboard().text("Choose staff workspace", "workspace:select").row().text("Back", "dashboard:home")
+    );
   }
 
-  const onboardingStages = ["WELCOME", "BOT_IDENTITY", "STAFF_WORKSPACE", "WORKSPACE_PERMISSIONS", "SUPPORT_LOGS", "PUBLIC_CHAT", "TEAM_ROLES", "SUMMARY", "ACTIVATE_SUPPORT"] as const;
+  const onboardingStages = [
+    "WELCOME",
+    "BOT_IDENTITY",
+    "STAFF_WORKSPACE",
+    "WORKSPACE_PERMISSIONS",
+    "SUPPORT_LOGS",
+    "PUBLIC_CHAT",
+    "TEAM_ROLES",
+    "SUMMARY",
+    "ACTIVATE_SUPPORT",
+  ] as const;
   async function showOnboarding(ctx: Context, stage: (typeof onboardingStages)[number]): Promise<void> {
     if (!ctx.from) return;
     if (installation.getState().setupState === "READY") {
@@ -875,20 +978,28 @@ export function createBot(
     }
     installation.saveOnboardingStage(ctx.from.id, stage);
     const copy: Record<(typeof onboardingStages)[number], string> = {
-      WELCOME: "Welcome. Host secrets stay local; product configuration is stored in SQLite.", BOT_IDENTITY: `Bot identity verified: @${bot.botInfo?.username ?? "bot"}.`,
-      STAFF_WORKSPACE: "Select the Telegram forum supergroup that staff will use.", WORKSPACE_PERMISSIONS: "The selected workspace must pass every permissions check.",
-      SUPPORT_LOGS: "Support Logs will be validated or initialized after the workspace is accepted.", PUBLIC_CHAT: "Public-chat moderation is optional and can be configured later.",
-      TEAM_ROLES: "Invite team roles before activating role-based access.", SUMMARY: "Review the workspace and team. Legacy trusted-group access remains active until explicit activation.",
-      ACTIVATE_SUPPORT: "Activate support when the mandatory workspace is ready."
+      WELCOME: "Welcome. Host secrets stay local; product configuration is stored in SQLite.",
+      BOT_IDENTITY: `Bot identity verified: @${bot.botInfo?.username ?? "bot"}.`,
+      STAFF_WORKSPACE: "Select the Telegram forum supergroup that staff will use.",
+      WORKSPACE_PERMISSIONS: "The selected workspace must pass every permissions check.",
+      SUPPORT_LOGS: "Support Logs will be validated or initialized after the workspace is accepted.",
+      PUBLIC_CHAT: "Public-chat moderation is optional and can be configured later.",
+      TEAM_ROLES: "Invite team roles before activating role-based access.",
+      SUMMARY: "Review the workspace and team. Legacy trusted-group access remains active until explicit activation.",
+      ACTIVATE_SUPPORT: "Activate support when the mandatory workspace is ready.",
     };
-    const index = onboardingStages.indexOf(stage); const keyboard = new InlineKeyboard();
+    const index = onboardingStages.indexOf(stage);
+    const keyboard = new InlineKeyboard();
     if (index > 0) keyboard.text("Back", `setup:stage:${onboardingStages[index - 1]}`).row();
     if (stage === "STAFF_WORKSPACE") {
-      if (installation.getActiveWorkspace()?.imported_from_legacy) keyboard.text("Use existing staff workspace", "setup:use-existing").row();
+      if (installation.getActiveWorkspace()?.imported_from_legacy)
+        keyboard.text("Use existing staff workspace", "setup:use-existing").row();
       keyboard.text("Choose staff workspace", "setup:workspace").row();
-    }
-    else if (stage === "ACTIVATE_SUPPORT") keyboard.text("Activate support", "setup:activate").row();
-    else keyboard.text("Continue", `setup:stage:${onboardingStages[Math.min(index + 1, onboardingStages.length - 1)]}`).row();
+    } else if (stage === "ACTIVATE_SUPPORT") keyboard.text("Activate support", "setup:activate").row();
+    else
+      keyboard
+        .text("Continue", `setup:stage:${onboardingStages[Math.min(index + 1, onboardingStages.length - 1)]}`)
+        .row();
     if (stage === "PUBLIC_CHAT") keyboard.text("Skip optional step", "setup:stage:TEAM_ROLES").row();
     keyboard.text("Exit setup", "setup:exit");
     const text = `Setup ${index + 1}/9\n\n${copy[stage]}`;
@@ -897,13 +1008,54 @@ export function createBot(
 
   async function sendWorkspacePicker(ctx: Context, mode: "SETUP" | "RECONFIGURE" = "SETUP"): Promise<void> {
     if (ctx.from) privateControlPlane.setPendingWorkspaceSelection(ctx.from.id, mode);
-    const rights = { is_anonymous: false, can_manage_chat: true, can_delete_messages: true, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: false, can_change_info: false, can_invite_users: true, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_post_messages: false, can_edit_messages: false, can_pin_messages: true, can_manage_topics: true };
-    const keyboard = new Keyboard().requestChat("Select forum staff group", 1300, { chat_is_channel: false, chat_is_forum: true, bot_is_member: true, request_title: true, request_username: true, bot_administrator_rights: rights, user_administrator_rights: rights }).text("Cancel workspace selection").resized().oneTime();
-    const prompt = await ctx.reply("Choose the staff forum group by title. You can also paste a public @username or t.me link.", { reply_markup: keyboard });
-    if (ctx.from) await privateControlPlane.rememberWorkspacePickerPrompt(ctx.from.id, { chatId: prompt.chat.id, messageId: prompt.message_id }, ctx.api);
+    const rights = {
+      is_anonymous: false,
+      can_manage_chat: true,
+      can_delete_messages: true,
+      can_manage_video_chats: false,
+      can_restrict_members: false,
+      can_promote_members: false,
+      can_change_info: false,
+      can_invite_users: true,
+      can_post_stories: false,
+      can_edit_stories: false,
+      can_delete_stories: false,
+      can_post_messages: false,
+      can_edit_messages: false,
+      can_pin_messages: true,
+      can_manage_topics: true,
+    };
+    const keyboard = new Keyboard()
+      .requestChat("Select forum staff group", 1300, {
+        chat_is_channel: false,
+        chat_is_forum: true,
+        bot_is_member: true,
+        request_title: true,
+        request_username: true,
+        bot_administrator_rights: rights,
+        user_administrator_rights: rights,
+      })
+      .text("Cancel workspace selection")
+      .resized()
+      .oneTime();
+    const prompt = await ctx.reply(
+      "Choose the staff forum group by title. You can also paste a public @username or t.me link.",
+      { reply_markup: keyboard }
+    );
+    if (ctx.from)
+      await privateControlPlane.rememberWorkspacePickerPrompt(
+        ctx.from.id,
+        { chatId: prompt.chat.id, messageId: prompt.message_id },
+        ctx.api
+      );
   }
 
-  async function completeWorkspaceSelection(ctx: Context, result: WorkspaceValidationResult, mode: "SETUP" | "RECONFIGURE", fallback?: { title?: string; username?: string }): Promise<void> {
+  async function completeWorkspaceSelection(
+    ctx: Context,
+    result: WorkspaceValidationResult,
+    mode: "SETUP" | "RECONFIGURE",
+    fallback?: { title?: string; username?: string }
+  ): Promise<void> {
     if (!ctx.from) return;
     privateControlPlane.clearPendingWorkspaceSelection(ctx.from.id);
     await privateControlPlane.retireWorkspacePickerPrompt(ctx.from.id, ctx.api);
@@ -912,20 +1064,33 @@ export function createBot(
       if (mode === "RECONFIGURE") {
         await showStaffWorkspaceSettings(ctx, notice, true);
       } else {
-        await renderPrivateScreen(ctx, notice, new InlineKeyboard().text("Retry", "setup:workspace").row().text("Back", "setup:stage:STAFF_WORKSPACE"));
+        await renderPrivateScreen(
+          ctx,
+          notice,
+          new InlineKeyboard().text("Retry", "setup:workspace").row().text("Back", "setup:stage:STAFF_WORKSPACE")
+        );
       }
       return;
     }
-    installation.activateWorkspace({ chatId: result.chatId, title: result.title ?? fallback?.title, username: result.username ?? fallback?.username });
+    installation.activateWorkspace({
+      chatId: result.chatId,
+      title: result.title ?? fallback?.title,
+      username: result.username ?? fallback?.username,
+    });
     setRuntimeStaffChatId(result.chatId);
     if (mode === "RECONFIGURE") {
-      if (!db.getSetting(`support_logs_message_thread_id:${result.chatId}`)) await initializeSupportLogsTopic(ctx.api, db);
+      if (!db.getSetting(`support_logs_message_thread_id:${result.chatId}`))
+        await initializeSupportLogsTopic(ctx.api, db);
       await showStaffWorkspaceSettings(ctx, `Workspace validated:\n${formatWorkspaceChecklist(result)}`, true);
       return;
     }
     installation.saveOnboardingStage(ctx.from.id, "WORKSPACE_PERMISSIONS");
     await initializeSupportLogsTopic(ctx.api, db);
-    await renderPrivateScreen(ctx, `Staff workspace validated:\n${formatWorkspaceChecklist(result)}`, new InlineKeyboard().text("Continue", "setup:stage:SUPPORT_LOGS"));
+    await renderPrivateScreen(
+      ctx,
+      `Staff workspace validated:\n${formatWorkspaceChecklist(result)}`,
+      new InlineKeyboard().text("Continue", "setup:stage:SUPPORT_LOGS")
+    );
   }
 
   function publicChatLabel(chat: ReturnType<SupportDatabase["getManagedPublicChat"]>): string {
@@ -953,23 +1118,33 @@ export function createBot(
     keyboard.text("Back", "dashboard:home");
     const lines = chats.length
       ? chats.flatMap((chat) => [
-        "",
-        publicChatLabel(chat),
-        chat.username ? `@${chat.username}` : "No public username",
-        `Connected: ${publicChatConnectionLabel(chat)}`,
-        `Moderation: ${chat.moderation_enabled ? "enabled" : "disabled"}`,
-        `Permissions: ${chat.permission_status.toLowerCase()}`,
-        `Reactions: ${chat.reaction_status.toLowerCase()} (advisory)`
-      ])
+          "",
+          publicChatLabel(chat),
+          chat.username ? `@${chat.username}` : "No public username",
+          `Connected: ${publicChatConnectionLabel(chat)}`,
+          `Moderation: ${chat.moderation_enabled ? "enabled" : "disabled"}`,
+          `Permissions: ${chat.permission_status.toLowerCase()}`,
+          `Reactions: ${chat.reaction_status.toLowerCase()} (advisory)`,
+        ])
       : ["", "No public chats are configured."];
     await renderPrivateScreen(ctx, ["Public chats", ...(notice ? ["", notice] : []), ...lines].join("\n"), keyboard);
   }
 
   async function showPublicChatSettings(ctx: Context, chatId: number, notice?: string): Promise<void> {
     const chat = db.getManagedPublicChat(chatId);
-    if (!chat) { await renderPrivateScreen(ctx, "This public chat is not managed.", new InlineKeyboard().text("Back", "public:list")); return; }
+    if (!chat) {
+      await renderPrivateScreen(
+        ctx,
+        "This public chat is not managed.",
+        new InlineKeyboard().text("Back", "public:list")
+      );
+      return;
+    }
     const keyboard = new InlineKeyboard()
-      .text(chat.moderation_enabled ? "Disable moderation" : "Enable moderation", `public:${chat.moderation_enabled ? "disable" : "enable"}:${chat.chat_id}`)
+      .text(
+        chat.moderation_enabled ? "Disable moderation" : "Enable moderation",
+        `public:${chat.moderation_enabled ? "disable" : "enable"}:${chat.chat_id}`
+      )
       .row()
       .text("Check permissions", `public:check:${chat.chat_id}`)
       .row()
@@ -983,42 +1158,88 @@ export function createBot(
       .text("Remove chat", `public:remove:${chat.chat_id}`)
       .row()
       .text("Back", "public:list");
-    await renderPrivateScreen(ctx, [
-      "Public chat settings",
-      "",
-      ...(notice ? [notice, ""] : []),
-      `Title: ${chat.title ?? "unknown"}`,
-      `Username: ${chat.username ? `@${chat.username}` : "not available"}`,
-      `Chat ID: ${chat.chat_id}`,
-      `Forum topics: ${chat.is_forum ? "enabled" : "not enabled"}`,
-      `Connected: ${publicChatConnectionLabel(chat)}`,
-      `Moderation: ${chat.moderation_enabled ? "enabled" : "disabled"}`,
-      `Permissions: ${chat.permission_status.toLowerCase()}`,
-      `Reactions: ${chat.reaction_status.toLowerCase()} (advisory only)`,
-      `Warning: ${chat.warning_text}`,
-      `Allowed terms: ${chat.allowlist.length}`,
-      `Warning cooldown: ${chat.warning_cooldown_minutes} minutes`,
-      `Message threshold: ${chat.warning_message_threshold} messages`,
-      `Violation window: ${chat.lookback_minutes} minutes`
-    ].join("\n"), keyboard);
+    await renderPrivateScreen(
+      ctx,
+      [
+        "Public chat settings",
+        "",
+        ...(notice ? [notice, ""] : []),
+        `Title: ${chat.title ?? "unknown"}`,
+        `Username: ${chat.username ? `@${chat.username}` : "not available"}`,
+        `Chat ID: ${chat.chat_id}`,
+        `Forum topics: ${chat.is_forum ? "enabled" : "not enabled"}`,
+        `Connected: ${publicChatConnectionLabel(chat)}`,
+        `Moderation: ${chat.moderation_enabled ? "enabled" : "disabled"}`,
+        `Permissions: ${chat.permission_status.toLowerCase()}`,
+        `Reactions: ${chat.reaction_status.toLowerCase()} (advisory only)`,
+        `Warning: ${chat.warning_text}`,
+        `Allowed terms: ${chat.allowlist.length}`,
+        `Warning cooldown: ${chat.warning_cooldown_minutes} minutes`,
+        `Message threshold: ${chat.warning_message_threshold} messages`,
+        `Violation window: ${chat.lookback_minutes} minutes`,
+      ].join("\n"),
+      keyboard
+    );
   }
 
-  function publicChatConfigurationPrompt(chat: NonNullable<ReturnType<SupportDatabase["getManagedPublicChat"]>>, field: PublicChatConfigurationField, error?: string): string {
+  function publicChatConfigurationPrompt(
+    chat: NonNullable<ReturnType<SupportDatabase["getManagedPublicChat"]>>,
+    field: PublicChatConfigurationField,
+    error?: string
+  ): string {
     const details: Record<PublicChatConfigurationField, string> = {
-      warning: ["Warning message", "Shown when the bot sends a first-strike warning in this public chat.", `Current value: ${chat.warning_text}`, "Valid: 1-500 characters.", "Example: Please use English in this chat."].join("\n"),
-      allowlist: ["Allowed terms", "Terms removed before language analysis. Messages containing only these terms stay exempt.", `Current value: ${chat.allowlist.length ? chat.allowlist.join(", ") : "none"}`, "Valid: comma-separated terms, up to 100 terms of 80 characters each; send - to clear.", "Example: productname, ticker"].join("\n"),
-      cooldown: ["Warning cooldown", "Minimum time after a warning before another first-strike warning can appear. The message threshold must also be met.", `Current value: ${chat.warning_cooldown_minutes} minutes`, "Valid: whole number from 1 to 1440 minutes.", "Example: 30"].join("\n"),
-      threshold: ["Message threshold", "Incoming messages in this chat or topic after a warning before another first-strike warning can appear. All messages count.", `Current value: ${chat.warning_message_threshold} messages`, "Valid: whole number from 1 to 10000 messages.", "Example: 20"].join("\n"),
-      lookback: ["Violation window", "First violations in the same chat or topic during this window are grouped into one warning.", `Current value: ${chat.lookback_minutes} minutes`, "Valid: whole number from 1 to 1440 minutes.", "Example: 10"].join("\n")
+      warning: [
+        "Warning message",
+        "Shown when the bot sends a first-strike warning in this public chat.",
+        `Current value: ${chat.warning_text}`,
+        "Valid: 1-500 characters.",
+        "Example: Please use English in this chat.",
+      ].join("\n"),
+      allowlist: [
+        "Allowed terms",
+        "Terms removed before language analysis. Messages containing only these terms stay exempt.",
+        `Current value: ${chat.allowlist.length ? chat.allowlist.join(", ") : "none"}`,
+        "Valid: comma-separated terms, up to 100 terms of 80 characters each; send - to clear.",
+        "Example: productname, ticker",
+      ].join("\n"),
+      cooldown: [
+        "Warning cooldown",
+        "Minimum time after a warning before another first-strike warning can appear. The message threshold must also be met.",
+        `Current value: ${chat.warning_cooldown_minutes} minutes`,
+        "Valid: whole number from 1 to 1440 minutes.",
+        "Example: 30",
+      ].join("\n"),
+      threshold: [
+        "Message threshold",
+        "Incoming messages in this chat or topic after a warning before another first-strike warning can appear. All messages count.",
+        `Current value: ${chat.warning_message_threshold} messages`,
+        "Valid: whole number from 1 to 10000 messages.",
+        "Example: 20",
+      ].join("\n"),
+      lookback: [
+        "Violation window",
+        "First violations in the same chat or topic during this window are grouped into one warning.",
+        `Current value: ${chat.lookback_minutes} minutes`,
+        "Valid: whole number from 1 to 1440 minutes.",
+        "Example: 10",
+      ].join("\n"),
     };
     return [details[field], "", error ? `Invalid: ${error}` : "Send the new value."].join("\n");
   }
 
-  async function beginPublicChatConfiguration(ctx: Context, chat: NonNullable<ReturnType<SupportDatabase["getManagedPublicChat"]>>, field: PublicChatConfigurationField): Promise<void> {
+  async function beginPublicChatConfiguration(
+    ctx: Context,
+    chat: NonNullable<ReturnType<SupportDatabase["getManagedPublicChat"]>>,
+    field: PublicChatConfigurationField
+  ): Promise<void> {
     if (!ctx.from) return;
     privateControlPlane.setPendingPublicChatConfiguration(ctx.from.id, { chatId: chat.chat_id, field });
     await retirePrivateScreens(ctx);
-    await sendFreshPrivateScreen(ctx, publicChatConfigurationPrompt(chat, field), new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`));
+    await sendFreshPrivateScreen(
+      ctx,
+      publicChatConfigurationPrompt(chat, field),
+      new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)
+    );
   }
 
   async function sendPublicChatPicker(ctx: Context): Promise<void> {
@@ -1042,22 +1263,37 @@ export function createBot(
       can_post_messages: false,
       can_edit_messages: false,
       can_pin_messages: false,
-      can_manage_topics: false
+      can_manage_topics: false,
     };
-    const keyboard = new Keyboard().requestChat("Select public supergroup", 1400, {
-      chat_is_channel: false,
-      bot_is_member: true,
-      request_title: true,
-      request_username: true,
-      request_photo: false,
-      bot_administrator_rights: rights,
-      user_administrator_rights: rights
-    }).text("Cancel public chat selection").resized().oneTime();
-    const prompt = await ctx.reply("Choose a public supergroup. You may also paste its public @username or t.me link.", { reply_markup: keyboard });
-    await privateControlPlane.rememberPublicChatPickerPrompt(ctx.from.id, { chatId: prompt.chat.id, messageId: prompt.message_id }, ctx.api);
+    const keyboard = new Keyboard()
+      .requestChat("Select public supergroup", 1400, {
+        chat_is_channel: false,
+        bot_is_member: true,
+        request_title: true,
+        request_username: true,
+        request_photo: false,
+        bot_administrator_rights: rights,
+        user_administrator_rights: rights,
+      })
+      .text("Cancel public chat selection")
+      .resized()
+      .oneTime();
+    const prompt = await ctx.reply(
+      "Choose a public supergroup. You may also paste its public @username or t.me link.",
+      { reply_markup: keyboard }
+    );
+    await privateControlPlane.rememberPublicChatPickerPrompt(
+      ctx.from.id,
+      { chatId: prompt.chat.id, messageId: prompt.message_id },
+      ctx.api
+    );
   }
 
-  async function inspectAndSavePublicChat(ctx: Context, chatId: number, shared?: { title?: string; username?: string }): Promise<void> {
+  async function inspectAndSavePublicChat(
+    ctx: Context,
+    chatId: number,
+    shared?: { title?: string; username?: string }
+  ): Promise<void> {
     if (!ctx.from || !bot.botInfo) return;
     const workspace = installation.getActiveWorkspace();
     if (!workspace) {
@@ -1071,7 +1307,7 @@ export function createBot(
       workspaceId: workspace.id,
       title: result.title ?? shared?.title,
       username: result.username ?? shared?.username,
-      isForum: result.isForum
+      isForum: result.isForum,
     });
     db.recordManagedPublicChatPermissionHealth({
       chatId: result.chatId,
@@ -1080,7 +1316,7 @@ export function createBot(
       connected: true,
       title: result.title ?? shared?.title,
       username: result.username ?? shared?.username,
-      isForum: result.isForum
+      isForum: result.isForum,
     });
     await clearPublicChatPicker(ctx);
     const notice = result.valid
@@ -1096,7 +1332,11 @@ export function createBot(
     const chat = db.getManagedPublicChat(pending.chatId);
     if (!chat) {
       privateControlPlane.clearPendingPublicChatConfiguration(ctx.from.id);
-      await renderPrivateScreen(ctx, "This public chat is no longer managed.", new InlineKeyboard().text("Back", "public:list"));
+      await renderPrivateScreen(
+        ctx,
+        "This public chat is no longer managed.",
+        new InlineKeyboard().text("Back", "public:list")
+      );
       return true;
     }
     let warningText = chat.warning_text;
@@ -1106,21 +1346,58 @@ export function createBot(
     let lookbackMinutes = chat.lookback_minutes;
     const trimmed = text.trim();
     if (pending.field === "warning") {
-      if (!trimmed || trimmed.length > 500) { await renderPrivateScreen(ctx, publicChatConfigurationPrompt(chat, pending.field, "use 1-500 characters."), new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)); return true; }
+      if (!trimmed || trimmed.length > 500) {
+        await renderPrivateScreen(
+          ctx,
+          publicChatConfigurationPrompt(chat, pending.field, "use 1-500 characters."),
+          new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)
+        );
+        return true;
+      }
       warningText = trimmed;
     } else if (pending.field === "allowlist") {
-      const entries = trimmed === "-" ? [] : [...new Set(trimmed.split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean))];
-      if (entries.length > 100 || entries.some((entry) => entry.length > 80)) { await renderPrivateScreen(ctx, publicChatConfigurationPrompt(chat, pending.field, "use at most 100 terms, each up to 80 characters."), new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)); return true; }
+      const entries =
+        trimmed === "-"
+          ? []
+          : [
+              ...new Set(
+                trimmed
+                  .split(",")
+                  .map((entry) => entry.trim().toLowerCase())
+                  .filter(Boolean)
+              ),
+            ];
+      if (entries.length > 100 || entries.some((entry) => entry.length > 80)) {
+        await renderPrivateScreen(
+          ctx,
+          publicChatConfigurationPrompt(chat, pending.field, "use at most 100 terms, each up to 80 characters."),
+          new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)
+        );
+        return true;
+      }
       allowlist = entries;
     } else {
       const parsed = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
       const maximum = pending.field === "threshold" ? 10_000 : 1_440;
-      if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) { await renderPrivateScreen(ctx, publicChatConfigurationPrompt(chat, pending.field, `enter a whole number from 1 to ${maximum}.`), new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)); return true; }
+      if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+        await renderPrivateScreen(
+          ctx,
+          publicChatConfigurationPrompt(chat, pending.field, `enter a whole number from 1 to ${maximum}.`),
+          new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)
+        );
+        return true;
+      }
       if (pending.field === "cooldown") warningCooldownMinutes = parsed;
       if (pending.field === "threshold") warningMessageThreshold = parsed;
       if (pending.field === "lookback") lookbackMinutes = parsed;
     }
-    db.updateManagedPublicChatConfig(chat.chat_id, { warningText, allowlist, warningCooldownMinutes, warningMessageThreshold, lookbackMinutes });
+    db.updateManagedPublicChatConfig(chat.chat_id, {
+      warningText,
+      allowlist,
+      warningCooldownMinutes,
+      warningMessageThreshold,
+      lookbackMinutes,
+    });
     privateControlPlane.clearPendingPublicChatConfiguration(ctx.from.id);
     await retirePrivateScreens(ctx);
     await showPublicChatSettings(ctx, chat.chat_id);
@@ -1133,13 +1410,15 @@ export function createBot(
   }
 
   function teamRoleLabel(role: TeamMemberRecord["role"]): string {
-    return ({ OWNER: "Owner", ADMIN: "Admin", SENIOR_AGENT: "Senior agent", AGENT: "Agent" })[role];
+    return { OWNER: "Owner", ADMIN: "Admin", SENIOR_AGENT: "Senior agent", AGENT: "Agent" }[role];
   }
 
   function teamKeyboard(actorId: number): InlineKeyboard {
     const keyboard = new InlineKeyboard().text("Invite member", "team:invite").row();
     for (const member of installation.listTeamMembers()) {
-      keyboard.text(`${teamRoleLabel(member.role)}: ${teamMemberLabel(member)}`, `team:member:${member.user_telegram_id}`).row();
+      keyboard
+        .text(`${teamRoleLabel(member.role)}: ${teamMemberLabel(member)}`, `team:member:${member.user_telegram_id}`)
+        .row();
     }
     if (installation.getMember(actorId)?.role === "OWNER") keyboard.text("Transfer ownership", "team:transfer").row();
     return keyboard.text("Back", "dashboard:home");
@@ -1148,7 +1427,11 @@ export function createBot(
   async function showTeam(ctx: Context): Promise<void> {
     if (!ctx.from) return;
     const members = installation.listTeamMembers();
-    await renderPrivateScreen(ctx, ["Team", "", ...members.map((member) => `${teamRoleLabel(member.role)}: ${teamMemberLabel(member)}`)].join("\n"), teamKeyboard(ctx.from.id));
+    await renderPrivateScreen(
+      ctx,
+      ["Team", "", ...members.map((member) => `${teamRoleLabel(member.role)}: ${teamMemberLabel(member)}`)].join("\n"),
+      teamKeyboard(ctx.from.id)
+    );
   }
 
   async function showTeamMember(ctx: Context, member: TeamMemberRecord): Promise<void> {
@@ -1160,7 +1443,7 @@ export function createBot(
       "",
       `Member: ${teamMemberLabel(member)}`,
       `Role: ${teamRoleLabel(member.role)}`,
-      "Staff workspace membership is required for access."
+      "Staff workspace membership is required for access.",
     ];
     if (member.role === "OWNER") {
       text.push("", "The OWNER cannot be changed through ordinary team controls.");
@@ -1174,37 +1457,94 @@ export function createBot(
   }
 
   bot.command("start", async (ctx) => {
-    if (!isPrivateChat(ctx)) { await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler, backgroundTasks); return; }
+    if (!isPrivateChat(ctx)) {
+      await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler, backgroundTasks);
+      return;
+    }
 
     privateControlPlane.clearSupportSettingsInput(ctx.from?.id ?? -1);
     persistUserFromContext(db, ctx);
     const startParameter = ctx.match.trim();
     if (startParameter.startsWith("setup_") && ctx.from) {
-      const result = installation.consumeOwnerPairingToken(startParameter.slice(6), { telegramId: ctx.from.id, username: ctx.from.username, firstName: ctx.from.first_name, lastName: ctx.from.last_name });
-      if (result.kind === "PAIRED") { await showOnboarding(ctx, "WELCOME"); return; }
-      if (result.kind === "TRANSFER_CONFIRMATION_REQUIRED") { await ctx.reply("Confirm ownership transfer. The current OWNER remains active until confirmation.", { reply_markup: new InlineKeyboard().text("Confirm ownership transfer", "owner:confirm-transfer") }); return; }
-      await ctx.reply(result.kind === "EXPIRED" ? "This setup link has expired. Generate a new link locally." : "This setup link is invalid or already used."); return;
+      const result = installation.consumeOwnerPairingToken(startParameter.slice(6), {
+        telegramId: ctx.from.id,
+        username: ctx.from.username,
+        firstName: ctx.from.first_name,
+        lastName: ctx.from.last_name,
+      });
+      if (result.kind === "PAIRED") {
+        await showOnboarding(ctx, "WELCOME");
+        return;
+      }
+      if (result.kind === "TRANSFER_CONFIRMATION_REQUIRED") {
+        await ctx.reply("Confirm ownership transfer. The current OWNER remains active until confirmation.", {
+          reply_markup: new InlineKeyboard().text("Confirm ownership transfer", "owner:confirm-transfer"),
+        });
+        return;
+      }
+      await ctx.reply(
+        result.kind === "EXPIRED"
+          ? "This setup link has expired. Generate a new link locally."
+          : "This setup link is invalid or already used."
+      );
+      return;
     }
     if (startParameter.startsWith("team_") && ctx.from) {
-      const result = installation.consumeTeamInvitation(startParameter.slice(5), { telegramId: ctx.from.id, username: ctx.from.username, firstName: ctx.from.first_name, lastName: ctx.from.last_name });
-      if (result.kind === "JOINED") { let joined = false; const chatId = installation.getStaffChatId(); if (chatId !== null) { try { const member = await ctx.api.getChatMember(chatId, ctx.from.id); joined = member.status !== "left" && member.status !== "kicked"; } catch {} } await ctx.reply(`Team invitation accepted. Role: ${result.role}.${joined ? "" : " Join the configured staff workspace before using staff commands."}`); if (joined || installation.getState().authorizationMode !== "RBAC_ACTIVE") await showDashboard(ctx); return; }
-      await ctx.reply(result.kind === "EXPIRED" ? "This team invitation has expired." : "This team invitation is invalid or already used."); return;
+      const result = installation.consumeTeamInvitation(startParameter.slice(5), {
+        telegramId: ctx.from.id,
+        username: ctx.from.username,
+        firstName: ctx.from.first_name,
+        lastName: ctx.from.last_name,
+      });
+      if (result.kind === "JOINED") {
+        let joined = false;
+        const chatId = installation.getStaffChatId();
+        if (chatId !== null) {
+          try {
+            const member = await ctx.api.getChatMember(chatId, ctx.from.id);
+            joined = member.status !== "left" && member.status !== "kicked";
+          } catch {}
+        }
+        await ctx.reply(
+          `Team invitation accepted. Role: ${result.role}.${joined ? "" : " Join the configured staff workspace before using staff commands."}`
+        );
+        if (joined || installation.getState().authorizationMode !== "RBAC_ACTIVE") await showDashboard(ctx);
+        return;
+      }
+      await ctx.reply(
+        result.kind === "EXPIRED"
+          ? "This team invitation has expired."
+          : "This team invitation is invalid or already used."
+      );
+      return;
     }
     if (await replyIfBanned(db, ctx)) {
       return;
     }
 
     if (ctx.from && installation.getMember(ctx.from.id)) await clearPublicChatPicker(ctx);
-    if (await enrollPrivateWorkspaceMember(ctx)) { clearStaffTestTicketMode(ctx.from?.id); await showDashboard(ctx, true); return; }
-    if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet. Please try again later."); return; }
+    if (await enrollPrivateWorkspaceMember(ctx)) {
+      clearStaffTestTicketMode(ctx.from?.id);
+      await showDashboard(ctx, true);
+      return;
+    }
+    if (installation.getState().setupState === "SETUP_REQUIRED") {
+      await ctx.reply("Support has not been configured yet. Please try again later.");
+      return;
+    }
     await ctx.reply(START_TEXT);
   });
 
   bot.command("help", async (ctx) => {
     if (isPrivateChat(ctx)) {
       privateControlPlane.clearSupportSettingsInput(ctx.from?.id ?? -1);
-      if (await enrollPrivateWorkspaceMember(ctx)) { clearStaffTestTicketMode(ctx.from?.id); await showDashboard(ctx); }
-      else await ctx.reply(installation.getState().setupState === "READY" ? USER_HELP_TEXT : "Support has not been configured yet.");
+      if (await enrollPrivateWorkspaceMember(ctx)) {
+        clearStaffTestTicketMode(ctx.from?.id);
+        await showDashboard(ctx);
+      } else
+        await ctx.reply(
+          installation.getState().setupState === "READY" ? USER_HELP_TEXT : "Support has not been configured yet."
+        );
       return;
     }
 
@@ -1212,14 +1552,15 @@ export function createBot(
       return;
     }
 
-    const helpText = installation.getState().authorizationMode === "RBAC_ACTIVE"
-      ? STAFF_HELP_TEXT.replace(
-        "/exporttickets - export active tickets for an answer package\nUpload a validated answer package in the staff group to preview and apply its replies.",
-        "Batch operations are available to OWNER and ADMIN in the bot's private chat."
-      )
-      : STAFF_HELP_TEXT;
+    const helpText =
+      installation.getState().authorizationMode === "RBAC_ACTIVE"
+        ? STAFF_HELP_TEXT.replace(
+            "/exporttickets - export active tickets for an answer package\nUpload a validated answer package in the staff group to preview and apply its replies.",
+            "Batch operations are available to OWNER and ADMIN in the bot's private chat."
+          )
+        : STAFF_HELP_TEXT;
     await ctx.reply(helpText, {
-      message_thread_id: ctx.message?.message_thread_id
+      message_thread_id: ctx.message?.message_thread_id,
     });
   });
 
@@ -1248,7 +1589,7 @@ export function createBot(
       return;
     }
 
-    if (!await requirePermission(ctx, "SUPPORT_LOGS")) return;
+    if (!(await requirePermission(ctx, "SUPPORT_LOGS"))) return;
     const messageThreadId = ctx.message?.message_thread_id;
     if (typeof messageThreadId !== "number") {
       await ctx.reply("Please run /setlogs inside the forum topic you want to use as Support Logs.");
@@ -1257,14 +1598,14 @@ export function createBot(
 
     if (db.findTicketByStaffThread(config.staffChatId, messageThreadId)) {
       await ctx.reply("This topic belongs to a support ticket and cannot be used as Support Logs.", {
-        message_thread_id: messageThreadId
+        message_thread_id: messageThreadId,
       });
       return;
     }
 
     setSupportLogsTopicOverride(db, messageThreadId);
     await ctx.reply("This topic is now used as Support Logs.", {
-      message_thread_id: messageThreadId
+      message_thread_id: messageThreadId,
     });
   });
 
@@ -1276,10 +1617,10 @@ export function createBot(
       return;
     }
 
-    if (!await requirePermission(ctx, "SUPPORT_LOGS")) return;
+    if (!(await requirePermission(ctx, "SUPPORT_LOGS"))) return;
     const topic = await getSupportLogsTopicInfo(ctx.api, db);
     await ctx.reply(formatSupportLogsTopicInfo(topic), {
-      message_thread_id: ctx.message?.message_thread_id
+      message_thread_id: ctx.message?.message_thread_id,
     });
   });
 
@@ -1299,7 +1640,7 @@ export function createBot(
         messages: db.listMessagesChronological(ticket.id),
         followUpHistory: db.listTicketFollowUpHistory(ticket.id),
         deliveryFailure: db.getLatestTicketBatchDeliveryFailure(ticket.id, config.staffChatId),
-        staffSync: db.getLatestTicketBatchStaffSyncContext(ticket.id, config.staffChatId)
+        staffSync: db.getLatestTicketBatchStaffSyncContext(ticket.id, config.staffChatId),
       }));
       if (!tickets.length) {
         await ctx.reply("There are no active tickets to export.");
@@ -1308,10 +1649,17 @@ export function createBot(
 
       exportId = `export_${randomUUID().replace(/-/g, "")}`;
       const createdAt = new Date().toISOString();
-      const snapshot = buildTicketBatchExportSnapshot({ exportId, createdAt, staffChatId: config.staffChatId, tickets });
+      const snapshot = buildTicketBatchExportSnapshot({
+        exportId,
+        createdAt,
+        staffChatId: config.staffChatId,
+        tickets,
+      });
       zip = await createTicketBatchZip(snapshot, async (attachment): Promise<TicketBatchAttachmentDownloadResult> => {
         if (!attachment.fileId) {
-          throw new TicketBatchValidationError(`Ticket #${attachment.ticketId} message ${attachment.messageId} has no downloadable media reference.`);
+          throw new TicketBatchValidationError(
+            `Ticket #${attachment.ticketId} message ${attachment.messageId} has no downloadable media reference.`
+          );
         }
         let file;
         try {
@@ -1321,17 +1669,21 @@ export function createBot(
             return {
               unavailable: true,
               failureCategory: "TELEGRAM_FILE_TOO_LARGE",
-              failureReason: "Attachment exceeds the hosted Telegram Bot API download limit."
+              failureReason: "Attachment exceeds the hosted Telegram Bot API download limit.",
             };
           }
           throw error;
         }
         if (!file.file_path) {
-          throw new TicketBatchValidationError(`Ticket #${attachment.ticketId} message ${attachment.messageId} attachment could not be retrieved.`);
+          throw new TicketBatchValidationError(
+            `Ticket #${attachment.ticketId} message ${attachment.messageId} attachment could not be retrieved.`
+          );
         }
         const response = await fetchImpl(`https://api.telegram.org/file/bot${config.botToken}/${file.file_path}`);
         if (!response.ok) {
-          throw new TicketBatchValidationError(`Ticket #${attachment.ticketId} message ${attachment.messageId} attachment could not be downloaded.`);
+          throw new TicketBatchValidationError(
+            `Ticket #${attachment.ticketId} message ${attachment.messageId} attachment could not be downloaded.`
+          );
         }
         return { bytes: new Uint8Array(await response.arrayBuffer()), telegramFilePath: file.file_path };
       });
@@ -1342,11 +1694,11 @@ export function createBot(
         selectionMode: "all_active",
         ticketCount: snapshot.records.length,
         items: snapshot.records.map((record) => ({ ticketId: record.ticket.id, snapshotToken: record.snapshot_token })),
-        deliveryState: "PREPARING"
+        deliveryState: "PREPARING",
       });
       deliveryAttempted = true;
       const delivered = await ctx.api.sendDocument(destinationChatId, new InputFile(zip.filePath, zip.filename), {
-        caption: formatTicketBatchExportCaption(exportId, zip)
+        caption: formatTicketBatchExportCaption(exportId, zip),
       });
       try {
         db.markTicketBatchExportDelivered(exportId, config.staffChatId, delivered.message_id);
@@ -1361,7 +1713,11 @@ export function createBot(
       if (exportId) {
         try {
           if (deliveryAttempted && error instanceof HttpError) {
-            db.markTicketBatchExportUnknownDelivery(exportId, config.staffChatId, "Export delivery outcome could not be confirmed.");
+            db.markTicketBatchExportUnknownDelivery(
+              exportId,
+              config.staffChatId,
+              "Export delivery outcome could not be confirmed."
+            );
           } else {
             db.markTicketBatchExportFailed(exportId, config.staffChatId, "Export failed before confirmed delivery.");
           }
@@ -1395,7 +1751,7 @@ export function createBot(
       await ctx.reply("Batch operations are available to OWNER and ADMIN in the bot's private chat.");
       return;
     }
-    if (!await requirePermission(ctx, "BATCH_OPERATIONS")) return;
+    if (!(await requirePermission(ctx, "BATCH_OPERATIONS"))) return;
     if (typeof ctx.message?.message_thread_id === "number") {
       await ctx.reply("Please run /exporttickets outside ticket topics.");
       return;
@@ -1404,14 +1760,23 @@ export function createBot(
   });
 
   bot.command("moderation", async (ctx) => {
-    if (!isStaffChat(ctx)) { if (isPrivateChat(ctx)) await ctx.reply(STAFF_ONLY_TEXT); return; }
-    if (!await requirePermission(ctx, "MODERATION_SETTINGS")) return;
+    if (!isStaffChat(ctx)) {
+      if (isPrivateChat(ctx)) await ctx.reply(STAFF_ONLY_TEXT);
+      return;
+    }
+    if (!(await requirePermission(ctx, "MODERATION_SETTINGS"))) return;
     const [, action = "status", ...args] = (ctx.message?.text ?? "").trim().split(/\s+/);
     const current = moderationConfig(db);
-    if (action === "status") { await ctx.reply(await formatModerationStatus(db, current, ctx.api, bot.botInfo?.id)); return; }
+    if (action === "status") {
+      await ctx.reply(await formatModerationStatus(db, current, ctx.api, bot.botInfo?.id));
+      return;
+    }
     if (action === "target") {
       const chatId = Number(args[0]);
-      if (!Number.isSafeInteger(chatId)) { await ctx.reply("Usage: /moderation target <chat_id>"); return; }
+      if (!Number.isSafeInteger(chatId)) {
+        await ctx.reply("Usage: /moderation target <chat_id>");
+        return;
+      }
       try {
         const chat = await ctx.api.getChat(chatId);
         const workspace = installation.getActiveWorkspace();
@@ -1420,49 +1785,106 @@ export function createBot(
         db.upsertManagedPublicChat({
           chatId,
           workspaceId: workspace?.id ?? null,
-          title: "title" in chat ? chat.title ?? null : null,
-          username: "username" in chat ? chat.username ?? null : null,
-          isForum: chat.type === "supergroup" && chat.is_forum === true
+          title: "title" in chat ? (chat.title ?? null) : null,
+          username: "username" in chat ? (chat.username ?? null) : null,
+          isForum: chat.type === "supergroup" && chat.is_forum === true,
         });
-      } catch { await ctx.reply("The target chat is not reachable by this bot."); return; }
+      } catch {
+        await ctx.reply("The target chat is not reachable by this bot.");
+        return;
+      }
       await ctx.reply(`Moderation target set to ${chatId}. It remains disabled until /moderation enable succeeds.`);
       return;
     }
     if (action === "enable") {
       const rights = await validateModerationRights(ctx.api, current.targetChatId, bot.botInfo?.id);
-      if (rights !== "ok") { await ctx.reply(`Moderation remains disabled: ${rights}`); return; }
+      if (rights !== "ok") {
+        await ctx.reply(`Moderation remains disabled: ${rights}`);
+        return;
+      }
       db.setSetting(moderationSettingKey("enabled"), "true");
       if (current.targetChatId !== null) db.setManagedPublicChatModerationEnabled(current.targetChatId, true);
-      await ctx.reply("English-only moderation is enabled."); return;
+      await ctx.reply("English-only moderation is enabled.");
+      return;
     }
     if (action === "disable") {
       db.setSetting(moderationSettingKey("enabled"), "false");
       if (current.targetChatId !== null) db.setManagedPublicChatModerationEnabled(current.targetChatId, false);
-      await ctx.reply("Moderation disabled. Existing strikes and tiers were preserved."); return;
+      await ctx.reply("Moderation disabled. Existing strikes and tiers were preserved.");
+      return;
     }
-    if (action === "allowlist") { await ctx.reply(current.allowlist.length ? `Allowlist (${current.allowlist.length}): ${current.allowlist.join(", ")}` : "Allowlist is empty."); return; }
+    if (action === "allowlist") {
+      await ctx.reply(
+        current.allowlist.length
+          ? `Allowlist (${current.allowlist.length}): ${current.allowlist.join(", ")}`
+          : "Allowlist is empty."
+      );
+      return;
+    }
     if (action === "allow" || action === "unallow") {
       const term = args.join(" ").trim().toLowerCase();
-      if (!term || term.length > 80) { await ctx.reply(`Usage: /moderation ${action} <term up to 80 characters>`); return; }
+      if (!term || term.length > 80) {
+        await ctx.reply(`Usage: /moderation ${action} <term up to 80 characters>`);
+        return;
+      }
       const entries = new Set(current.allowlist);
-      if (action === "allow") entries.add(term); else entries.delete(term);
+      if (action === "allow") entries.add(term);
+      else entries.delete(term);
       db.setSetting(moderationSettingKey("allowlist"), JSON.stringify([...entries].sort()));
-      if (current.targetChatId !== null) db.updateManagedPublicChatConfig(current.targetChatId, {
-        warningText: current.warningText,
-        allowlist: [...entries].sort(),
-        warningCooldownMinutes: current.warningCooldownMinutes,
-        warningMessageThreshold: current.warningMessageThreshold,
-        lookbackMinutes: current.lookbackMinutes
-      });
-      await ctx.reply(action === "allow" ? "Allowlist entry saved." : "Allowlist entry removed."); return;
+      if (current.targetChatId !== null)
+        db.updateManagedPublicChatConfig(current.targetChatId, {
+          warningText: current.warningText,
+          allowlist: [...entries].sort(),
+          warningCooldownMinutes: current.warningCooldownMinutes,
+          warningMessageThreshold: current.warningMessageThreshold,
+          lookbackMinutes: current.lookbackMinutes,
+        });
+      await ctx.reply(action === "allow" ? "Allowlist entry saved." : "Allowlist entry removed.");
+      return;
     }
     const userId = Number(args[0]);
-    if (!Number.isSafeInteger(userId) || !current.targetChatId) { await ctx.reply(`Usage: /moderation ${action} <user_id>`); return; }
-    const state = db.getLanguageModerationUserState(current.targetChatId, userId) ?? { username: null, current_strikes: 0, sanction_tier: 0, first_strike_at: null };
-    if (action === "user") { await ctx.reply(`User ${userId}: strikes ${state.current_strikes}/2, sanction tier ${state.sanction_tier}/3.`); return; }
-    if (action === "resetstrikes") { db.upsertLanguageModerationUserState({ chat_id: current.targetChatId, user_telegram_id: userId, username: state.username, current_strikes: 0, sanction_tier: state.sanction_tier, first_strike_at: null }); db.clearLanguageModerationCycleViolations(current.targetChatId, userId, state.sanction_tier); await ctx.reply(`Strikes reset for ${userId}. Sanction tier remains ${state.sanction_tier}.`); return; }
-    if (action === "resettier") { db.upsertLanguageModerationUserState({ chat_id: current.targetChatId, user_telegram_id: userId, username: state.username, current_strikes: state.current_strikes, sanction_tier: 0, first_strike_at: state.first_strike_at }); await ctx.reply(`Sanction tier reset for ${userId}. This does not unmute or unban the user.`); return; }
-    await ctx.reply("Usage: /moderation status|target|enable|disable|allowlist|allow|unallow|user|resetstrikes|resettier");
+    if (!Number.isSafeInteger(userId) || !current.targetChatId) {
+      await ctx.reply(`Usage: /moderation ${action} <user_id>`);
+      return;
+    }
+    const state = db.getLanguageModerationUserState(current.targetChatId, userId) ?? {
+      username: null,
+      current_strikes: 0,
+      sanction_tier: 0,
+      first_strike_at: null,
+    };
+    if (action === "user") {
+      await ctx.reply(`User ${userId}: strikes ${state.current_strikes}/2, sanction tier ${state.sanction_tier}/3.`);
+      return;
+    }
+    if (action === "resetstrikes") {
+      db.upsertLanguageModerationUserState({
+        chat_id: current.targetChatId,
+        user_telegram_id: userId,
+        username: state.username,
+        current_strikes: 0,
+        sanction_tier: state.sanction_tier,
+        first_strike_at: null,
+      });
+      db.clearLanguageModerationCycleViolations(current.targetChatId, userId, state.sanction_tier);
+      await ctx.reply(`Strikes reset for ${userId}. Sanction tier remains ${state.sanction_tier}.`);
+      return;
+    }
+    if (action === "resettier") {
+      db.upsertLanguageModerationUserState({
+        chat_id: current.targetChatId,
+        user_telegram_id: userId,
+        username: state.username,
+        current_strikes: state.current_strikes,
+        sanction_tier: 0,
+        first_strike_at: state.first_strike_at,
+      });
+      await ctx.reply(`Sanction tier reset for ${userId}. This does not unmute or unban the user.`);
+      return;
+    }
+    await ctx.reply(
+      "Usage: /moderation status|target|enable|disable|allowlist|allow|unallow|user|resetstrikes|resettier"
+    );
   });
 
   bot.command("questnotify", async (ctx) => {
@@ -1471,10 +1893,12 @@ export function createBot(
       return;
     }
 
-    if (!await requirePermission(ctx, "CONFIGURE_INSTALLATION")) return;
+    if (!(await requirePermission(ctx, "CONFIGURE_INSTALLATION"))) return;
     const [, action = "status", ...args] = (ctx.message?.text ?? "").trim().split(/\s+/);
     if (action === "help") {
-      await ctx.reply("Usage: /questnotify status | target <chat_id> | provider <provider_key> | enable | disable | help");
+      await ctx.reply(
+        "Usage: /questnotify status | target <chat_id> | provider <provider_key> | enable | disable | help"
+      );
       return;
     }
     if (action === "status") {
@@ -1494,7 +1918,9 @@ export function createBot(
         return;
       }
       db.setSetting(entityNotificationSettingKey("target_chat_id"), String(targetChatId));
-      await ctx.reply(`Entity notification target set to ${targetChatId}. It remains disabled until /questnotify enable succeeds.`);
+      await ctx.reply(
+        `Entity notification target set to ${targetChatId}. It remains disabled until /questnotify enable succeeds.`
+      );
       return;
     }
     if (action === "provider") {
@@ -1517,7 +1943,9 @@ export function createBot(
       return;
     }
     if (action === "enable") {
-      const targetChatId = parseStoredEntityNotificationTarget(db.getSetting(entityNotificationSettingKey("target_chat_id")));
+      const targetChatId = parseStoredEntityNotificationTarget(
+        db.getSetting(entityNotificationSettingKey("target_chat_id"))
+      );
       if (targetChatId === null) {
         await ctx.reply("Entity notifications remain disabled: configure a reachable target first.");
         return;
@@ -1551,7 +1979,9 @@ export function createBot(
       await ctx.reply("Entity notifications disabled. Target, provider, and publication history were preserved.");
       return;
     }
-    await ctx.reply("Usage: /questnotify status | target <chat_id> | provider <provider_key> | enable | disable | help");
+    await ctx.reply(
+      "Usage: /questnotify status | target <chat_id> | provider <provider_key> | enable | disable | help"
+    );
   });
 
   bot.command("status", async (ctx) => {
@@ -1559,7 +1989,10 @@ export function createBot(
       return;
     }
 
-    if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet."); return; }
+    if (installation.getState().setupState === "SETUP_REQUIRED") {
+      await ctx.reply("Support has not been configured yet.");
+      return;
+    }
     persistUserFromContext(db, ctx);
     if (await replyIfBanned(db, ctx)) {
       return;
@@ -1579,7 +2012,10 @@ export function createBot(
       return;
     }
 
-    if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet."); return; }
+    if (installation.getState().setupState === "SETUP_REQUIRED") {
+      await ctx.reply("Support has not been configured yet.");
+      return;
+    }
     persistUserFromContext(db, ctx);
     if (await replyIfBanned(db, ctx)) {
       return;
@@ -1596,7 +2032,7 @@ export function createBot(
       return;
     }
 
-    if (!await requirePermission(ctx, "VIEW_TICKETS")) return;
+    if (!(await requirePermission(ctx, "VIEW_TICKETS"))) return;
 
     const ticketId = parseTicketId(ctx);
     if (!ticketId) {
@@ -1611,7 +2047,7 @@ export function createBot(
     }
 
     await ctx.reply(formatTicketDetails(ticket, db.listMessages(ticketId, 8)), {
-      reply_markup: ticket.status === "CLOSED" ? undefined : staffTicketKeyboard(ticket.id)
+      reply_markup: ticket.status === "CLOSED" ? undefined : staffTicketKeyboard(ticket.id),
     });
   });
 
@@ -1623,7 +2059,7 @@ export function createBot(
       return;
     }
 
-    if (!await requirePermission(ctx, "CLOSE_TICKETS")) return;
+    if (!(await requirePermission(ctx, "CLOSE_TICKETS"))) return;
 
     const ticketId = parseTicketId(ctx);
     if (!ticketId) {
@@ -1634,7 +2070,7 @@ export function createBot(
     const result = await closeTicket(db, ctx.api, ticketId, {
       notifyUser: true,
       staffNotice: "Ticket closed by staff.",
-      closedBy: staffActor(ctx.from)
+      closedBy: staffActor(ctx.from),
     });
     await notifyStaff(ctx.api, result);
   });
@@ -1647,7 +2083,7 @@ export function createBot(
       return;
     }
 
-    if (!await requirePermission(ctx, "BAN_USERS")) return;
+    if (!(await requirePermission(ctx, "BAN_USERS"))) return;
     const command = parseBanCommand(ctx);
     if (!command) {
       await ctx.reply("Usage: /ban USER_ID reason");
@@ -1666,7 +2102,7 @@ export function createBot(
       return;
     }
 
-    if (!await requirePermission(ctx, "BAN_USERS")) return;
+    if (!(await requirePermission(ctx, "BAN_USERS"))) return;
     const userId = parseUserId(ctx.match.trim());
     if (!userId) {
       await ctx.reply("Usage: /unban USER_ID");
@@ -1681,7 +2117,7 @@ export function createBot(
         action: "UNBANNED",
         userTelegramId: userId,
         username: ban?.username ?? user?.username ?? null,
-        performedBy: staffActor(ctx.from)
+        performedBy: staffActor(ctx.from),
       });
     }
 
@@ -1696,7 +2132,7 @@ export function createBot(
       return;
     }
 
-    if (!await requirePermission(ctx, "BAN_USERS")) return;
+    if (!(await requirePermission(ctx, "BAN_USERS"))) return;
     const bans = db.listBannedUsers();
     if (!bans.length) {
       await ctx.reply("There are no banned users.");
@@ -1709,7 +2145,7 @@ export function createBot(
         ...bans.map((ban) => {
           const username = ban.username ? `@${ban.username}` : "no username";
           return `${ban.user_telegram_id} (${username}) - ${ban.reason}`;
-        })
+        }),
       ].join("\n")
     );
   });
@@ -1722,7 +2158,7 @@ export function createBot(
       return;
     }
 
-    if (!await requirePermission(ctx, "VIEW_TICKETS")) return;
+    if (!(await requirePermission(ctx, "VIEW_TICKETS"))) return;
 
     const messageThreadId = ctx.message?.message_thread_id;
     if (typeof messageThreadId !== "number") {
@@ -1737,7 +2173,7 @@ export function createBot(
     }
 
     await ctx.reply(formatWhois(ticket, db.getBannedUser(ticket.user_telegram_id)), {
-      message_thread_id: messageThreadId
+      message_thread_id: messageThreadId,
     });
   });
 
@@ -1750,7 +2186,13 @@ export function createBot(
       return;
     }
 
-    if (isPrivateChat(ctx) && ctx.from && installation.getMember(ctx.from.id) && privateControlPlane.hasOperatorNamespace(namespace ?? "") && data !== "dashboard:test-ticket") {
+    if (
+      isPrivateChat(ctx) &&
+      ctx.from &&
+      installation.getMember(ctx.from.id) &&
+      privateControlPlane.hasOperatorNamespace(namespace ?? "") &&
+      data !== "dashboard:test-ticket"
+    ) {
       clearStaffTestTicketMode(ctx.from.id);
     }
     if (isPrivateChat(ctx) && ctx.from && namespace !== "support") {
@@ -1760,14 +2202,29 @@ export function createBot(
     if (await privateControlPlane.handleCallback(ctx, data)) return;
 
     if (namespace === "owner" && data === "owner:confirm-transfer") {
-      if (!isPrivateChat(ctx) || !ctx.from || !db.hasPendingOwnerTransfer(ctx.from.id)) { await ctx.answerCallbackQuery({ text: "No pending owner transfer.", show_alert: true }); return; }
-      if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
-      installation.confirmOwnerTransfer(ctx.from.id); await ctx.answerCallbackQuery({ text: "Ownership transferred." }); await showOnboarding(ctx, "WELCOME"); return;
+      if (!isPrivateChat(ctx) || !ctx.from || !db.hasPendingOwnerTransfer(ctx.from.id)) {
+        await ctx.answerCallbackQuery({ text: "No pending owner transfer.", show_alert: true });
+        return;
+      }
+      if (!(await hasRequiredPrivateWorkspaceMembership(ctx))) {
+        await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true });
+        return;
+      }
+      installation.confirmOwnerTransfer(ctx.from.id);
+      await ctx.answerCallbackQuery({ text: "Ownership transferred." });
+      await showOnboarding(ctx, "WELCOME");
+      return;
     }
 
     if (namespace === "setup") {
-      if (!isPrivateChat(ctx) || !ctx.from || !installation.can(ctx.from.id, "CONFIGURE_INSTALLATION")) { await ctx.answerCallbackQuery({ text: "Owner or administrator access required.", show_alert: true }); return; }
-      if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
+      if (!isPrivateChat(ctx) || !ctx.from || !installation.can(ctx.from.id, "CONFIGURE_INSTALLATION")) {
+        await ctx.answerCallbackQuery({ text: "Owner or administrator access required.", show_alert: true });
+        return;
+      }
+      if (!(await hasRequiredPrivateWorkspaceMembership(ctx))) {
+        await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true });
+        return;
+      }
       const [, action, value] = data.split(":");
       await ctx.answerCallbackQuery();
       if (installation.getState().setupState === "READY") {
@@ -1775,28 +2232,75 @@ export function createBot(
         await showDashboard(ctx);
         return;
       }
-      if (action === "workspace") { await sendWorkspacePicker(ctx); return; }
+      if (action === "workspace") {
+        await sendWorkspacePicker(ctx);
+        return;
+      }
       if (action === "use-existing") {
         const workspace = installation.getActiveWorkspace();
-        if (!workspace) { await renderPrivateScreen(ctx, "No existing staff workspace is available.", new InlineKeyboard().text("Back", "setup:stage:STAFF_WORKSPACE")); return; }
+        if (!workspace) {
+          await renderPrivateScreen(
+            ctx,
+            "No existing staff workspace is available.",
+            new InlineKeyboard().text("Back", "setup:stage:STAFF_WORKSPACE")
+          );
+          return;
+        }
         const result = await validateStaffWorkspace(ctx.api, workspace.telegram_chat_id, ctx.from.id);
         await completeWorkspaceSelection(ctx, result, "SETUP");
         return;
       }
-      if (action === "exit") { const stage = installation.getOnboardingSession(ctx.from.id)?.stage as (typeof onboardingStages)[number] | undefined; installation.saveOnboardingStage(ctx.from.id, stage ?? "WELCOME", "EXITED"); await renderPrivateScreen(ctx, "Setup paused. Resume when you are ready.", new InlineKeyboard().text("Resume setup", "setup:resume")); return; }
-      if (action === "resume") { const stage = installation.getOnboardingSession(ctx.from.id)?.stage as (typeof onboardingStages)[number] | undefined; await showOnboarding(ctx, stage ?? "WELCOME"); return; }
-      if (action === "stage" && onboardingStages.includes(value as (typeof onboardingStages)[number])) { await showOnboarding(ctx, value as (typeof onboardingStages)[number]); return; }
+      if (action === "exit") {
+        const stage = installation.getOnboardingSession(ctx.from.id)?.stage as
+          (typeof onboardingStages)[number] | undefined;
+        installation.saveOnboardingStage(ctx.from.id, stage ?? "WELCOME", "EXITED");
+        await renderPrivateScreen(
+          ctx,
+          "Setup paused. Resume when you are ready.",
+          new InlineKeyboard().text("Resume setup", "setup:resume")
+        );
+        return;
+      }
+      if (action === "resume") {
+        const stage = installation.getOnboardingSession(ctx.from.id)?.stage as
+          (typeof onboardingStages)[number] | undefined;
+        await showOnboarding(ctx, stage ?? "WELCOME");
+        return;
+      }
+      if (action === "stage" && onboardingStages.includes(value as (typeof onboardingStages)[number])) {
+        await showOnboarding(ctx, value as (typeof onboardingStages)[number]);
+        return;
+      }
       if (action === "activate") {
-        try { const chatId = installation.getStaffChatId(); if (chatId === null) throw new Error("A validated staff workspace is required before activation."); setRuntimeStaffChatId(chatId); await initializeSupportLogsTopic(ctx.api, db); installation.markReady(); installation.saveOnboardingStage(ctx.from.id, "ACTIVATE_SUPPORT", "COMPLETED"); await showDashboard(ctx); }
-        catch (error) { await renderPrivateScreen(ctx, error instanceof Error ? error.message : "Support could not be activated.", new InlineKeyboard().text("Retry activation", "setup:activate").row().text("Back", "setup:stage:SUMMARY")); }
+        try {
+          const chatId = installation.getStaffChatId();
+          if (chatId === null) throw new Error("A validated staff workspace is required before activation.");
+          setRuntimeStaffChatId(chatId);
+          await initializeSupportLogsTopic(ctx.api, db);
+          installation.markReady();
+          installation.saveOnboardingStage(ctx.from.id, "ACTIVATE_SUPPORT", "COMPLETED");
+          await showDashboard(ctx);
+        } catch (error) {
+          await renderPrivateScreen(
+            ctx,
+            error instanceof Error ? error.message : "Support could not be activated.",
+            new InlineKeyboard().text("Retry activation", "setup:activate").row().text("Back", "setup:stage:SUMMARY")
+          );
+        }
         return;
       }
       return;
     }
 
     if (namespace === "workspace") {
-      if (!isPrivateChat(ctx) || !ctx.from || !installation.can(ctx.from.id, "CONFIGURE_INSTALLATION")) { await ctx.answerCallbackQuery({ text: "Owner or administrator access required.", show_alert: true }); return; }
-      if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true }); return; }
+      if (!isPrivateChat(ctx) || !ctx.from || !installation.can(ctx.from.id, "CONFIGURE_INSTALLATION")) {
+        await ctx.answerCallbackQuery({ text: "Owner or administrator access required.", show_alert: true });
+        return;
+      }
+      if (!(await hasRequiredPrivateWorkspaceMembership(ctx))) {
+        await ctx.answerCallbackQuery({ text: "Staff workspace membership required.", show_alert: true });
+        return;
+      }
       await ctx.answerCallbackQuery();
       if (data === "workspace:select") await sendWorkspacePicker(ctx, "RECONFIGURE");
       else await showStaffWorkspaceSettings(ctx);
@@ -1804,7 +2308,7 @@ export function createBot(
     }
 
     if (namespace === "batch-ui") {
-      if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) {
+      if (!(await requirePrivatePermission(ctx, "BATCH_OPERATIONS"))) {
         await ctx.answerCallbackQuery({ text: "Batch operations require OWNER or ADMIN.", show_alert: true });
         return;
       }
@@ -1844,7 +2348,14 @@ export function createBot(
         return;
       }
       if (action === "abort") {
-        await renderPrivateScreen(ctx, "Abort this batch workflow? The export remains available in history, but this private answer-import flow will be cleared.", new InlineKeyboard().text("Abort batch", "batch-ui:abort-confirm").row().text("Keep waiting", "batch-ui:continue"));
+        await renderPrivateScreen(
+          ctx,
+          "Abort this batch workflow? The export remains available in history, but this private answer-import flow will be cleared.",
+          new InlineKeyboard()
+            .text("Abort batch", "batch-ui:abort-confirm")
+            .row()
+            .text("Keep waiting", "batch-ui:continue")
+        );
         return;
       }
       if (action === "abort-confirm") {
@@ -1854,7 +2365,11 @@ export function createBot(
       }
       if (action === "recent") {
         const pending = db.getInstallationOperationalCounts().pendingBatchStaffOperations;
-        await renderPrivateScreen(ctx, `Batch status\n\nPending staff synchronization: ${pending}`, new InlineKeyboard().text("Back", "dashboard:home"));
+        await renderPrivateScreen(
+          ctx,
+          `Batch status\n\nPending staff synchronization: ${pending}`,
+          new InlineKeyboard().text("Back", "dashboard:home")
+        );
         return;
       }
       await showDashboard(ctx);
@@ -1882,15 +2397,21 @@ export function createBot(
 
     if (namespace === "batch") {
       if (isPrivateChat(ctx)) {
-        if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) {
+        if (!(await requirePrivatePermission(ctx, "BATCH_OPERATIONS"))) {
           await ctx.answerCallbackQuery({ text: "Batch operations require OWNER or ADMIN.", show_alert: true });
           return;
         }
       } else if (!isStaffChat(ctx)) {
-        await ctx.answerCallbackQuery({ text: "Batch operations are available in the private staff dashboard.", show_alert: true });
+        await ctx.answerCallbackQuery({
+          text: "Batch operations are available in the private staff dashboard.",
+          show_alert: true,
+        });
         return;
       } else if (installation.getState().authorizationMode === "RBAC_ACTIVE") {
-        await ctx.answerCallbackQuery({ text: "Batch operations are available to OWNER and ADMIN in the bot's private chat.", show_alert: true });
+        await ctx.answerCallbackQuery({
+          text: "Batch operations are available to OWNER and ADMIN in the bot's private chat.",
+          show_alert: true,
+        });
         return;
       } else if (!ctx.from || !hasApplicationPermission(ctx, "BATCH_OPERATIONS")) {
         await ctx.answerCallbackQuery({ text: "Batch operations require OWNER or ADMIN.", show_alert: true });
@@ -1905,15 +2426,24 @@ export function createBot(
 
   bot.on("message:chat_shared", async (ctx) => {
     if (!ctx.from || !isPrivateChat(ctx) || !installation.can(ctx.from.id, "CONFIGURE_INSTALLATION")) return;
-    if (!await hasRequiredPrivateWorkspaceMembership(ctx)) { await ctx.reply("Staff workspace membership required for role-based access."); return; }
+    if (!(await hasRequiredPrivateWorkspaceMembership(ctx))) {
+      await ctx.reply("Staff workspace membership required for role-based access.");
+      return;
+    }
     const shared = ctx.message.chat_shared;
     if (shared.request_id === 1400) {
       try {
-        await privateControlPlane.inspectAndSavePublicChat(ctx, shared.chat_id, { title: shared.title, username: shared.username });
+        await privateControlPlane.inspectAndSavePublicChat(ctx, shared.chat_id, {
+          title: shared.title,
+          username: shared.username,
+        });
       } catch (error) {
         logger.warn({ chatId: shared.chat_id, err: error }, "Could not add selected public chat");
         await clearPublicChatPicker(ctx);
-        await privateControlPlane.showPublicChats(ctx, "The selected public chat could not be inspected. Add the bot as an administrator, then retry.");
+        await privateControlPlane.showPublicChats(
+          ctx,
+          "The selected public chat could not be inspected. Add the bot as an administrator, then retry."
+        );
       }
       return;
     }
@@ -1924,8 +2454,18 @@ export function createBot(
       await completeWorkspaceSelection(ctx, result, mode, { title: shared.title, username: shared.username });
     } catch {
       const mode = privateControlPlane.getPendingWorkspaceSelection(ctx.from.id) ?? "SETUP";
-      if (mode === "RECONFIGURE") await showStaffWorkspaceSettings(ctx, "The selected group could not be inspected. Add the bot as administrator, enable Topics, then retry.", true);
-      else await renderPrivateScreen(ctx, "The selected group could not be inspected. Add the bot as administrator, enable Topics, then retry.", new InlineKeyboard().text("Retry", "setup:workspace").row().text("Back", "setup:stage:STAFF_WORKSPACE"));
+      if (mode === "RECONFIGURE")
+        await showStaffWorkspaceSettings(
+          ctx,
+          "The selected group could not be inspected. Add the bot as administrator, enable Topics, then retry.",
+          true
+        );
+      else
+        await renderPrivateScreen(
+          ctx,
+          "The selected group could not be inspected. Add the bot as administrator, enable Topics, then retry.",
+          new InlineKeyboard().text("Retry", "setup:workspace").row().text("Back", "setup:stage:STAFF_WORKSPACE")
+        );
     }
   });
 
@@ -1941,38 +2481,50 @@ export function createBot(
     const actor = reaction.user;
     const owner = installation.getOwner();
     if (
-      !actor
-      || reaction.actor_chat
-      || actor.is_bot
-      || !owner
-      || owner.userTelegramId !== actor.id
-      || hasEmojiReaction(reaction.old_reaction, MODERATION_STRIKE_REACTION)
-      || !hasEmojiReaction(reaction.new_reaction, MODERATION_STRIKE_REACTION)
-    ) return;
+      !actor ||
+      reaction.actor_chat ||
+      actor.is_bot ||
+      !owner ||
+      owner.userTelegramId !== actor.id ||
+      hasEmojiReaction(reaction.old_reaction, MODERATION_STRIKE_REACTION) ||
+      !hasEmojiReaction(reaction.new_reaction, MODERATION_STRIKE_REACTION)
+    )
+      return;
 
     const moderation = moderationConfigForChat(db, reaction.chat.id);
-    if (!moderation.enabled || moderation.targetChatId !== reaction.chat.id || reaction.chat.id === config.staffChatId) return;
+    if (!moderation.enabled || moderation.targetChatId !== reaction.chat.id || reaction.chat.id === config.staffChatId)
+      return;
     const author = db.getLanguageModerationMessageAuthor(reaction.chat.id, reaction.message_id);
     if (!author) {
-      logger.debug({ chatId: reaction.chat.id, messageId: reaction.message_id }, "Manual moderation reaction has no stored message author");
+      logger.debug(
+        { chatId: reaction.chat.id, messageId: reaction.message_id },
+        "Manual moderation reaction has no stored message author"
+      );
       return;
     }
 
-    const state = db.getLanguageModerationUserState(reaction.chat.id, author.user_telegram_id)
-      ?? { current_strikes: 0, sanction_tier: 0, first_strike_at: null };
+    const state = db.getLanguageModerationUserState(reaction.chat.id, author.user_telegram_id) ?? {
+      current_strikes: 0,
+      sanction_tier: 0,
+      first_strike_at: null,
+    };
     const added = db.addLanguageModerationViolation({
       chat_id: reaction.chat.id,
       user_telegram_id: author.user_telegram_id,
       message_id: reaction.message_id,
       message_thread_id: author.message_thread_id,
       username: author.username,
-      cycle_tier: state.sanction_tier
+      cycle_tier: state.sanction_tier,
     });
-    if (!added && !isPendingCurrentCycleFirstStrike(
-      db.getLanguageModerationViolation(reaction.chat.id, reaction.message_id),
-      author.user_telegram_id,
-      state
-    )) return;
+    if (
+      !added &&
+      !isPendingCurrentCycleFirstStrike(
+        db.getLanguageModerationViolation(reaction.chat.id, reaction.message_id),
+        author.user_telegram_id,
+        state
+      )
+    )
+      return;
 
     await advanceModerationStrike({
       db,
@@ -1985,7 +2537,7 @@ export function createBot(
       state,
       now: moderationNow,
       cleanupScheduler: moderationCleanupScheduler,
-      setStrikeReaction: false
+      setStrikeReaction: false,
     });
   });
 
@@ -2002,7 +2554,7 @@ export function createBot(
           await ctx.reply("Batch operations are available to OWNER and ADMIN in the bot's private chat.");
           return;
         }
-        if (!await requirePermission(ctx, "BATCH_OPERATIONS")) return;
+        if (!(await requirePermission(ctx, "BATCH_OPERATIONS"))) return;
         await handleTicketAnswerPackageUpload(ctx);
         return;
       }
@@ -2017,8 +2569,13 @@ export function createBot(
 
     if (ctx.from && !installation.getMember(ctx.from.id)) await enrollPrivateWorkspaceMember(ctx);
 
-    if (ctx.from && installation.getMember(ctx.from.id) && getPendingPrivateBatchExport(ctx.from.id) && isTicketAnswerPackageDocument(ctx.message)) {
-      if (!await requirePrivatePermission(ctx, "BATCH_OPERATIONS")) return;
+    if (
+      ctx.from &&
+      installation.getMember(ctx.from.id) &&
+      getPendingPrivateBatchExport(ctx.from.id) &&
+      isTicketAnswerPackageDocument(ctx.message)
+    ) {
+      if (!(await requirePrivatePermission(ctx, "BATCH_OPERATIONS"))) return;
       const exportId = getPendingPrivateBatchExport(ctx.from.id)!;
       const filename = ctx.message.document?.file_name ?? "";
       if (filename.toLowerCase() !== `ticket-answers_${exportId}.json`.toLowerCase()) {
@@ -2029,11 +2586,17 @@ export function createBot(
       return;
     }
 
-    if (ctx.from && installation.getMember(ctx.from.id) && db.getSetting(`staff_test_ticket_mode:${ctx.from.id}`) !== "true") {
+    if (
+      ctx.from &&
+      installation.getMember(ctx.from.id) &&
+      db.getSetting(`staff_test_ticket_mode:${ctx.from.id}`) !== "true"
+    ) {
       const text = ctx.message && "text" in ctx.message ? ctx.message.text : "";
-      if (text && await privateControlPlane.handlePrivateInput(ctx, text)) return;
+      if (text && (await privateControlPlane.handlePrivateInput(ctx, text))) return;
       const session = installation.getOnboardingSession(ctx.from.id);
-      const workspaceMode = privateControlPlane.getPendingWorkspaceSelection(ctx.from.id) ?? (session?.state === "ACTIVE" && session.stage === "STAFF_WORKSPACE" ? "SETUP" : undefined);
+      const workspaceMode =
+        privateControlPlane.getPendingWorkspaceSelection(ctx.from.id) ??
+        (session?.state === "ACTIVE" && session.stage === "STAFF_WORKSPACE" ? "SETUP" : undefined);
       if (workspaceMode && text) {
         if (workspaceMode === "RECONFIGURE" && text === "Cancel workspace selection") {
           privateControlPlane.clearPendingWorkspaceSelection(ctx.from.id);
@@ -2044,7 +2607,11 @@ export function createBot(
         }
         if (isPrivateInviteLink(text)) {
           const retry = workspaceMode === "RECONFIGURE" ? "workspace:select" : "setup:workspace";
-          await renderPrivateScreen(ctx, "The bot cannot inspect an inaccessible private invite link. Add the bot to that group, then use the Telegram group picker.", new InlineKeyboard().text("Choose group", retry));
+          await renderPrivateScreen(
+            ctx,
+            "The bot cannot inspect an inaccessible private invite link. Add the bot to that group, then use the Telegram group picker.",
+            new InlineKeyboard().text("Choose group", retry)
+          );
           return;
         }
         const reference = parsePublicSupergroupReference(text);
@@ -2054,15 +2621,30 @@ export function createBot(
             const result = await validateStaffWorkspace(ctx.api, chat.id, ctx.from.id);
             await completeWorkspaceSelection(ctx, result, workspaceMode);
           } catch {
-            if (workspaceMode === "RECONFIGURE") await showStaffWorkspaceSettings(ctx, "That public supergroup could not be validated. Check the username and bot permissions.", true);
-            else await renderPrivateScreen(ctx, "That public supergroup could not be validated. Check the username and bot permissions.", new InlineKeyboard().text("Retry", "setup:workspace").row().text("Back", "setup:stage:STAFF_WORKSPACE"));
+            if (workspaceMode === "RECONFIGURE")
+              await showStaffWorkspaceSettings(
+                ctx,
+                "That public supergroup could not be validated. Check the username and bot permissions.",
+                true
+              );
+            else
+              await renderPrivateScreen(
+                ctx,
+                "That public supergroup could not be validated. Check the username and bot permissions.",
+                new InlineKeyboard().text("Retry", "setup:workspace").row().text("Back", "setup:stage:STAFF_WORKSPACE")
+              );
           }
           return;
         }
       }
-      await showDashboard(ctx); return;
+      await showDashboard(ctx);
+      return;
     }
-    const staffTestTicketMode = Boolean(ctx.from && installation.getMember(ctx.from.id) && db.getSetting(`${STAFF_TEST_TICKET_MODE_SETTING_PREFIX}${ctx.from.id}`) === "true");
+    const staffTestTicketMode = Boolean(
+      ctx.from &&
+      installation.getMember(ctx.from.id) &&
+      db.getSetting(`${STAFF_TEST_TICKET_MODE_SETTING_PREFIX}${ctx.from.id}`) === "true"
+    );
     clearStaffTestTicketMode(ctx.from?.id);
     if (!staffTestTicketMode && ctx.from) {
       const ingressDecision = supportIngressLimiter.check(ctx.from.id);
@@ -2071,7 +2653,10 @@ export function createBot(
         return;
       }
     }
-    if (installation.getState().setupState === "SETUP_REQUIRED") { await ctx.reply("Support has not been configured yet. Please try again later."); return; }
+    if (installation.getState().setupState === "SETUP_REQUIRED") {
+      await ctx.reply("Support has not been configured yet. Please try again later.");
+      return;
+    }
     if (await replyIfBanned(db, ctx)) {
       return;
     }
@@ -2100,7 +2685,12 @@ export function createBot(
     }
     if (typeof document.file_size === "number" && document.file_size > 5 * 1024 * 1024) {
       if (privateWorkflowExportId && isPrivateChat(ctx)) {
-        await showPrivateBatchWaiting(ctx, privateWorkflowExportId, true, "Ticket answer packages must be 5 MiB or smaller.");
+        await showPrivateBatchWaiting(
+          ctx,
+          privateWorkflowExportId,
+          true,
+          "Ticket answer packages must be 5 MiB or smaller."
+        );
       } else {
         await ctx.reply("Ticket answer packages must be 5 MiB or smaller.");
       }
@@ -2135,7 +2725,9 @@ export function createBot(
         throw new TicketBatchValidationError("This answer package belongs to a different export.");
       }
       if (exportRecord.delivery_state !== "DELIVERED") {
-        throw new TicketBatchValidationError("This answer package references an export whose delivery was not confirmed.");
+        throw new TicketBatchValidationError(
+          "This answer package references an export whose delivery was not confirmed."
+        );
       }
       const exportItems = db.listTicketBatchExportItems(exportId);
       const answerPackage = parseAndValidateAnswerPackage(raw, exportId, exportItems);
@@ -2148,7 +2740,9 @@ export function createBot(
         throw new TicketBatchValidationError("This answer_package_id was already imported with different content.");
       }
       if (!existingById && existingByHash) {
-        throw new TicketBatchValidationError("This answer package content was already imported under a different identity.");
+        throw new TicketBatchValidationError(
+          "This answer package content was already imported under a different identity."
+        );
       }
       if (persistedPackage && persistedPackage.status !== "PENDING") {
         throw new TicketBatchValidationError("This answer package is no longer previewable.");
@@ -2162,7 +2756,7 @@ export function createBot(
           sourceChatId: ctx.chat.id,
           sourceMessageId: ctx.message?.message_id ?? null,
           packageCreatedAt: answerPackage.created_at,
-          items: answerPackage.answers
+          items: answerPackage.answers,
         });
       }
       const previewToken = persistedPackage.preview_token ?? randomUUID().replace(/-/g, "");
@@ -2170,22 +2764,31 @@ export function createBot(
       const text = formatTicketBatchPreviewPage(pages, previewPage);
       const keyboard = ticketBatchPreviewKeyboard(previewToken, previewPage, pages.length);
       if (persistedPackage.preview_chat_id !== null && persistedPackage.preview_message_id !== null) {
-        await ctx.api.editMessageText(persistedPackage.preview_chat_id, persistedPackage.preview_message_id, text, { reply_markup: keyboard });
-        db.updateTicketBatchAnswerPackagePreviewPage(persistedPackage.answer_package_id, config.staffChatId, previewPage);
+        await ctx.api.editMessageText(persistedPackage.preview_chat_id, persistedPackage.preview_message_id, text, {
+          reply_markup: keyboard,
+        });
+        db.updateTicketBatchAnswerPackagePreviewPage(
+          persistedPackage.answer_package_id,
+          config.staffChatId,
+          previewPage
+        );
         if (isPrivateChat(ctx) && ctx.from) {
           setPendingPrivateBatchExport(ctx.from.id, undefined);
         }
         return;
       }
-      const previewMessage = privateWorkflowExportId && isPrivateChat(ctx)
-        ? await refreshPrivateScreen(ctx, text, keyboard)
-        : await ctx.reply(text, { reply_markup: keyboard });
-      if (!db.setTicketBatchAnswerPackagePreview(persistedPackage.answer_package_id, config.staffChatId, {
-        token: previewToken,
-        chatId: ctx.chat.id,
-        messageId: previewMessage.message_id,
-        page: previewPage
-      })) {
+      const previewMessage =
+        privateWorkflowExportId && isPrivateChat(ctx)
+          ? await refreshPrivateScreen(ctx, text, keyboard)
+          : await ctx.reply(text, { reply_markup: keyboard });
+      if (
+        !db.setTicketBatchAnswerPackagePreview(persistedPackage.answer_package_id, config.staffChatId, {
+          token: previewToken,
+          chatId: ctx.chat.id,
+          messageId: previewMessage.message_id,
+          page: previewPage,
+        })
+      ) {
         try {
           await ctx.api.deleteMessage(ctx.chat.id, previewMessage.message_id);
         } catch (cleanupError) {
@@ -2198,7 +2801,8 @@ export function createBot(
       }
       logger.info({ exportId, previewMessageId: previewMessage.message_id }, "Ticket answer package preview created");
     } catch (error) {
-      const message = error instanceof TicketBatchValidationError ? error.message : "Could not validate the ticket answer package.";
+      const message =
+        error instanceof TicketBatchValidationError ? error.message : "Could not validate the ticket answer package.";
       logger.warn("Ticket answer package validation failed");
       if (privateWorkflowExportId && isPrivateChat(ctx)) {
         await showPrivateBatchWaiting(ctx, privateWorkflowExportId, true, message);
@@ -2224,7 +2828,11 @@ export function createBot(
       return;
     }
     const packageRecord = db.getTicketBatchAnswerPackageByPreviewToken(token, config.staffChatId);
-    if (!packageRecord || packageRecord.preview_chat_id !== message.chat.id || packageRecord.preview_message_id !== message.message_id) {
+    if (
+      !packageRecord ||
+      packageRecord.preview_chat_id !== message.chat.id ||
+      packageRecord.preview_message_id !== message.message_id
+    ) {
       await ctx.answerCallbackQuery({ text: "This preview has expired." });
       return;
     }
@@ -2240,7 +2848,7 @@ export function createBot(
         return;
       }
       await ctx.api.editMessageText(message.chat.id, message.message_id, formatTicketBatchPreviewPage(pages, page), {
-        reply_markup: ticketBatchPreviewKeyboard(token, page, pages.length)
+        reply_markup: ticketBatchPreviewKeyboard(token, page, pages.length),
       });
       db.updateTicketBatchAnswerPackagePreviewPage(packageRecord.answer_package_id, config.staffChatId, page);
       await ctx.answerCallbackQuery();
@@ -2257,7 +2865,12 @@ export function createBot(
       await cleanupTicketBatchPreview(packageRecord, "Package cancelled.");
       if (isPrivateChat(ctx) && ctx.from) {
         setPendingPrivateBatchExport(ctx.from.id, packageRecord.export_id);
-        await showPrivateBatchWaiting(ctx, packageRecord.export_id, true, "The preview was cancelled. You can send another answer file for this export.");
+        await showPrivateBatchWaiting(
+          ctx,
+          packageRecord.export_id,
+          true,
+          "The preview was cancelled. You can send another answer file for this export."
+        );
       }
       return;
     }
@@ -2290,12 +2903,14 @@ export function createBot(
       text: summary,
       chatId: ctx.chat?.id ?? config.staffChatId,
       originChatId: claimed.preview_chat_id,
-      originMessageId: claimed.preview_message_id
+      originMessageId: claimed.preview_message_id,
     });
     await recoverTicketBatchStaffOperations(claimed.answer_package_id);
   }
 
-  function buildStoredTicketBatchPreviewPages(packageRecord: ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>): string[] {
+  function buildStoredTicketBatchPreviewPages(
+    packageRecord: ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>
+  ): string[] {
     if (!packageRecord) {
       throw new TicketBatchValidationError("Ticket answer package not found.");
     }
@@ -2312,10 +2927,13 @@ export function createBot(
         reply_text: item.reply_text,
         follow_up_state: item.follow_up_state,
         internal_note: item.internal_note,
-        escalation_target: item.escalation_target
-      }))
+        escalation_target: item.escalation_target,
+      })),
     };
-    return buildTicketBatchPreviewPagesForAnswerPackage(answerPackage, db.listTicketBatchExportItems(packageRecord.export_id));
+    return buildTicketBatchPreviewPagesForAnswerPackage(
+      answerPackage,
+      db.listTicketBatchExportItems(packageRecord.export_id)
+    );
   }
 
   function buildTicketBatchPreviewPagesForAnswerPackage(
@@ -2325,12 +2943,18 @@ export function createBot(
     const preview = buildAnswerPackagePreview(answerPackage, exportItems, (ticketId) => {
       const ticket = db.getTicketWithUser(ticketId);
       if (!ticket || ticket.staff_chat_id !== config.staffChatId) return null;
-      return { status: ticket.status, snapshotToken: getTicketSnapshotToken(ticket, db.listMessagesChronological(ticket.id)) };
+      return {
+        status: ticket.status,
+        snapshotToken: getTicketSnapshotToken(ticket, db.listMessagesChronological(ticket.id)),
+      };
     });
     return buildTicketBatchPreviewPages(answerPackage.export_id, preview);
   }
 
-  async function cleanupTicketBatchPreview(packageRecord: NonNullable<ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>>, fallbackText: string): Promise<boolean> {
+  async function cleanupTicketBatchPreview(
+    packageRecord: NonNullable<ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>>,
+    fallbackText: string
+  ): Promise<boolean> {
     if (packageRecord.preview_chat_id === null || packageRecord.preview_message_id === null) {
       return true;
     }
@@ -2339,27 +2963,44 @@ export function createBot(
       return true;
     } catch (error) {
       const diagnostic = normalizeTelegramDeliveryError(error);
-      logger.warn({ answerPackageId: packageRecord.answer_package_id, category: diagnostic.category }, "Could not delete ticket batch preview");
+      logger.warn(
+        { answerPackageId: packageRecord.answer_package_id, category: diagnostic.category },
+        "Could not delete ticket batch preview"
+      );
       try {
-        await bot.api.editMessageText(packageRecord.preview_chat_id, packageRecord.preview_message_id, fallbackText, { reply_markup: undefined });
+        await bot.api.editMessageText(packageRecord.preview_chat_id, packageRecord.preview_message_id, fallbackText, {
+          reply_markup: undefined,
+        });
       } catch (editError) {
         const diagnostic = normalizeTelegramDeliveryError(editError);
-        logger.warn({ answerPackageId: packageRecord.answer_package_id, category: diagnostic.category }, "Could not neutralize ticket batch preview");
+        logger.warn(
+          { answerPackageId: packageRecord.answer_package_id, category: diagnostic.category },
+          "Could not neutralize ticket batch preview"
+        );
       }
       return false;
     }
   }
 
-  async function neutralizeTicketBatchPreview(packageRecord: NonNullable<ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>>, text: string): Promise<void> {
+  async function neutralizeTicketBatchPreview(
+    packageRecord: NonNullable<ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>>,
+    text: string
+  ): Promise<void> {
     if (packageRecord.preview_chat_id === null || packageRecord.preview_message_id === null) return;
     const previewChatId = packageRecord.preview_chat_id;
     const previewMessageId = packageRecord.preview_message_id;
     try {
-      await runStaffChatOperation(() => bot.api.editMessageText(previewChatId, previewMessageId, text, { reply_markup: undefined }), previewChatId);
+      await runStaffChatOperation(
+        () => bot.api.editMessageText(previewChatId, previewMessageId, text, { reply_markup: undefined }),
+        previewChatId
+      );
     } catch (error) {
       const failure = batchStaffFailure(error);
       scheduleTicketBatchStaffRecovery(failure.retryAt);
-      logger.warn({ answerPackageId: packageRecord.answer_package_id, category: failure.category }, "Could not neutralize active ticket batch preview");
+      logger.warn(
+        { answerPackageId: packageRecord.answer_package_id, category: failure.category },
+        "Could not neutralize active ticket batch preview"
+      );
     }
   }
 
@@ -2370,20 +3011,41 @@ export function createBot(
     const exportTokens = new Map(exportItems.map((item) => [item.ticket_id, item.snapshot_token]));
     const items = db.listTicketBatchAnswerItems(answerPackageId);
     const totals = {
-      keep: 0, close: 0, noAction: 0, stale: 0, inactive: 0, unknown: 0, replySent: 0, staffSync: 0, skipped: 0,
+      keep: 0,
+      close: 0,
+      noAction: 0,
+      stale: 0,
+      inactive: 0,
+      unknown: 0,
+      replySent: 0,
+      staffSync: 0,
+      skipped: 0,
       permanentFailures: [] as Array<{ ticketId: number; category: string }>,
-      temporaryFailures: [] as Array<{ ticketId: number; category: string; retryAfter: number | null }>
+      temporaryFailures: [] as Array<{ ticketId: number; category: string; retryAfter: number | null }>,
     };
 
     for (const item of items) {
-      if (["COMPLETED", "NO_ACTION", "STALE", "INACTIVE"].includes(item.state)) { totals.skipped += 1; continue; }
-      if (item.state === "UNKNOWN_DELIVERY" || item.state === "APPLYING") { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "UNKNOWN_DELIVERY", { lastError: "Delivery outcome requires manual review." }); totals.unknown += 1; continue; }
+      if (["COMPLETED", "NO_ACTION", "STALE", "INACTIVE"].includes(item.state)) {
+        totals.skipped += 1;
+        continue;
+      }
+      if (item.state === "UNKNOWN_DELIVERY" || item.state === "APPLYING") {
+        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "UNKNOWN_DELIVERY", {
+          lastError: "Delivery outcome requires manual review.",
+        });
+        totals.unknown += 1;
+        continue;
+      }
       const ticket = db.getTicketWithUser(item.ticket_id);
       if (item.state === "STAFF_SYNC_PENDING") {
-        if (!ticket || ticket.staff_chat_id !== config.staffChatId) { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true }); totals.inactive += 1; continue; }
+        if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true });
+          totals.inactive += 1;
+          continue;
+        }
         if (ticket.status === "CLOSED" && item.action === "reply_and_close" && isConfirmedBatchReply(item)) {
           db.recordTicketBatchTopicEcho(answerPackageId, item.ticket_id, "NOT_REQUIRED", {
-            lastError: "Staff topic echo is no longer available after ticket closure."
+            lastError: "Staff topic echo is no longer available after ticket closure.",
           });
           const continuation = await resumeReplyAndClosePostDelivery(item, staffUser);
           if (continuation === "COMPLETED") totals.close += 1;
@@ -2391,7 +3053,11 @@ export function createBot(
           else totals.replySent += 1;
           continue;
         }
-        if (ticket.status === "CLOSED") { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true }); totals.inactive += 1; continue; }
+        if (ticket.status === "CLOSED") {
+          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true });
+          totals.inactive += 1;
+          continue;
+        }
         try {
           await sendTicketBatchTopicEcho(ticket, item);
           await refreshStaffTicketMessage(db, bot.api, ticket.id);
@@ -2422,7 +3088,7 @@ export function createBot(
 
         if (item.topic_echo_state !== "SENT" && ticket.status === "CLOSED") {
           db.recordTicketBatchTopicEcho(answerPackageId, item.ticket_id, "NOT_REQUIRED", {
-            lastError: "Staff topic echo is no longer available after ticket closure."
+            lastError: "Staff topic echo is no longer available after ticket closure.",
           });
         } else if (item.topic_echo_state !== "SENT") {
           try {
@@ -2441,9 +3107,24 @@ export function createBot(
         continue;
       }
       const expectedToken = exportTokens.get(item.ticket_id);
-      if (!ticket || ticket.staff_chat_id !== config.staffChatId || ticket.status === "CLOSED") { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true }); totals.inactive += 1; continue; }
-      if (!expectedToken || item.snapshot_token !== expectedToken || getTicketSnapshotToken(ticket, db.listMessagesChronological(ticket.id)) !== expectedToken) { db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "STALE", { applied: true }); totals.stale += 1; continue; }
-      if (!db.claimTicketBatchAnswerItem(answerPackageId, item.ticket_id)) { totals.skipped += 1; continue; }
+      if (!ticket || ticket.staff_chat_id !== config.staffChatId || ticket.status === "CLOSED") {
+        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true });
+        totals.inactive += 1;
+        continue;
+      }
+      if (
+        !expectedToken ||
+        item.snapshot_token !== expectedToken ||
+        getTicketSnapshotToken(ticket, db.listMessagesChronological(ticket.id)) !== expectedToken
+      ) {
+        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "STALE", { applied: true });
+        totals.stale += 1;
+        continue;
+      }
+      if (!db.claimTicketBatchAnswerItem(answerPackageId, item.ticket_id)) {
+        totals.skipped += 1;
+        continue;
+      }
       if (item.action === "no_action") {
         try {
           if (hasBatchFollowUpContext(item)) persistBatchFollowUp(ticket, item);
@@ -2453,7 +3134,9 @@ export function createBot(
           totals.noAction += 1;
         } catch (error) {
           recordTicketBatchTopicEchoFailure(answerPackageId, item.ticket_id, error);
-          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "STAFF_SYNC_PENDING", { lastError: "Staff topic echo pending retry." });
+          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "STAFF_SYNC_PENDING", {
+            lastError: "Staff topic echo pending retry.",
+          });
           totals.staffSync += 1;
         }
         continue;
@@ -2466,19 +3149,39 @@ export function createBot(
         const state = diagnostic.permanence === "UNKNOWN_DELIVERY" ? "UNKNOWN_DELIVERY" : "FAILED";
         db.recordTicketBatchDeliveryFailure(answerPackageId, item.ticket_id, state, diagnostic);
         db.recordTicketBatchTopicEcho(answerPackageId, item.ticket_id, "NOT_REQUIRED");
-        logger.warn({ answerPackageId, ticketId: item.ticket_id, category: diagnostic.category, permanence: diagnostic.permanence, method: diagnostic.method, telegramErrorCode: diagnostic.telegramErrorCode, retryAfterSeconds: diagnostic.retryAfterSeconds }, "Ticket batch user delivery failed");
-        const failedItem = db.listTicketBatchAnswerItems(answerPackageId).find((candidate) => candidate.ticket_id === item.ticket_id);
+        logger.warn(
+          {
+            answerPackageId,
+            ticketId: item.ticket_id,
+            category: diagnostic.category,
+            permanence: diagnostic.permanence,
+            method: diagnostic.method,
+            telegramErrorCode: diagnostic.telegramErrorCode,
+            retryAfterSeconds: diagnostic.retryAfterSeconds,
+          },
+          "Ticket batch user delivery failed"
+        );
+        const failedItem = db
+          .listTicketBatchAnswerItems(answerPackageId)
+          .find((candidate) => candidate.ticket_id === item.ticket_id);
         if (failedItem) {
           try {
             await sendTicketBatchDeliveryFailureEvent(ticket, failedItem, diagnostic);
           } catch {
-            logger.warn({ answerPackageId, ticketId: item.ticket_id, category: diagnostic.category }, "Could not post ticket batch delivery failure event");
+            logger.warn(
+              { answerPackageId, ticketId: item.ticket_id, category: diagnostic.category },
+              "Could not post ticket batch delivery failure event"
+            );
           }
         }
         if (diagnostic.permanence === "PERMANENT") {
           totals.permanentFailures.push({ ticketId: item.ticket_id, category: diagnostic.category });
         } else if (diagnostic.permanence === "TEMPORARY") {
-          totals.temporaryFailures.push({ ticketId: item.ticket_id, category: diagnostic.category, retryAfter: diagnostic.retryAfterSeconds });
+          totals.temporaryFailures.push({
+            ticketId: item.ticket_id,
+            category: diagnostic.category,
+            retryAfter: diagnostic.retryAfterSeconds,
+          });
         } else {
           totals.unknown += 1;
         }
@@ -2487,19 +3190,28 @@ export function createBot(
       let postDeliveryStage = "FOLLOW_UP_PERSISTENCE";
       try {
         persistBatchFollowUp(ticket, item);
-        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { deliveryMessageId, applied: true });
+        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", {
+          deliveryMessageId,
+          applied: true,
+        });
         postDeliveryStage = "STAFF_TOPIC_ECHO";
         try {
           await sendTicketBatchTopicEcho(ticket, item);
         } catch (error) {
           recordTicketBatchTopicEchoFailure(answerPackageId, item.ticket_id, error);
-          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "STAFF_SYNC_PENDING", { deliveryMessageId, lastError: "Staff topic echo pending retry." });
+          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "STAFF_SYNC_PENDING", {
+            deliveryMessageId,
+            lastError: "Staff topic echo pending retry.",
+          });
           totals.staffSync += 1;
           continue;
         }
         if (item.action === "reply_keep_open") {
           postDeliveryStage = "STAFF_SUMMARY_REFRESH";
-          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "COMPLETED", { deliveryMessageId, applied: true });
+          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "COMPLETED", {
+            deliveryMessageId,
+            applied: true,
+          });
           await refreshStaffTicketMessage(db, bot.api, ticket.id);
           totals.keep += 1;
           continue;
@@ -2511,16 +3223,22 @@ export function createBot(
         else totals.replySent += 1;
       } catch (error) {
         const diagnostic = normalizeTelegramDeliveryError(error);
-        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", { deliveryMessageId, lastError: "Reply sent; follow-up, staff sync, or close/archive pending." });
-        logger.warn({
-          answerPackageId,
-          ticketId: item.ticket_id,
-          stage: postDeliveryStage,
-          category: diagnostic.category,
-          method: diagnostic.method,
-          telegramErrorCode: diagnostic.telegramErrorCode,
-          httpStatus: diagnostic.httpStatus
-        }, "Ticket batch post-delivery apply step remains pending");
+        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", {
+          deliveryMessageId,
+          lastError: "Reply sent; follow-up, staff sync, or close/archive pending.",
+        });
+        logger.warn(
+          {
+            answerPackageId,
+            ticketId: item.ticket_id,
+            stage: postDeliveryStage,
+            category: diagnostic.category,
+            method: diagnostic.method,
+            telegramErrorCode: diagnostic.telegramErrorCode,
+            httpStatus: diagnostic.httpStatus,
+          },
+          "Ticket batch post-delivery apply step remains pending"
+        );
         totals.replySent += 1;
       }
     }
@@ -2532,7 +3250,8 @@ export function createBot(
     item: TicketBatchAnswerItemRecord,
     staffUser: User | undefined
   ): Promise<"COMPLETED" | "PENDING" | "INACTIVE"> {
-    const persistedItem = db.listTicketBatchAnswerItems(item.answer_package_id)
+    const persistedItem = db
+      .listTicketBatchAnswerItems(item.answer_package_id)
       .find((candidate) => candidate.ticket_id === item.ticket_id);
     if (!persistedItem || persistedItem.action !== "reply_and_close") return "INACTIVE";
     if (!isConfirmedBatchReply(persistedItem)) {
@@ -2547,8 +3266,9 @@ export function createBot(
       db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "INACTIVE", { applied: true });
       return "INACTIVE";
     }
-    const echoResolved = persistedItem.topic_echo_state === "SENT"
-      || (persistedItem.topic_echo_state === "NOT_REQUIRED" && ticket.status === "CLOSED");
+    const echoResolved =
+      persistedItem.topic_echo_state === "SENT" ||
+      (persistedItem.topic_echo_state === "NOT_REQUIRED" && ticket.status === "CLOSED");
     if (!echoResolved) return "PENDING";
 
     let archiveFailure: NormalizedDeliveryError | undefined;
@@ -2559,25 +3279,28 @@ export function createBot(
         closedBy: staffActor(staffUser),
         onArchiveFailure: (diagnostic) => {
           archiveFailure = diagnostic;
-        }
+        },
       });
     } catch (error) {
       const diagnostic = normalizeTelegramDeliveryError(error);
       const retryAt = ticketBatchContinuationRetryAt(diagnostic, error);
       db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "REPLY_SENT", {
-        lastError: "Reply sent; ticket close or archive pending."
+        lastError: "Reply sent; ticket close or archive pending.",
       });
       db.setTicketBatchPostDeliveryRetry(item.answer_package_id, item.ticket_id, retryAt, diagnostic.category);
       if (retryAt !== STAFF_OPERATION_NO_RETRY_AT) scheduleTicketBatchStaffRecovery(retryAt);
-      logger.warn({
-        answerPackageId: item.answer_package_id,
-        ticketId: item.ticket_id,
-        stage: "TICKET_CLOSE_OR_ARCHIVE",
-        category: diagnostic.category,
-        method: diagnostic.method,
-        telegramErrorCode: diagnostic.telegramErrorCode,
-        httpStatus: diagnostic.httpStatus
-      }, "Reply-and-close post-delivery continuation remains pending");
+      logger.warn(
+        {
+          answerPackageId: item.answer_package_id,
+          ticketId: item.ticket_id,
+          stage: "TICKET_CLOSE_OR_ARCHIVE",
+          category: diagnostic.category,
+          method: diagnostic.method,
+          telegramErrorCode: diagnostic.telegramErrorCode,
+          httpStatus: diagnostic.httpStatus,
+        },
+        "Reply-and-close post-delivery continuation remains pending"
+      );
       return "PENDING";
     }
 
@@ -2590,9 +3313,8 @@ export function createBot(
 
     const pendingStage = reconciledTicket?.status === "CLOSED" ? "ARCHIVE" : "SQLITE_CLOSE";
     db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "REPLY_SENT", {
-      lastError: pendingStage === "ARCHIVE"
-        ? "Reply sent; transcript archive pending."
-        : "Reply sent; ticket closure pending."
+      lastError:
+        pendingStage === "ARCHIVE" ? "Reply sent; transcript archive pending." : "Reply sent; ticket closure pending.",
     });
     const retryAt = archiveFailure
       ? ticketBatchContinuationRetryAt(archiveFailure)
@@ -2604,28 +3326,31 @@ export function createBot(
       archiveFailure?.category ?? pendingStage
     );
     if (retryAt !== STAFF_OPERATION_NO_RETRY_AT) scheduleTicketBatchStaffRecovery(retryAt);
-    logger.warn({
-      answerPackageId: item.answer_package_id,
-      ticketId: item.ticket_id,
-      stage: pendingStage,
-      category: archiveFailure?.category,
-      method: archiveFailure?.method,
-      telegramErrorCode: archiveFailure?.telegramErrorCode,
-      httpStatus: archiveFailure?.httpStatus,
-      retryAfterSeconds: archiveFailure?.retryAfterSeconds
-    }, "Reply-and-close post-delivery continuation remains pending");
+    logger.warn(
+      {
+        answerPackageId: item.answer_package_id,
+        ticketId: item.ticket_id,
+        stage: pendingStage,
+        category: archiveFailure?.category,
+        method: archiveFailure?.method,
+        telegramErrorCode: archiveFailure?.telegramErrorCode,
+        httpStatus: archiveFailure?.httpStatus,
+        retryAfterSeconds: archiveFailure?.retryAfterSeconds,
+      },
+      "Reply-and-close post-delivery continuation remains pending"
+    );
     return "PENDING";
   }
 
-  function ticketBatchContinuationRetryAt(
-    diagnostic: NormalizedDeliveryError,
-    error?: unknown
-  ): string {
+  function ticketBatchContinuationRetryAt(diagnostic: NormalizedDeliveryError, error?: unknown): string {
     if (error instanceof StaffOnlyDeliveryError && error.retryAt !== null) return error.retryAt;
     if (diagnostic.category === "RATE_LIMITED") {
-      return new Date(Date.now() + ((diagnostic.retryAfterSeconds ?? 1) * 1_000) + 250).toISOString();
+      return new Date(Date.now() + (diagnostic.retryAfterSeconds ?? 1) * 1_000 + 250).toISOString();
     }
-    if (diagnostic.permanence === "TEMPORARY" || (error !== undefined && !(error instanceof GrammyError) && !(error instanceof HttpError))) {
+    if (
+      diagnostic.permanence === "TEMPORARY" ||
+      (error !== undefined && !(error instanceof GrammyError) && !(error instanceof HttpError))
+    ) {
       return new Date(Date.now() + 60_000).toISOString();
     }
     return STAFF_OPERATION_NO_RETRY_AT;
@@ -2644,17 +3369,29 @@ export function createBot(
   }
 
   function recordTicketBatchTopicEchoFailure(answerPackageId: string, ticketId: number, error: unknown): void {
-    const diagnostic = error instanceof StaffOnlyDeliveryError ? error.diagnostic : normalizeTelegramDeliveryError(error);
+    const diagnostic =
+      error instanceof StaffOnlyDeliveryError ? error.diagnostic : normalizeTelegramDeliveryError(error);
     const retryAt = diagnostic.permanence === "TEMPORARY" ? staffNextRetryAt(error) : null;
     const state = diagnostic.permanence === "TEMPORARY" ? "FAILED" : "TERMINAL_FAILED";
     db.recordTicketBatchTopicEcho(answerPackageId, ticketId, state, {
       lastError: diagnostic.category,
       nextRetryAt: retryAt,
       incrementAttempt: true,
-      diagnostic
+      diagnostic,
     });
     if (retryAt !== null) scheduleTicketBatchStaffRecovery(retryAt);
-    logger.warn({ answerPackageId, ticketId, category: diagnostic.category, method: diagnostic.method, telegramErrorCode: diagnostic.telegramErrorCode, httpStatus: diagnostic.httpStatus, description: diagnostic.description }, "Ticket batch staff topic event failed");
+    logger.warn(
+      {
+        answerPackageId,
+        ticketId,
+        category: diagnostic.category,
+        method: diagnostic.method,
+        telegramErrorCode: diagnostic.telegramErrorCode,
+        httpStatus: diagnostic.httpStatus,
+        description: diagnostic.description,
+      },
+      "Ticket batch staff topic event failed"
+    );
   }
 
   function buildPersistedTicketBatchSummary(answerPackageId: string): string {
@@ -2663,27 +3400,38 @@ export function createBot(
     const noAction = items.filter((item) => item.action === "no_action").length;
     const permanent = items.filter((item) => item.delivery_error_permanence === "PERMANENT");
     const temporary = items.filter((item) => item.delivery_error_permanence === "TEMPORARY");
-    const unknown = items.filter((item) => item.delivery_error_permanence === "UNKNOWN_DELIVERY" || item.state === "UNKNOWN_DELIVERY").length;
-    const requiresStaffTopicEvent = (item: typeof items[number]): boolean =>
-      item.action === "no_action" ? hasBatchFollowUpContext(item) : isConfirmedBatchReply(item);
-    const staffPending = items.filter((item) =>
-      (item.topic_echo_state === "PENDING" || item.topic_echo_state === "FAILED") && requiresStaffTopicEvent(item)
+    const unknown = items.filter(
+      (item) => item.delivery_error_permanence === "UNKNOWN_DELIVERY" || item.state === "UNKNOWN_DELIVERY"
     ).length;
-    const terminalStaffFailures = items.filter((item) =>
-      item.topic_echo_state === "TERMINAL_FAILED" && requiresStaffTopicEvent(item)
+    const requiresStaffTopicEvent = (item: (typeof items)[number]): boolean =>
+      item.action === "no_action" ? hasBatchFollowUpContext(item) : isConfirmedBatchReply(item);
+    const staffPending = items.filter(
+      (item) =>
+        (item.topic_echo_state === "PENDING" || item.topic_echo_state === "FAILED") && requiresStaffTopicEvent(item)
+    ).length;
+    const terminalStaffFailures = items.filter(
+      (item) => item.topic_echo_state === "TERMINAL_FAILED" && requiresStaffTopicEvent(item)
     );
     const replyAndCloseItems = items.filter((item) => item.action === "reply_and_close" && isConfirmedBatchReply(item));
     const replyAndCloseTickets = replyAndCloseItems.map((item) => ({
       item,
-      ticket: db.getTicketWithUser(item.ticket_id)
+      ticket: db.getTicketWithUser(item.ticket_id),
     }));
     const ticketsClosed = replyAndCloseTickets.filter(({ ticket }) => ticket?.status === "CLOSED").length;
     const ticketClosuresPending = replyAndCloseTickets.length - ticketsClosed;
-    const archivesCompleted = replyAndCloseTickets.filter(({ ticket }) => ticket?.archived_at !== null && ticket?.archived_at !== undefined).length;
+    const archivesCompleted = replyAndCloseTickets.filter(
+      ({ ticket }) => ticket?.archived_at !== null && ticket?.archived_at !== undefined
+    ).length;
     const archivesPending = replyAndCloseTickets.length - archivesCompleted;
     const topicClosuresUnconfirmed = archivesCompleted;
-    const hasIssues = permanent.length || temporary.length || unknown || staffPending
-      || terminalStaffFailures.length || ticketClosuresPending || archivesPending;
+    const hasIssues =
+      permanent.length ||
+      temporary.length ||
+      unknown ||
+      staffPending ||
+      terminalStaffFailures.length ||
+      ticketClosuresPending ||
+      archivesPending;
     return [
       hasIssues ? "Ticket batch applied with issues." : "Answer package applied.",
       "",
@@ -2701,8 +3449,29 @@ export function createBot(
       `Topic closures unconfirmed: ${topicClosuresUnconfirmed}`,
       `Stale: ${items.filter((item) => item.state === "STALE").length}`,
       `Inactive: ${items.filter((item) => item.state === "INACTIVE").length}`,
-      ...(permanent.length || temporary.length || unknown ? ["", "User delivery failures:", ...[...permanent, ...temporary, ...items.filter((item) => item.delivery_error_permanence === "UNKNOWN_DELIVERY" || item.state === "UNKNOWN_DELIVERY")].map((item) => `- #${item.ticket_id} — ${item.delivery_error_category ?? "UNKNOWN"}`)] : []),
-      ...(terminalStaffFailures.length ? ["", "Staff sync failures:", ...terminalStaffFailures.map((item) => `- #${item.ticket_id} — ${item.topic_echo_error_category ?? item.topic_echo_last_error ?? "UNKNOWN"}`)] : [])
+      ...(permanent.length || temporary.length || unknown
+        ? [
+            "",
+            "User delivery failures:",
+            ...[
+              ...permanent,
+              ...temporary,
+              ...items.filter(
+                (item) => item.delivery_error_permanence === "UNKNOWN_DELIVERY" || item.state === "UNKNOWN_DELIVERY"
+              ),
+            ].map((item) => `- #${item.ticket_id} — ${item.delivery_error_category ?? "UNKNOWN"}`),
+          ]
+        : []),
+      ...(terminalStaffFailures.length
+        ? [
+            "",
+            "Staff sync failures:",
+            ...terminalStaffFailures.map(
+              (item) =>
+                `- #${item.ticket_id} — ${item.topic_echo_error_category ?? item.topic_echo_last_error ?? "UNKNOWN"}`
+            ),
+          ]
+        : []),
     ].join("\n");
   }
 
@@ -2716,23 +3485,29 @@ export function createBot(
     const at = new Date().toISOString();
     const packagesToFinalize = new Set<string>();
     const packagesToRefresh = new Set<string>();
-    const invalidSuccessEchoes = db.listInvalidTicketBatchSuccessEchoes(config.staffChatId, 20)
+    const invalidSuccessEchoes = db
+      .listInvalidTicketBatchSuccessEchoes(config.staffChatId, 20)
       .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
     for (const item of invalidSuccessEchoes) {
       db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED", {
-        lastError: "Success echo is not applicable after an unconfirmed user delivery."
+        lastError: "Success echo is not applicable after an unconfirmed user delivery.",
       });
-      logger.warn({ answerPackageId: item.answer_package_id, ticketId: item.ticket_id }, "Skipped invalid ticket batch success-echo recovery candidate");
+      logger.warn(
+        { answerPackageId: item.answer_package_id, ticketId: item.ticket_id },
+        "Skipped invalid ticket batch success-echo recovery candidate"
+      );
     }
-    const closedPendingEchoes = db.listClosedTicketBatchReplyAndClosePendingEchoes(config.staffChatId, 20)
+    const closedPendingEchoes = db
+      .listClosedTicketBatchReplyAndClosePendingEchoes(config.staffChatId, 20)
       .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
     for (const item of closedPendingEchoes) {
       db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED", {
-        lastError: "Staff topic echo is no longer available after ticket closure."
+        lastError: "Staff topic echo is no longer available after ticket closure.",
       });
       packagesToFinalize.add(item.answer_package_id);
     }
-    const failureEvents = db.listPendingTicketBatchFailureEvents(config.staffChatId, at, 20)
+    const failureEvents = db
+      .listPendingTicketBatchFailureEvents(config.staffChatId, at, 20)
       .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
     for (const item of failureEvents) {
       const ticket = db.getTicketWithUser(item.ticket_id);
@@ -2750,7 +3525,7 @@ export function createBot(
         httpStatus: item.delivery_http_status,
         retryAfterSeconds: item.delivery_retry_after_seconds,
         description: item.delivery_error_description,
-        occurredAt: item.delivery_failed_at ?? at
+        occurredAt: item.delivery_failed_at ?? at,
       };
       try {
         await sendTicketBatchDeliveryFailureEvent(ticket, item, diagnostic);
@@ -2759,15 +3534,18 @@ export function createBot(
         scheduleTicketBatchStaffRecovery(failure.retryAt);
       }
     }
-    const echoes = db.listPendingTicketBatchTopicEchoes(config.staffChatId, at, 20)
+    const echoes = db
+      .listPendingTicketBatchTopicEchoes(config.staffChatId, at, 20)
       .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
     for (const item of echoes) {
       const ticket = db.getTicketWithUser(item.ticket_id);
       if (!ticket || ticket.staff_chat_id !== config.staffChatId || ticket.status === "CLOSED") continue;
       try {
         await sendTicketBatchTopicEcho(ticket, item);
-        if (item.action === "no_action") db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "NO_ACTION", { applied: true });
-        else if (item.state === "STAFF_SYNC_PENDING" && item.action === "reply_keep_open") db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "COMPLETED", { applied: true });
+        if (item.action === "no_action")
+          db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "NO_ACTION", { applied: true });
+        else if (item.state === "STAFF_SYNC_PENDING" && item.action === "reply_keep_open")
+          db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "COMPLETED", { applied: true });
         packagesToFinalize.add(item.answer_package_id);
         packagesToRefresh.add(item.answer_package_id);
       } catch (error) {
@@ -2775,7 +3553,8 @@ export function createBot(
       }
     }
 
-    const continuations = db.listPendingTicketBatchReplyAndCloseContinuations(config.staffChatId, at, 20)
+    const continuations = db
+      .listPendingTicketBatchReplyAndCloseContinuations(config.staffChatId, at, 20)
       .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
     for (const item of continuations) {
       const result = await resumeReplyAndClosePostDelivery(item, undefined);
@@ -2797,7 +3576,8 @@ export function createBot(
     }
 
     const summaryAt = new Date().toISOString();
-    const summaries = db.listPendingTicketBatchFinalSummaries(config.staffChatId, summaryAt, 20)
+    const summaries = db
+      .listPendingTicketBatchFinalSummaries(config.staffChatId, summaryAt, 20)
       .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
     for (const item of summaries) {
       const text = buildPersistedTicketBatchSummary(item.answer_package_id);
@@ -2805,41 +3585,73 @@ export function createBot(
         text,
         chatId: item.final_summary_chat_id ?? config.staffChatId,
         originChatId: item.final_summary_origin_chat_id,
-        originMessageId: item.final_summary_origin_message_id
+        originMessageId: item.final_summary_origin_message_id,
       });
       db.recordTicketBatchFinalSummaryAttempt(item.answer_package_id, config.staffChatId);
       try {
         if (item.final_summary_origin_chat_id !== null && item.final_summary_origin_message_id !== null) {
           const originChatId = item.final_summary_origin_chat_id;
           const originMessageId = item.final_summary_origin_message_id;
-          await runStaffChatOperation(() => bot.api.editMessageText(originChatId, originMessageId, text, {
-            reply_markup: originChatId > 0 ? new InlineKeyboard().text("Back to dashboard", "dashboard:home") : undefined
-          }), originChatId);
+          await runStaffChatOperation(
+            () =>
+              bot.api.editMessageText(originChatId, originMessageId, text, {
+                reply_markup:
+                  originChatId > 0 ? new InlineKeyboard().text("Back to dashboard", "dashboard:home") : undefined,
+              }),
+            originChatId
+          );
           db.recordTicketBatchFinalSummarySent(item.answer_package_id, config.staffChatId, originMessageId);
         } else {
           const destinationChatId = item.final_summary_chat_id ?? config.staffChatId;
-          const sent = await runStaffChatOperation(() => bot.api.sendMessage(destinationChatId, text, {
-            reply_markup: destinationChatId > 0 ? new InlineKeyboard().text("Back to dashboard", "dashboard:home") : undefined
-          }), destinationChatId);
+          const sent = await runStaffChatOperation(
+            () =>
+              bot.api.sendMessage(destinationChatId, text, {
+                reply_markup:
+                  destinationChatId > 0 ? new InlineKeyboard().text("Back to dashboard", "dashboard:home") : undefined,
+              }),
+            destinationChatId
+          );
           db.recordTicketBatchFinalSummarySent(item.answer_package_id, config.staffChatId, sent.message_id);
         }
       } catch (error) {
         const failure = batchStaffFailure(error);
         if (failure.retryAt !== null) {
-          db.recordTicketBatchFinalSummaryFailure(item.answer_package_id, config.staffChatId, "FAILED", failure.category, failure.retryAt);
+          db.recordTicketBatchFinalSummaryFailure(
+            item.answer_package_id,
+            config.staffChatId,
+            "FAILED",
+            failure.category,
+            failure.retryAt
+          );
           scheduleTicketBatchStaffRecovery(failure.retryAt);
         } else if (item.final_summary_origin_message_id !== null) {
           // The preview cannot be replaced, so a single persisted fallback send can be attempted later.
           db.queueTicketBatchFinalSummary(item.answer_package_id, config.staffChatId, {
-            text, chatId: item.final_summary_chat_id ?? config.staffChatId
+            text,
+            chatId: item.final_summary_chat_id ?? config.staffChatId,
           });
           const fallbackAt = new Date().toISOString();
-          db.recordTicketBatchFinalSummaryFailure(item.answer_package_id, config.staffChatId, "FAILED", failure.category, fallbackAt);
+          db.recordTicketBatchFinalSummaryFailure(
+            item.answer_package_id,
+            config.staffChatId,
+            "FAILED",
+            failure.category,
+            fallbackAt
+          );
           scheduleTicketBatchStaffRecovery(fallbackAt);
         } else {
-          db.recordTicketBatchFinalSummaryFailure(item.answer_package_id, config.staffChatId, "UNKNOWN_DELIVERY", failure.category, null);
+          db.recordTicketBatchFinalSummaryFailure(
+            item.answer_package_id,
+            config.staffChatId,
+            "UNKNOWN_DELIVERY",
+            failure.category,
+            null
+          );
         }
-        logger.warn({ answerPackageId: item.answer_package_id, category: failure.category }, "Ticket batch final summary remains pending");
+        logger.warn(
+          { answerPackageId: item.answer_package_id, category: failure.category },
+          "Ticket batch final summary remains pending"
+        );
       }
     }
     scheduleTicketBatchStaffRecovery(db.getNextTicketBatchStaffRetryAt(config.staffChatId) ?? null);
@@ -2849,7 +3661,8 @@ export function createBot(
     if (!nextRetryAt) return;
     const target = new Date(nextRetryAt).getTime();
     if (!Number.isFinite(target)) return;
-    if (ticketBatchRecoveryTimer && ticketBatchRecoveryTimerAt !== undefined && ticketBatchRecoveryTimerAt <= target) return;
+    if (ticketBatchRecoveryTimer && ticketBatchRecoveryTimerAt !== undefined && ticketBatchRecoveryTimerAt <= target)
+      return;
     if (ticketBatchRecoveryTimer) clearTimeout(ticketBatchRecoveryTimer);
     const delay = Math.max(250, Math.min(2_147_000_000, target - Date.now()));
     ticketBatchRecoveryTimerAt = target;
@@ -2857,20 +3670,24 @@ export function createBot(
       ticketBatchRecoveryTimer = undefined;
       ticketBatchRecoveryTimerAt = undefined;
       const accepted = backgroundTasks.run(async () => {
-        try { await recoverTicketBatchStaffOperations(); }
-        catch (error) { logger.warn({ category: normalizeTelegramDeliveryError(error).category }, "Ticket batch staff recovery failed"); }
+        try {
+          await recoverTicketBatchStaffOperations();
+        } catch (error) {
+          logger.warn(
+            { category: normalizeTelegramDeliveryError(error).category },
+            "Ticket batch staff recovery failed"
+          );
+        }
       });
-      if (!accepted) logger.debug({ operation: "ticket_batch_staff_recovery" }, "Background work was dropped during shutdown");
+      if (!accepted)
+        logger.debug({ operation: "ticket_batch_staff_recovery" }, "Background work was dropped during shutdown");
     }, delay);
     ticketBatchRecoveryTimer.unref();
   }
 
   bot.catch(async (error) => {
     const ctx = error.ctx;
-    logger.error(
-      { err: error.error, updateId: ctx.update.update_id },
-      "Bot failed while processing an update"
-    );
+    logger.error({ err: error.error, updateId: ctx.update.update_id }, "Bot failed while processing an update");
 
     const staffChatId = installationServicesByApi.get(ctx.api)?.getStaffChatId();
     if (staffChatId !== null && staffChatId !== undefined && ctx.chat?.id === staffChatId) {
@@ -2898,7 +3715,7 @@ export async function setBotCommands(bot: Bot<Context>, installation?: Installat
     { command: "start", description: "Start support" },
     { command: "status", description: "Show your latest ticket status" },
     { command: "mytickets", description: "Show your recent tickets" },
-    { command: "help", description: "Show help" }
+    { command: "help", description: "Show help" },
   ]);
 
   const staffChatId = installation?.getStaffChatId() ?? installationServicesByApi.get(bot.api)?.getStaffChatId();
@@ -2917,13 +3734,17 @@ export async function setBotCommands(bot: Bot<Context>, installation?: Installat
       { command: "moderation", description: "Manage public chat moderation" },
       { command: "questnotify", description: "Manage new-entity notifications" },
       { command: "logs", description: "Show Support Logs topic status" },
-      { command: "setlogs", description: "Use this topic as Support Logs" }
+      { command: "setlogs", description: "Use this topic as Support Logs" },
     ],
     { scope: { type: "chat", chat_id: staffChatId } }
   );
 }
 
-export async function sendStaffOnboardingIfNeeded(api: BotApi, db: SupportDatabase, installation?: InstallationService): Promise<void> {
+export async function sendStaffOnboardingIfNeeded(
+  api: BotApi,
+  db: SupportDatabase,
+  installation?: InstallationService
+): Promise<void> {
   const staffChatId = installation?.getStaffChatId() ?? installationServicesByApi.get(api)?.getStaffChatId();
   if (staffChatId === null || staffChatId === undefined) return;
   const settingKey = staffHelpSentSettingKey();
@@ -2935,10 +3756,7 @@ export async function sendStaffOnboardingIfNeeded(api: BotApi, db: SupportDataba
     await api.sendMessage(staffChatId, STAFF_ONBOARDING_TEXT);
     db.setSetting(settingKey, "true");
   } catch (error) {
-    logger.warn(
-      { err: error, staffChatId },
-      "Could not send staff onboarding message"
-    );
+    logger.warn({ err: error, staffChatId }, "Could not send staff onboarding message");
   }
 }
 
@@ -3008,7 +3826,7 @@ async function createFreshTicketFromUserMessage(db: SupportDatabase, ctx: Contex
     text: content.text,
     mediaType: content.mediaType,
     filename: content.filename,
-    fileId: content.fileId
+    fileId: content.fileId,
   });
 
   let messageThreadId: number;
@@ -3033,24 +3851,16 @@ async function createFreshTicketFromUserMessage(db: SupportDatabase, ctx: Contex
   }
 
   try {
-    const summary = await ctx.api.sendMessage(
-      config.staffChatId,
-      formatPinnedTicketSummary(ticketWithTopic),
-      {
-        message_thread_id: messageThreadId,
-        reply_markup: staffTicketKeyboard(ticket.id)
-      }
-    );
+    const summary = await ctx.api.sendMessage(config.staffChatId, formatPinnedTicketSummary(ticketWithTopic), {
+      message_thread_id: messageThreadId,
+      reply_markup: staffTicketKeyboard(ticket.id),
+    });
     db.updateTicketStaffMessage(ticket.id, summary.chat.id, summary.message_id);
     await pinMessageSafely(ctx.api, summary.chat.id, summary.message_id, ticket.id);
 
-    await ctx.api.sendMessage(
-      config.staffChatId,
-      formatTicketPost(ticketWithTopic, content.text),
-      {
-        message_thread_id: messageThreadId
-      }
-    );
+    await ctx.api.sendMessage(config.staffChatId, formatTicketPost(ticketWithTopic, content.text), {
+      message_thread_id: messageThreadId,
+    });
   } catch (error) {
     logger.error({ err: error, ticketId: ticket.id }, "Could not send ticket intro to staff topic");
     db.updateTicketStatus(ticket.id, "CLOSED");
@@ -3063,15 +3873,11 @@ async function createFreshTicketFromUserMessage(db: SupportDatabase, ctx: Contex
   db.closeOtherActiveTicketsForUserInStaffChat(ctx.from.id, config.staffChatId, ticket.id);
   await maybeCopyOriginalMessageToStaff(db, ctx, ticketWithTopic, content.shouldCopyOriginal);
   await ctx.reply(acknowledgement.rendered, {
-    reply_markup: userTicketKeyboard(ticket.id)
+    reply_markup: userTicketKeyboard(ticket.id),
   });
 }
 
-async function appendToExistingTicket(
-  db: SupportDatabase,
-  ctx: Context,
-  activeTicket: TicketRecord
-): Promise<void> {
+async function appendToExistingTicket(db: SupportDatabase, ctx: Context, activeTicket: TicketRecord): Promise<void> {
   if (!ctx.from || !ctx.chat || !ctx.message) {
     return;
   }
@@ -3099,7 +3905,7 @@ async function appendToExistingTicket(
       config.staffChatId,
       formatTicketUpdate(ctx.from, content.text, content.mediaType, content.filename),
       {
-        message_thread_id: activeTicket.message_thread_id
+        message_thread_id: activeTicket.message_thread_id,
       }
     );
 
@@ -3116,7 +3922,7 @@ async function appendToExistingTicket(
       text: content.text,
       mediaType: content.mediaType,
       filename: content.filename,
-      fileId: content.fileId
+      fileId: content.fileId,
     });
 
     if (activeTicket.status === "WAITING_USER") {
@@ -3207,12 +4013,12 @@ async function handleStaffGroupMessage(
         text: content.text,
         mediaType: content.mediaType,
         filename: content.filename,
-        fileId: content.fileId
+        fileId: content.fileId,
       });
     } else {
       await deliverAndRecordStaffTextReply(ticket, content.text ?? "", ctx.from, {
         chatId: ctx.chat.id,
-        messageId: ctx.message.message_id
+        messageId: ctx.message.message_id,
       });
     }
 
@@ -3239,7 +4045,7 @@ async function handleUserCallback(
   if (!isPrivateChat(ctx) || !ctx.from) {
     await ctx.answerCallbackQuery({
       text: "This action is only available in private chat.",
-      show_alert: true
+      show_alert: true,
     });
     return;
   }
@@ -3260,7 +4066,7 @@ async function handleUserCallback(
   if (!ticket || ticket.user_telegram_id !== ctx.from.id || ticket.staff_chat_id !== config.staffChatId) {
     await ctx.answerCallbackQuery({
       text: "Ticket not found.",
-      show_alert: true
+      show_alert: true,
     });
     return;
   }
@@ -3273,7 +4079,7 @@ async function handleUserCallback(
   await closeTicket(db, ctx.api, ticket.id, {
     notifyUser: false,
     staffNotice: "User closed this ticket.",
-    closedBy: userActor(ctx.from)
+    closedBy: userActor(ctx.from),
   });
 
   await ctx.answerCallbackQuery({ text: "Ticket closed." });
@@ -3281,13 +4087,20 @@ async function handleUserCallback(
   await onStaffTestTicketClosed?.(ticket.id);
 }
 
-async function warnThrottledCustomerIngress(ctx: Context, decision: Extract<SupportIngressDecision, { allowed: false }>): Promise<void> {
+async function warnThrottledCustomerIngress(
+  ctx: Context,
+  decision: Extract<SupportIngressDecision, { allowed: false }>
+): Promise<void> {
   if (!decision.shouldWarn || !ctx.from) {
     return;
   }
 
   logger.warn(
-    { userId: ctx.from.id, category: "CUSTOMER_INGRESS_THROTTLED", retryAfterSeconds: Math.ceil(decision.retryAfterMs / 1_000) },
+    {
+      userId: ctx.from.id,
+      category: "CUSTOMER_INGRESS_THROTTLED",
+      retryAfterSeconds: Math.ceil(decision.retryAfterMs / 1_000),
+    },
     "Customer support ingress throttled"
   );
   try {
@@ -3304,7 +4117,7 @@ async function handleStaffCallback(db: SupportDatabase, ctx: Context, data: stri
   if (!isStaffChat(ctx)) {
     await ctx.answerCallbackQuery({
       text: "Staff only.",
-      show_alert: true
+      show_alert: true,
     });
     return;
   }
@@ -3330,7 +4143,7 @@ async function handleStaffCallback(db: SupportDatabase, ctx: Context, data: stri
     const result = await closeTicket(db, ctx.api, ticket.id, {
       notifyUser: true,
       staffNotice: "Ticket closed by staff.",
-      closedBy: staffActor(ctx.from)
+      closedBy: staffActor(ctx.from),
     });
     await ctx.answerCallbackQuery({ text: result });
     return;
@@ -3378,7 +4191,7 @@ async function banUserById(
     userTelegramId: userId,
     username: user?.username ?? null,
     reason,
-    bannedBy: actor.telegramId
+    bannedBy: actor.telegramId,
   });
 
   await logBanEvent(api, db, {
@@ -3386,7 +4199,7 @@ async function banUserById(
     userTelegramId: userId,
     username: user?.username ?? null,
     reason,
-    performedBy: actor
+    performedBy: actor,
   });
 
   const activeTicket = db.findActiveTicketForUser(userId, config.staffChatId);
@@ -3397,7 +4210,7 @@ async function banUserById(
         notifyUser: true,
         userText: BANNED_TEXT,
         staffNotice: `User ${userId} was banned. Reason: ${reason}`,
-        closedBy: actor
+        closedBy: actor,
       });
       db.closeOtherActiveTicketsForUserInStaffChat(userId, config.staffChatId, ticket.id);
       return;
@@ -3418,7 +4231,7 @@ async function banUserForTicket(
     userTelegramId: ticket.user_telegram_id,
     username: ticket.username,
     reason,
-    bannedBy: actor.telegramId
+    bannedBy: actor.telegramId,
   });
 
   await logBanEvent(api, db, {
@@ -3426,14 +4239,14 @@ async function banUserForTicket(
     userTelegramId: ticket.user_telegram_id,
     username: ticket.username,
     reason,
-    performedBy: actor
+    performedBy: actor,
   });
 
   await closeTicket(db, api, ticket.id, {
     notifyUser: true,
     userText: BANNED_TEXT,
     staffNotice: `User ${ticket.user_telegram_id} has been banned. Reason: ${reason}`,
-    closedBy: actor
+    closedBy: actor,
   });
   db.closeOtherActiveTicketsForUserInStaffChat(ticket.user_telegram_id, config.staffChatId, ticket.id);
 }
@@ -3451,7 +4264,7 @@ async function closeTicket(
 
   if (ticket.status === "CLOSED") {
     const archived = await archiveTicketIfPossible(api, db, ticketId, {
-      onFailure: options.onArchiveFailure
+      onFailure: options.onArchiveFailure,
     });
     return archived
       ? `Ticket #${ticketId} is already closed and archived.`
@@ -3470,7 +4283,7 @@ async function closeTicket(
   }
 
   const archived = await archiveTicketIfPossible(api, db, ticketId, {
-    onFailure: options.onArchiveFailure
+    onFailure: options.onArchiveFailure,
   });
 
   return archived
@@ -3478,29 +4291,16 @@ async function closeTicket(
     : `Ticket #${closedTicket?.id ?? ticketId} closed. Transcript archive is pending retry.`;
 }
 
-async function refreshStaffTicketMessage(
-  db: SupportDatabase,
-  api: BotApi,
-  ticketId: number
-): Promise<void> {
+async function refreshStaffTicketMessage(db: SupportDatabase, api: BotApi, ticketId: number): Promise<void> {
   const ticket = db.getTicketWithUser(ticketId);
-  if (
-    !ticket?.staff_chat_id ||
-    ticket.staff_chat_id !== config.staffChatId ||
-    !ticket.staff_message_id
-  ) {
+  if (!ticket?.staff_chat_id || ticket.staff_chat_id !== config.staffChatId || !ticket.staff_message_id) {
     return;
   }
 
   try {
-    await api.editMessageText(
-      ticket.staff_chat_id,
-      ticket.staff_message_id,
-      formatPinnedTicketSummary(ticket),
-      {
-        reply_markup: ticket.status === "CLOSED" ? undefined : staffTicketKeyboard(ticket.id)
-      }
-    );
+    await api.editMessageText(ticket.staff_chat_id, ticket.staff_message_id, formatPinnedTicketSummary(ticket), {
+      reply_markup: ticket.status === "CLOSED" ? undefined : staffTicketKeyboard(ticket.id),
+    });
   } catch (error) {
     if (error instanceof GrammyError && error.description.includes("message is not modified")) {
       return;
@@ -3522,7 +4322,7 @@ async function maybeCopyOriginalMessageToStaff(
 
   try {
     await ctx.api.copyMessage(config.staffChatId, ctx.chat.id, ctx.message.message_id, {
-      message_thread_id: ticket.message_thread_id
+      message_thread_id: ticket.message_thread_id,
     });
   } catch (error) {
     logger.error({ err: error, ticketId: ticket.id }, "Could not copy original user message to staff topic");
@@ -3544,15 +4344,10 @@ async function deliverStaffMediaReplyToUser(
   return copied.message_id;
 }
 
-async function pinMessageSafely(
-  api: BotApi,
-  chatId: number,
-  messageId: number,
-  ticketId: number
-): Promise<void> {
+async function pinMessageSafely(api: BotApi, chatId: number, messageId: number, ticketId: number): Promise<void> {
   try {
     await api.pinChatMessage(chatId, messageId, {
-      disable_notification: true
+      disable_notification: true,
     });
   } catch (error) {
     logger.warn({ err: error, ticketId }, "Could not pin ticket summary");
@@ -3590,7 +4385,7 @@ async function sendStaffTopicNotice(api: BotApi, ticket: TicketRecord, text: str
 
   try {
     await api.sendMessage(ticket.staff_chat_id, truncate(text, 3500), {
-      message_thread_id: ticket.message_thread_id
+      message_thread_id: ticket.message_thread_id,
     });
   } catch (error) {
     logger.error({ err: error, ticketId: ticket.id }, "Could not send staff topic notice");
@@ -3600,7 +4395,7 @@ async function sendStaffTopicNotice(api: BotApi, ticket: TicketRecord, text: str
 async function notifyStaff(api: BotApi, text: string, messageThreadId?: number | null): Promise<void> {
   try {
     await api.sendMessage(config.staffChatId, truncate(text, 3500), {
-      message_thread_id: messageThreadId ?? undefined
+      message_thread_id: messageThreadId ?? undefined,
     });
   } catch (error) {
     logger.error({ err: error }, "Could not send log message to staff chat");
@@ -3617,11 +4412,7 @@ async function notifyUserOrStaff(
     await api.sendMessage(userTelegramId, text);
   } catch (error) {
     logger.error({ err: error, userTelegramId }, "Could not message user");
-    await notifyStaff(
-      api,
-      `Could not message user ${userTelegramId}: ${describeError(error)}`,
-      messageThreadId
-    );
+    await notifyStaff(api, `Could not message user ${userTelegramId}: ${describeError(error)}`, messageThreadId);
   }
 }
 
@@ -3689,7 +4480,9 @@ function ticketBatchCancelCallbackData(previewToken: string): string {
   const callbackData = `batch:cancel:${previewToken}`;
   const byteLength = Buffer.byteLength(callbackData, "utf8");
   if (byteLength > TELEGRAM_CALLBACK_DATA_MAX_BYTES) {
-    throw new Error(`Ticket batch callback_data exceeds ${TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes (${byteLength} bytes).`);
+    throw new Error(
+      `Ticket batch callback_data exceeds ${TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes (${byteLength} bytes).`
+    );
   }
   return callbackData;
 }
@@ -3705,7 +4498,9 @@ function ticketBatchPageCallbackData(previewToken: string, page: number): string
 function validateTicketBatchCallbackData(callbackData: string): string {
   const byteLength = Buffer.byteLength(callbackData, "utf8");
   if (byteLength > TELEGRAM_CALLBACK_DATA_MAX_BYTES) {
-    throw new Error(`Ticket batch callback_data exceeds ${TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes (${byteLength} bytes).`);
+    throw new Error(
+      `Ticket batch callback_data exceeds ${TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes (${byteLength} bytes).`
+    );
   }
   return callbackData;
 }
@@ -3721,7 +4516,8 @@ function ticketBatchPreviewKeyboard(previewToken: string, page: number, pageCoun
   const keyboard = new InlineKeyboard();
   if (page > 0) keyboard.text("Previous", ticketBatchPageCallbackData(previewToken, page - 1));
   if (page + 1 < pageCount) keyboard.text("Next", ticketBatchPageCallbackData(previewToken, page + 1));
-  return keyboard.row()
+  return keyboard
+    .row()
     .text("Apply", ticketBatchApplyCallbackData(previewToken))
     .text("Cancel", ticketBatchCancelCallbackData(previewToken));
 }
@@ -3736,7 +4532,10 @@ function formatTicketBatchPreviewPage(pages: string[], page: number): string {
 
 function formatTicketBatchExportCaption(
   exportId: string,
-  zip: Pick<Awaited<ReturnType<typeof createTicketBatchZip>>, "ticketCount" | "messageCount" | "attachmentCount" | "embeddedAttachmentCount" | "failedAttachmentCount">
+  zip: Pick<
+    Awaited<ReturnType<typeof createTicketBatchZip>>,
+    "ticketCount" | "messageCount" | "attachmentCount" | "embeddedAttachmentCount" | "failedAttachmentCount"
+  >
 ): string {
   const attachments = zip.failedAttachmentCount
     ? `Attachments: ${zip.embeddedAttachmentCount} embedded, ${zip.failedAttachmentCount} unavailable`
@@ -3747,7 +4546,7 @@ function formatTicketBatchExportCaption(
     `Tickets: ${zip.ticketCount}`,
     `Messages: ${zip.messageCount}`,
     attachments,
-    `Use the included instructions to prepare and return ticket-answers_${exportId}.json.`
+    `Use the included instructions to prepare and return ticket-answers_${exportId}.json.`,
   ].join("\n");
 }
 
@@ -3770,7 +4569,7 @@ function formatSupportLogsTopicInfo(topic: SupportLogsTopicInfo): string {
     String(topic.threadId),
     "",
     "Status:",
-    topic.state
+    topic.state,
   ];
 
   if (topic.previousThreadId !== null) {
@@ -3798,7 +4597,7 @@ function staffActor(user: Context["from"]): ArchiveActor {
     type: "STAFF",
     displayName: displayTelegramUser(user),
     username: usernameOf(user),
-    telegramId: user.id
+    telegramId: user.id,
   };
 }
 
@@ -3807,7 +4606,7 @@ function userActor(user: NonNullable<Context["from"]>): ArchiveActor {
     type: "USER",
     displayName: "user",
     username: usernameOf(user),
-    telegramId: user.id
+    telegramId: user.id,
   };
 }
 
@@ -3816,7 +4615,7 @@ function systemActor(): ArchiveActor {
     type: "SYSTEM",
     displayName: "system",
     username: null,
-    telegramId: null
+    telegramId: null,
   };
 }
 
@@ -3829,7 +4628,7 @@ function persistUserFromContext(db: SupportDatabase, ctx: Context): void {
     telegramId: ctx.from.id,
     username: ctx.from.username ?? null,
     firstName: ctx.from.first_name ?? null,
-    lastName: ctx.from.last_name ?? null
+    lastName: ctx.from.last_name ?? null,
   });
 }
 
@@ -3862,16 +4661,19 @@ async function formatEntityNotificationStatus(
   db: SupportDatabase,
   providers: EntityNotificationProviderRegistry
 ): Promise<string> {
-  const targetChatId = parseStoredEntityNotificationTarget(db.getSetting(entityNotificationSettingKey("target_chat_id")));
+  const targetChatId = parseStoredEntityNotificationTarget(
+    db.getSetting(entityNotificationSettingKey("target_chat_id"))
+  );
   let target = "not configured";
   let targetReachable = false;
   if (targetChatId !== null) {
     try {
       const chat = await api.getChat(targetChatId);
       targetReachable = true;
-      const title = typeof chat === "object" && chat !== null && "title" in chat && typeof chat.title === "string"
-        ? ` (${chat.title})`
-        : "";
+      const title =
+        typeof chat === "object" && chat !== null && "title" in chat && typeof chat.title === "string"
+          ? ` (${chat.title})`
+          : "";
       target = `${targetChatId}${title}`;
     } catch {
       target = `${targetChatId} (unreachable)`;
@@ -3882,12 +4684,13 @@ async function formatEntityNotificationStatus(
   const providerRegistered = Boolean(provider);
   const providerAuthoritative = provider?.authoritative ?? false;
   const providerAvailable = provider ? isEntityNotificationProviderAvailable(provider) : false;
-  const canPublish = db.getSetting(entityNotificationSettingKey("enabled")) === "true"
-    && targetChatId !== null
-    && targetReachable
-    && providerRegistered
-    && providerAuthoritative
-    && providerAvailable;
+  const canPublish =
+    db.getSetting(entityNotificationSettingKey("enabled")) === "true" &&
+    targetChatId !== null &&
+    targetReachable &&
+    providerRegistered &&
+    providerAuthoritative &&
+    providerAvailable;
   return [
     `Entity notifications: ${db.getSetting(entityNotificationSettingKey("enabled")) === "true" ? "enabled" : "disabled"}`,
     `Target: ${target}`,
@@ -3896,7 +4699,7 @@ async function formatEntityNotificationStatus(
     `Authoritative: ${providerAuthoritative ? "yes" : "no"}`,
     `Available: ${providerAvailable ? "yes" : "no"}`,
     `Publication can run: ${canPublish ? "yes" : "no"}`,
-    `Published events: ${db.countEntityNotificationPublications("PUBLISHED")}`
+    `Published events: ${db.countEntityNotificationPublications("PUBLISHED")}`,
   ].join("\n");
 }
 
@@ -3928,19 +4731,21 @@ function moderationConfig(db: SupportDatabase) {
     lookback_minutes: db.getSetting(moderationSettingKey("lookback_minutes")),
     warning_cooldown_minutes: db.getSetting(moderationSettingKey("warning_cooldown_minutes")),
     warning_message_threshold: db.getSetting(moderationSettingKey("warning_message_threshold")),
-    allowlist: db.getSetting(moderationSettingKey("allowlist"))
+    allowlist: db.getSetting(moderationSettingKey("allowlist")),
   });
   const managed = legacy.targetChatId === null ? undefined : db.getManagedPublicChat(legacy.targetChatId, true);
   if (managed?.active === 0) return { ...legacy, enabled: false, targetChatId: null };
-  return managed ? {
-    enabled: managed.moderation_enabled === 1,
-    targetChatId: managed.chat_id,
-    warningText: managed.warning_text,
-    lookbackMinutes: managed.lookback_minutes,
-    warningCooldownMinutes: managed.warning_cooldown_minutes,
-    warningMessageThreshold: managed.warning_message_threshold,
-    allowlist: managed.allowlist
-  } : legacy;
+  return managed
+    ? {
+        enabled: managed.moderation_enabled === 1,
+        targetChatId: managed.chat_id,
+        warningText: managed.warning_text,
+        lookbackMinutes: managed.lookback_minutes,
+        warningCooldownMinutes: managed.warning_cooldown_minutes,
+        warningMessageThreshold: managed.warning_message_threshold,
+        allowlist: managed.allowlist,
+      }
+    : legacy;
 }
 
 function moderationConfigForChat(db: SupportDatabase, chatId: number) {
@@ -3953,7 +4758,7 @@ function moderationConfigForChat(db: SupportDatabase, chatId: number) {
       lookbackMinutes: managed.lookback_minutes,
       warningCooldownMinutes: managed.warning_cooldown_minutes,
       warningMessageThreshold: managed.warning_message_threshold,
-      allowlist: managed.allowlist
+      allowlist: managed.allowlist,
     };
   }
   const legacy = moderationConfig(db);
@@ -3975,11 +4780,15 @@ async function formatModerationStatus(
     `Warning cooldown: ${moderation.warningCooldownMinutes} minutes and ${moderation.warningMessageThreshold} ordinary messages`,
     `Lookback: ${moderation.lookbackMinutes} minutes`,
     `Allowlist entries: ${moderation.allowlist.length}`,
-    `Due cleanup/log recovery jobs: ${pending}`
+    `Due cleanup/log recovery jobs: ${pending}`,
   ].join("\n");
 }
 
-async function validateModerationRights(api: BotApi, targetChatId: number | null, botId: number | undefined): Promise<string> {
+async function validateModerationRights(
+  api: BotApi,
+  targetChatId: number | null,
+  botId: number | undefined
+): Promise<string> {
   if (!targetChatId || !botId) return "configure a reachable target chat first.";
   try {
     const result = await validatePublicModerationChat(api, targetChatId, botId);
@@ -4008,7 +4817,7 @@ async function handlePublicLanguageModeration(
       messageId: ctx.message.message_id,
       userTelegramId: ctx.from.id,
       username: usernameOf(ctx.from),
-      messageThreadId
+      messageThreadId,
     });
   }
   const chatState = db.getLanguageModerationWarningState(ctx.chat.id, messageThreadId);
@@ -4017,40 +4826,78 @@ async function handlePublicLanguageModeration(
     lastWarningAt: chatState?.last_warning_at ?? null,
     ordinaryMessagesSinceWarning: (chatState?.ordinary_messages_since_warning ?? 0) + 1,
     pendingWarningDueAt: chatState?.pending_warning_due_at ?? null,
-    pendingWarningStartedAt: chatState?.pending_warning_started_at ?? null
+    pendingWarningStartedAt: chatState?.pending_warning_started_at ?? null,
   });
-  if (!content || isCommandText(content) || classifyEnglishOnlyMessage(content, moderation.allowlist) !== "violation") return;
+  if (!content || isCommandText(content) || classifyEnglishOnlyMessage(content, moderation.allowlist) !== "violation")
+    return;
 
-  const state = db.getLanguageModerationUserState(ctx.chat.id, ctx.from.id) ?? { current_strikes: 0, sanction_tier: 0, first_strike_at: null };
-  if (!db.addLanguageModerationViolation({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, message_id: ctx.message.message_id, message_thread_id: messageThreadId, username: usernameOf(ctx.from), cycle_tier: state.sanction_tier })) return;
+  const state = db.getLanguageModerationUserState(ctx.chat.id, ctx.from.id) ?? {
+    current_strikes: 0,
+    sanction_tier: 0,
+    first_strike_at: null,
+  };
+  if (
+    !db.addLanguageModerationViolation({
+      chat_id: ctx.chat.id,
+      user_telegram_id: ctx.from.id,
+      message_id: ctx.message.message_id,
+      message_thread_id: messageThreadId,
+      username: usernameOf(ctx.from),
+      cycle_tier: state.sanction_tier,
+    })
+  )
+    return;
   if (state.current_strikes === 0) {
     const currentChatState = db.getLanguageModerationWarningState(ctx.chat.id, messageThreadId);
     const currentTime = now();
     const lastWarningAt = currentChatState?.last_warning_at ? Date.parse(currentChatState.last_warning_at) : 0;
-    const canWarn = !lastWarningAt || (
-      currentTime.getTime() - lastWarningAt >= moderation.warningCooldownMinutes * 60_000 &&
-      (currentChatState?.ordinary_messages_since_warning ?? 0) >= moderation.warningMessageThreshold
-    );
+    const canWarn =
+      !lastWarningAt ||
+      (currentTime.getTime() - lastWarningAt >= moderation.warningCooldownMinutes * 60_000 &&
+        (currentChatState?.ordinary_messages_since_warning ?? 0) >= moderation.warningMessageThreshold);
     if (canWarn) {
       if (!currentChatState?.pending_warning_due_at) {
         const startedAt = currentTime;
         const dueAt = new Date(startedAt.getTime() + 3_000);
-        db.upsertLanguageModerationWarningState(ctx.chat.id, messageThreadId, { lastWarningMessageId: currentChatState?.last_warning_message_id ?? null, lastWarningAt: currentChatState?.last_warning_at ?? null, ordinaryMessagesSinceWarning: currentChatState?.ordinary_messages_since_warning ?? 0, pendingWarningStartedAt: startedAt.toISOString(), pendingWarningDueAt: dueAt.toISOString() });
+        db.upsertLanguageModerationWarningState(ctx.chat.id, messageThreadId, {
+          lastWarningMessageId: currentChatState?.last_warning_message_id ?? null,
+          lastWarningAt: currentChatState?.last_warning_at ?? null,
+          ordinaryMessagesSinceWarning: currentChatState?.ordinary_messages_since_warning ?? 0,
+          pendingWarningStartedAt: startedAt.toISOString(),
+          pendingWarningDueAt: dueAt.toISOString(),
+        });
         schedulePendingWarning(ctx.api, db, ctx.chat.id, messageThreadId, 3_000, backgroundTasks);
       }
     } else {
       await advanceModerationStrike({
-        db, api: ctx.api, chatId: ctx.chat.id, chatTitle: ("title" in ctx.chat ? ctx.chat.title : null) ?? null,
-        userId: ctx.from.id, username: usernameOf(ctx.from), messageId: ctx.message.message_id, state,
-        now, cleanupScheduler, setStrikeReaction: true, strikeTime: currentTime
+        db,
+        api: ctx.api,
+        chatId: ctx.chat.id,
+        chatTitle: ("title" in ctx.chat ? ctx.chat.title : null) ?? null,
+        userId: ctx.from.id,
+        username: usernameOf(ctx.from),
+        messageId: ctx.message.message_id,
+        state,
+        now,
+        cleanupScheduler,
+        setStrikeReaction: true,
+        strikeTime: currentTime,
       });
     }
     return;
   }
   await advanceModerationStrike({
-    db, api: ctx.api, chatId: ctx.chat.id, chatTitle: ("title" in ctx.chat ? ctx.chat.title : null) ?? null,
-    userId: ctx.from.id, username: usernameOf(ctx.from), messageId: ctx.message.message_id, state,
-    now, cleanupScheduler, setStrikeReaction: true
+    db,
+    api: ctx.api,
+    chatId: ctx.chat.id,
+    chatTitle: ("title" in ctx.chat ? ctx.chat.title : null) ?? null,
+    userId: ctx.from.id,
+    username: usernameOf(ctx.from),
+    messageId: ctx.message.message_id,
+    state,
+    now,
+    cleanupScheduler,
+    setStrikeReaction: true,
   });
 }
 
@@ -4065,12 +4912,12 @@ function isPendingCurrentCycleFirstStrike(
   state: Pick<LanguageModerationUserState, "current_strikes" | "sanction_tier">
 ): boolean {
   return Boolean(
-    violation
-    && state.current_strikes === 0
-    && violation.user_telegram_id === userId
-    && violation.cycle_tier === state.sanction_tier
-    && violation.moderation_cycle_id === null
-    && violation.cleanup_state === "PENDING"
+    violation &&
+    state.current_strikes === 0 &&
+    violation.user_telegram_id === userId &&
+    violation.cycle_tier === state.sanction_tier &&
+    violation.moderation_cycle_id === null &&
+    violation.cleanup_state === "PENDING"
   );
 }
 
@@ -4095,9 +4942,10 @@ async function advanceModerationStrike(input: {
       username: input.username,
       current_strikes: input.state.current_strikes + 1,
       sanction_tier: input.state.sanction_tier,
-      first_strike_at: input.state.current_strikes === 0
-        ? (input.strikeTime ?? input.now()).toISOString()
-        : input.state.first_strike_at
+      first_strike_at:
+        input.state.current_strikes === 0
+          ? (input.strikeTime ?? input.now()).toISOString()
+          : input.state.first_strike_at,
     });
     if (input.setStrikeReaction) {
       await setModerationReaction(input.api, input.chatId, input.messageId, MODERATION_STRIKE_REACTION);
@@ -4107,19 +4955,42 @@ async function advanceModerationStrike(input: {
 
   const tier = Math.min(input.state.sanction_tier, 2);
   try {
-    await setModerationReaction(
-      input.api,
-      input.chatId,
-      input.messageId,
-      MODERATION_SANCTION_REACTION
-    );
+    await setModerationReaction(input.api, input.chatId, input.messageId, MODERATION_SANCTION_REACTION);
     if (tier === 2) await input.api.banChatMember(input.chatId, input.userId);
-    else await input.api.restrictChatMember(input.chatId, input.userId, { can_send_messages: false }, { until_date: Math.floor(input.now().getTime() / 1000) + (tier === 0 ? 86_400 : 604_800) });
+    else
+      await input.api.restrictChatMember(
+        input.chatId,
+        input.userId,
+        { can_send_messages: false },
+        { until_date: Math.floor(input.now().getTime() / 1000) + (tier === 0 ? 86_400 : 604_800) }
+      );
     const nextTier = Math.min(3, input.state.sanction_tier + 1);
     const violationCycleId = randomUUID();
-    input.db.assignLanguageModerationViolationCycle(input.chatId, input.userId, input.state.sanction_tier, violationCycleId);
-    input.db.upsertLanguageModerationUserState({ chat_id: input.chatId, user_telegram_id: input.userId, username: input.username, current_strikes: 0, sanction_tier: nextTier, first_strike_at: null });
-    const cleanupJobId = input.db.createLanguageModerationCleanupJob({ staff_chat_id: config.staffChatId, chat_id: input.chatId, user_telegram_id: input.userId, username: input.username, chat_title: input.chatTitle, sanction_tier: nextTier, sanction_kind: tier === 0 ? "24-hour mute" : tier === 1 ? "7-day mute" : "permanent ban", violation_cycle_id: violationCycleId, cleanup_due_at: new Date(input.now().getTime() + 10_000).toISOString() });
+    input.db.assignLanguageModerationViolationCycle(
+      input.chatId,
+      input.userId,
+      input.state.sanction_tier,
+      violationCycleId
+    );
+    input.db.upsertLanguageModerationUserState({
+      chat_id: input.chatId,
+      user_telegram_id: input.userId,
+      username: input.username,
+      current_strikes: 0,
+      sanction_tier: nextTier,
+      first_strike_at: null,
+    });
+    const cleanupJobId = input.db.createLanguageModerationCleanupJob({
+      staff_chat_id: config.staffChatId,
+      chat_id: input.chatId,
+      user_telegram_id: input.userId,
+      username: input.username,
+      chat_title: input.chatTitle,
+      sanction_tier: nextTier,
+      sanction_kind: tier === 0 ? "24-hour mute" : tier === 1 ? "7-day mute" : "permanent ban",
+      violation_cycle_id: violationCycleId,
+      cleanup_due_at: new Date(input.now().getTime() + 10_000).toISOString(),
+    });
     input.cleanupScheduler(input.api, input.db, cleanupJobId);
   } catch (error) {
     const managed = input.db.getManagedPublicChat(input.chatId);
@@ -4127,13 +4998,16 @@ async function advanceModerationStrike(input: {
       input.db.recordManagedPublicChatPermissionHealth({
         chatId: input.chatId,
         healthy: false,
-        reactionsAvailable: managed.reaction_status === "UNKNOWN" ? null : managed.reaction_status === "AVAILABLE"
+        reactionsAvailable: managed.reaction_status === "UNKNOWN" ? null : managed.reaction_status === "AVAILABLE",
       });
       input.db.setManagedPublicChatModerationEnabled(input.chatId, false);
     } else {
       input.db.setSetting(moderationSettingKey("enabled"), "false");
     }
-    logger.error({ chatId: input.chatId, userId: input.userId, err: error }, "Language moderation sanction failed; moderation disabled");
+    logger.error(
+      { chatId: input.chatId, userId: input.userId, err: error },
+      "Language moderation sanction failed; moderation disabled"
+    );
   }
 }
 
@@ -4158,7 +5032,7 @@ async function setModerationReaction(
         messageId,
         emoji,
         telegramErrorCode: diagnostic.telegramErrorCode,
-        description: diagnostic.description
+        description: diagnostic.description,
       },
       "Could not set moderation reaction"
     );
@@ -4172,7 +5046,14 @@ function stopPendingWarnings(): void {
   pendingWarningTimers.clear();
 }
 
-function schedulePendingWarning(api: BotApi, db: SupportDatabase, chatId: number, messageThreadId: number | null, delayMs: number, backgroundTasks?: BackgroundTaskTracker): void {
+function schedulePendingWarning(
+  api: BotApi,
+  db: SupportDatabase,
+  chatId: number,
+  messageThreadId: number | null,
+  delayMs: number,
+  backgroundTasks?: BackgroundTaskTracker
+): void {
   const key = `${chatId}:${messageThreadId ?? 0}`;
   if (pendingWarningTimers.has(key)) return;
   const timer = setTimeout(() => {
@@ -4180,36 +5061,63 @@ function schedulePendingWarning(api: BotApi, db: SupportDatabase, chatId: number
     const run = () => processPendingWarning(api, db, chatId, messageThreadId);
     if (backgroundTasks) {
       const accepted = backgroundTasks.run(run);
-      if (!accepted) logger.debug({ operation: "moderation_pending_warning", chatId, messageThreadId }, "Background work was dropped during shutdown");
+      if (!accepted)
+        logger.debug(
+          { operation: "moderation_pending_warning", chatId, messageThreadId },
+          "Background work was dropped during shutdown"
+        );
     } else void run();
   }, delayMs);
   timer.unref();
   pendingWarningTimers.set(key, timer);
 }
 
-export async function processPendingWarning(api: BotApi, db: SupportDatabase, chatId: number, messageThreadId: number | null = null): Promise<void> {
+export async function processPendingWarning(
+  api: BotApi,
+  db: SupportDatabase,
+  chatId: number,
+  messageThreadId: number | null = null
+): Promise<void> {
   const state = db.getLanguageModerationWarningState(chatId, messageThreadId);
   if (!state?.pending_warning_due_at || Date.parse(state.pending_warning_due_at) > Date.now()) return;
   const moderation = moderationConfigForChat(db, chatId);
   if (!moderation.enabled || moderation.targetChatId !== chatId) return;
-  const grouped = db.claimLanguageModerationFirstStrikes(chatId, new Date(Date.now() - moderation.lookbackMinutes * 60_000).toISOString(), messageThreadId);
+  const grouped = db.claimLanguageModerationFirstStrikes(
+    chatId,
+    new Date(Date.now() - moderation.lookbackMinutes * 60_000).toISOString(),
+    messageThreadId
+  );
   if (!grouped.length) {
     db.upsertLanguageModerationWarningState(chatId, messageThreadId, {
       lastWarningMessageId: state.last_warning_message_id,
       lastWarningAt: state.last_warning_at,
       ordinaryMessagesSinceWarning: state.ordinary_messages_since_warning,
       pendingWarningDueAt: null,
-      pendingWarningStartedAt: null
+      pendingWarningStartedAt: null,
     });
     return;
   }
   for (const user of grouped) {
     await setModerationReaction(api, chatId, user.messageId, MODERATION_STRIKE_REACTION);
   }
-  if (state.last_warning_message_id) { try { await api.deleteMessage(chatId, state.last_warning_message_id); } catch {} }
+  if (state.last_warning_message_id) {
+    try {
+      await api.deleteMessage(chatId, state.last_warning_message_id);
+    } catch {}
+  }
   try {
-    const warning = await api.sendMessage(chatId, moderation.warningText, messageThreadId === null ? {} : { message_thread_id: messageThreadId });
-    db.upsertLanguageModerationWarningState(chatId, messageThreadId, { lastWarningMessageId: warning.message_id, lastWarningAt: new Date().toISOString(), ordinaryMessagesSinceWarning: 0, pendingWarningDueAt: null, pendingWarningStartedAt: null });
+    const warning = await api.sendMessage(
+      chatId,
+      moderation.warningText,
+      messageThreadId === null ? {} : { message_thread_id: messageThreadId }
+    );
+    db.upsertLanguageModerationWarningState(chatId, messageThreadId, {
+      lastWarningMessageId: warning.message_id,
+      lastWarningAt: new Date().toISOString(),
+      ordinaryMessagesSinceWarning: 0,
+      pendingWarningDueAt: null,
+      pendingWarningStartedAt: null,
+    });
   } catch (error) {
     logger.warn({ chatId, err: error }, "Could not send pending language moderation warning");
   }
@@ -4237,7 +5145,9 @@ function hasApplicationPermission(ctx: Context, permission: Permission): boolean
   if (!ctx.from) return false;
   const installation = installationServicesByContext.get(ctx);
   if (!installation) return false;
-  return installation.getState().authorizationMode === "LEGACY_TRUSTED_GROUP" || installation.can(ctx.from.id, permission);
+  return (
+    installation.getState().authorizationMode === "LEGACY_TRUSTED_GROUP" || installation.can(ctx.from.id, permission)
+  );
 }
 
 function isTicketStatus(value: string | undefined): value is TicketStatus {
@@ -4276,7 +5186,7 @@ function parseBanCommand(ctx: CommandContext<Context>): BanCommand | null {
 
   return {
     userId,
-    reason: reasonParts.join(" ").trim() || DEFAULT_BAN_REASON
+    reason: reasonParts.join(" ").trim() || DEFAULT_BAN_REASON,
   };
 }
 

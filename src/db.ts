@@ -8,12 +8,80 @@ import { TicketBatchRepository } from "./persistence/ticketBatchRepository.js";
 import { TicketRepository } from "./persistence/ticketsRepository.js";
 import { now } from "./persistence/helpers.js";
 import type { NormalizedDeliveryError } from "./deliveryDiagnostics.js";
-import type { AddMessageInput, BanUserInput, BannedUserRecord, CloseTicketInput, CreateTicketBatchAnswerPackageInput, CreateTicketBatchExportInput, EntityNotificationPublicationState, InstallationStateRecord, LanguageModerationCleanupJob, LanguageModerationMessageAuthor, LanguageModerationUserState, LanguageModerationViolation, LanguageModerationViolationCleanupState, LanguageModerationWarningState, ManagedPublicChatRecord, OnboardingSessionRecord, QuickReplyCategoryRecord, QuickReplyTemplateRecord, SecureTokenRecord, TeamMemberRecord, TeamRole, TicketBatchAnswerItemRecord, TicketBatchAnswerItemState, TicketBatchAnswerPackageRecord, TicketBatchDeliveryFailureContext, TicketBatchExportItemRecord, TicketBatchExportRecord, TicketBatchFailureEventState, TicketBatchRecoveryAudit, TicketBatchStaffSyncContext, TicketBatchSummaryDeliveryState, TicketBatchTopicEchoState, TicketEscalationTarget, TicketFollowUpHistoryRecord, TicketFollowUpState, TicketMessageRecord, TicketRecord, TicketStatus, TicketWithUser, UserInput, UserRecord, WorkspaceRecord } from "./persistence/types.js";
+import type {
+  AddMessageInput,
+  BanUserInput,
+  BannedUserRecord,
+  CloseTicketInput,
+  CreateTicketBatchAnswerPackageInput,
+  CreateTicketBatchExportInput,
+  EntityNotificationPublicationState,
+  InstallationStateRecord,
+  LanguageModerationCleanupJob,
+  LanguageModerationMessageAuthor,
+  LanguageModerationUserState,
+  LanguageModerationViolation,
+  LanguageModerationViolationCleanupState,
+  LanguageModerationWarningState,
+  ManagedPublicChatRecord,
+  OnboardingSessionRecord,
+  QuickReplyCategoryRecord,
+  QuickReplyTemplateRecord,
+  SecureTokenRecord,
+  TeamMemberRecord,
+  TeamRole,
+  TicketBatchAnswerItemRecord,
+  TicketBatchAnswerItemState,
+  TicketBatchAnswerPackageRecord,
+  TicketBatchDeliveryFailureContext,
+  TicketBatchExportItemRecord,
+  TicketBatchExportRecord,
+  TicketBatchFailureEventState,
+  TicketBatchRecoveryAudit,
+  TicketBatchStaffSyncContext,
+  TicketBatchSummaryDeliveryState,
+  TicketBatchTopicEchoState,
+  TicketEscalationTarget,
+  TicketFollowUpHistoryRecord,
+  TicketFollowUpState,
+  TicketMessageRecord,
+  TicketRecord,
+  TicketStatus,
+  TicketWithUser,
+  UserInput,
+  UserRecord,
+  WorkspaceRecord,
+} from "./persistence/types.js";
 export type * from "./persistence/types.js";
-interface TableColumnInfo { name: string; }
-interface Migration { id: number; name: string; up: () => void; }
-export function resolveDatabasePath(databaseUrl: string): string { const value = databaseUrl.trim(); if (value === ":memory:") return value; if (value.startsWith("file://")) { const url = new URL(value); const pathname = decodeURIComponent(url.pathname); return process.platform === "win32" && /^\/[A-Za-z]:/.test(pathname) ? pathname.slice(1) : pathname; } if (value.startsWith("file:")) return value.slice("file:".length); if (value.startsWith("sqlite://")) { const url = new URL(value); const pathname = decodeURIComponent(url.pathname); return process.platform === "win32" && /^\/[A-Za-z]:/.test(pathname) ? pathname.slice(1) : pathname; } return value; }
-function ensureDirectoryForDatabase(databasePath: string): void { if (databasePath === ":memory:") return; const directory = path.dirname(databasePath); if (directory && directory !== ".") fs.mkdirSync(directory, { recursive: true }); }
+interface TableColumnInfo {
+  name: string;
+}
+interface Migration {
+  id: number;
+  name: string;
+  up: () => void;
+}
+export function resolveDatabasePath(databaseUrl: string): string {
+  const value = databaseUrl.trim();
+  if (value === ":memory:") return value;
+  if (value.startsWith("file://")) {
+    const url = new URL(value);
+    const pathname = decodeURIComponent(url.pathname);
+    return process.platform === "win32" && /^\/[A-Za-z]:/.test(pathname) ? pathname.slice(1) : pathname;
+  }
+  if (value.startsWith("file:")) return value.slice("file:".length);
+  if (value.startsWith("sqlite://")) {
+    const url = new URL(value);
+    const pathname = decodeURIComponent(url.pathname);
+    return process.platform === "win32" && /^\/[A-Za-z]:/.test(pathname) ? pathname.slice(1) : pathname;
+  }
+  return value;
+}
+function ensureDirectoryForDatabase(databasePath: string): void {
+  if (databasePath === ":memory:") return;
+  const directory = path.dirname(databasePath);
+  if (directory && directory !== ".") fs.mkdirSync(directory, { recursive: true });
+}
 export class SupportDatabase {
   private readonly db: Database.Database;
   private readonly tickets: TicketRepository;
@@ -37,219 +105,201 @@ export class SupportDatabase {
     this.moderation = new ModerationRepository(this.db);
     this.quickReplies = new QuickRepliesRepository(this.db);
   }
-  close(): void { this.db.close(); }
-  ping(): boolean { this.db.prepare("SELECT 1").get(); return true; }
-  backupTo(destination: string): Promise<Database.BackupMetadata> { return this.db.backup(destination); }
-  upsertUser(user: UserInput): void
-  {
+  close(): void {
+    this.db.close();
+  }
+  ping(): boolean {
+    this.db.prepare("SELECT 1").get();
+    return true;
+  }
+  backupTo(destination: string): Promise<Database.BackupMetadata> {
+    return this.db.backup(destination);
+  }
+  upsertUser(user: UserInput): void {
     return this.tickets.upsertUser(user);
   }
 
-  getUser(telegramId: number): UserRecord | undefined
-  {
+  getUser(telegramId: number): UserRecord | undefined {
     return this.tickets.getUser(telegramId);
   }
 
-  createTicket(userTelegramId: number, staffChatId: number): TicketRecord
-  {
+  createTicket(userTelegramId: number, staffChatId: number): TicketRecord {
     return this.tickets.createTicket(userTelegramId, staffChatId);
   }
 
-  getTicket(ticketId: number): TicketRecord | undefined
-  {
+  getTicket(ticketId: number): TicketRecord | undefined {
     return this.tickets.getTicket(ticketId);
   }
 
-  getTicketWithUser(ticketId: number): TicketWithUser | undefined
-  {
+  getTicketWithUser(ticketId: number): TicketWithUser | undefined {
     return this.tickets.getTicketWithUser(ticketId);
   }
 
-  findActiveTicketForUser(userTelegramId: number, staffChatId: number): TicketRecord | undefined
-  {
+  findActiveTicketForUser(userTelegramId: number, staffChatId: number): TicketRecord | undefined {
     return this.tickets.findActiveTicketForUser(userTelegramId, staffChatId);
   }
 
-  getLatestTicketForUser(userTelegramId: number, staffChatId: number): TicketRecord | undefined
-  {
+  getLatestTicketForUser(userTelegramId: number, staffChatId: number): TicketRecord | undefined {
     return this.tickets.getLatestTicketForUser(userTelegramId, staffChatId);
   }
 
-  listTicketsForUser(userTelegramId: number, staffChatId: number, limit = 10): TicketRecord[]
-  {
+  listTicketsForUser(userTelegramId: number, staffChatId: number, limit = 10): TicketRecord[] {
     return this.tickets.listTicketsForUser(userTelegramId, staffChatId, limit);
   }
 
-  findTicketByStaffThread(staffChatId: number, messageThreadId: number): TicketWithUser | undefined
-  {
+  findTicketByStaffThread(staffChatId: number, messageThreadId: number): TicketWithUser | undefined {
     return this.tickets.findTicketByStaffThread(staffChatId, messageThreadId);
   }
 
-  closeOtherActiveTicketsForUserInStaffChat(
-    userTelegramId: number,
-    staffChatId: number,
-    keepTicketId: number
-  ): number
-  {
+  closeOtherActiveTicketsForUserInStaffChat(userTelegramId: number, staffChatId: number, keepTicketId: number): number {
     return this.tickets.closeOtherActiveTicketsForUserInStaffChat(userTelegramId, staffChatId, keepTicketId);
   }
 
-  updateTicketStaffMessage(ticketId: number, staffChatId: number, staffMessageId: number): void
-  {
+  updateTicketStaffMessage(ticketId: number, staffChatId: number, staffMessageId: number): void {
     return this.tickets.updateTicketStaffMessage(ticketId, staffChatId, staffMessageId);
   }
 
-  updateTicketForumTopic(ticketId: number, staffChatId: number, messageThreadId: number): void
-  {
+  updateTicketForumTopic(ticketId: number, staffChatId: number, messageThreadId: number): void {
     return this.tickets.updateTicketForumTopic(ticketId, staffChatId, messageThreadId);
   }
 
-  updateTicketStatus(ticketId: number, status: TicketStatus): TicketRecord | undefined
-  {
+  updateTicketStatus(ticketId: number, status: TicketStatus): TicketRecord | undefined {
     return this.tickets.updateTicketStatus(ticketId, status);
   }
 
-  listActiveTicketsForStaffChat(staffChatId: number): TicketWithUser[]
-  {
+  listActiveTicketsForStaffChat(staffChatId: number): TicketWithUser[] {
     return this.tickets.listActiveTicketsForStaffChat(staffChatId);
   }
 
-  closeTicketRecord(ticketId: number, input: CloseTicketInput): TicketRecord | undefined
-  {
+  closeTicketRecord(ticketId: number, input: CloseTicketInput): TicketRecord | undefined {
     return this.tickets.closeTicketRecord(ticketId, input);
   }
 
-  markTicketArchivedAndDeleteMessages(
-    ticketId: number,
-    logsMessageId: number,
-    transcriptMessageId: number
-  ): void
-  {
+  markTicketArchivedAndDeleteMessages(ticketId: number, logsMessageId: number, transcriptMessageId: number): void {
     return this.tickets.markTicketArchivedAndDeleteMessages(ticketId, logsMessageId, transcriptMessageId);
   }
 
-  addMessage(input: AddMessageInput): number
-  {
+  addMessage(input: AddMessageInput): number {
     return this.tickets.addMessage(input);
   }
 
-  listMessages(ticketId: number, limit = 10): TicketMessageRecord[]
-  {
+  listMessages(ticketId: number, limit = 10): TicketMessageRecord[] {
     return this.tickets.listMessages(ticketId, limit);
   }
 
-  listMessagesChronological(ticketId: number): TicketMessageRecord[]
-  {
+  listMessagesChronological(ticketId: number): TicketMessageRecord[] {
     return this.tickets.listMessagesChronological(ticketId);
   }
 
-  deleteMessagesForTicket(ticketId: number): number
-  {
+  deleteMessagesForTicket(ticketId: number): number {
     return this.tickets.deleteMessagesForTicket(ticketId);
   }
 
-  listClosedTicketsPendingArchive(staffChatId: number, limit = 1000): TicketWithUser[]
-  {
+  listClosedTicketsPendingArchive(staffChatId: number, limit = 1000): TicketWithUser[] {
     return this.tickets.listClosedTicketsPendingArchive(staffChatId, limit);
   }
 
-  createTicketBatchExport(input: CreateTicketBatchExportInput): void
-  {
+  createTicketBatchExport(input: CreateTicketBatchExportInput): void {
     return this.batch.createTicketBatchExport(input);
   }
 
-  getTicketBatchExport(exportId: string, staffChatId: number): TicketBatchExportRecord | undefined
-  {
+  getTicketBatchExport(exportId: string, staffChatId: number): TicketBatchExportRecord | undefined {
     return this.batch.getTicketBatchExport(exportId, staffChatId);
   }
 
-  listTicketBatchExportItems(exportId: string): TicketBatchExportItemRecord[]
-  {
+  listTicketBatchExportItems(exportId: string): TicketBatchExportItemRecord[] {
     return this.batch.listTicketBatchExportItems(exportId);
   }
 
-  markTicketBatchExportDelivered(exportId: string, staffChatId: number, deliveryMessageId: number): void
-  {
+  markTicketBatchExportDelivered(exportId: string, staffChatId: number, deliveryMessageId: number): void {
     return this.batch.markTicketBatchExportDelivered(exportId, staffChatId, deliveryMessageId);
   }
 
-  markTicketBatchExportFailed(exportId: string, staffChatId: number, error: string): void
-  {
+  markTicketBatchExportFailed(exportId: string, staffChatId: number, error: string): void {
     return this.batch.markTicketBatchExportFailed(exportId, staffChatId, error);
   }
 
-  markTicketBatchExportUnknownDelivery(exportId: string, staffChatId: number, error: string): void
-  {
+  markTicketBatchExportUnknownDelivery(exportId: string, staffChatId: number, error: string): void {
     return this.batch.markTicketBatchExportUnknownDelivery(exportId, staffChatId, error);
   }
 
-  getTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined
-  {
+  getTicketBatchAnswerPackage(
+    answerPackageId: string,
+    staffChatId: number
+  ): TicketBatchAnswerPackageRecord | undefined {
     return this.batch.getTicketBatchAnswerPackage(answerPackageId, staffChatId);
   }
 
-  getTicketBatchAnswerPackageByHash(packageHash: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined
-  {
+  getTicketBatchAnswerPackageByHash(
+    packageHash: string,
+    staffChatId: number
+  ): TicketBatchAnswerPackageRecord | undefined {
     return this.batch.getTicketBatchAnswerPackageByHash(packageHash, staffChatId);
   }
 
-  getTicketBatchAnswerPackageByPreviewToken(previewToken: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined
-  {
+  getTicketBatchAnswerPackageByPreviewToken(
+    previewToken: string,
+    staffChatId: number
+  ): TicketBatchAnswerPackageRecord | undefined {
     return this.batch.getTicketBatchAnswerPackageByPreviewToken(previewToken, staffChatId);
   }
 
-  createTicketBatchAnswerPackage(input: CreateTicketBatchAnswerPackageInput): TicketBatchAnswerPackageRecord
-  {
+  createTicketBatchAnswerPackage(input: CreateTicketBatchAnswerPackageInput): TicketBatchAnswerPackageRecord {
     return this.batch.createTicketBatchAnswerPackage(input);
   }
 
-  listTicketBatchAnswerItems(answerPackageId: string): TicketBatchAnswerItemRecord[]
-  {
+  listTicketBatchAnswerItems(answerPackageId: string): TicketBatchAnswerItemRecord[] {
     return this.batch.listTicketBatchAnswerItems(answerPackageId);
   }
 
-  getLatestTicketBatchDeliveryFailure(ticketId: number, staffChatId: number): TicketBatchDeliveryFailureContext | undefined
-  {
+  getLatestTicketBatchDeliveryFailure(
+    ticketId: number,
+    staffChatId: number
+  ): TicketBatchDeliveryFailureContext | undefined {
     return this.batch.getLatestTicketBatchDeliveryFailure(ticketId, staffChatId);
   }
 
-  getLatestTicketBatchStaffSyncContext(ticketId: number, staffChatId: number): TicketBatchStaffSyncContext | undefined
-  {
+  getLatestTicketBatchStaffSyncContext(ticketId: number, staffChatId: number): TicketBatchStaffSyncContext | undefined {
     return this.batch.getLatestTicketBatchStaffSyncContext(ticketId, staffChatId);
   }
 
-  setTicketBatchAnswerPackagePreview(answerPackageId: string, staffChatId: number, preview: { token: string; chatId: number; messageId: number; page: number }): boolean
-  {
+  setTicketBatchAnswerPackagePreview(
+    answerPackageId: string,
+    staffChatId: number,
+    preview: { token: string; chatId: number; messageId: number; page: number }
+  ): boolean {
     return this.batch.setTicketBatchAnswerPackagePreview(answerPackageId, staffChatId, preview);
   }
 
-  updateTicketBatchAnswerPackagePreviewPage(answerPackageId: string, staffChatId: number, page: number): void
-  {
+  updateTicketBatchAnswerPackagePreviewPage(answerPackageId: string, staffChatId: number, page: number): void {
     return this.batch.updateTicketBatchAnswerPackagePreviewPage(answerPackageId, staffChatId, page);
   }
 
-  clearTicketBatchAnswerPackagePreview(answerPackageId: string, staffChatId: number): void
-  {
+  clearTicketBatchAnswerPackagePreview(answerPackageId: string, staffChatId: number): void {
     return this.batch.clearTicketBatchAnswerPackagePreview(answerPackageId, staffChatId);
   }
 
-  claimTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined
-  {
+  claimTicketBatchAnswerPackage(
+    answerPackageId: string,
+    staffChatId: number
+  ): TicketBatchAnswerPackageRecord | undefined {
     return this.batch.claimTicketBatchAnswerPackage(answerPackageId, staffChatId);
   }
 
-  cancelTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): boolean
-  {
+  cancelTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): boolean {
     return this.batch.cancelTicketBatchAnswerPackage(answerPackageId, staffChatId);
   }
 
-  claimTicketBatchAnswerItem(answerPackageId: string, ticketId: number): boolean
-  {
+  claimTicketBatchAnswerItem(answerPackageId: string, ticketId: number): boolean {
     return this.batch.claimTicketBatchAnswerItem(answerPackageId, ticketId);
   }
 
-  updateTicketBatchAnswerItem(answerPackageId: string, ticketId: number, state: TicketBatchAnswerItemState, options: { deliveryMessageId?: number | null; lastError?: string | null; applied?: boolean } = {}): void
-  {
+  updateTicketBatchAnswerItem(
+    answerPackageId: string,
+    ticketId: number,
+    state: TicketBatchAnswerItemState,
+    options: { deliveryMessageId?: number | null; lastError?: string | null; applied?: boolean } = {}
+  ): void {
     return this.batch.updateTicketBatchAnswerItem(answerPackageId, ticketId, state, options);
   }
 
@@ -258,8 +308,7 @@ export class SupportDatabase {
     ticketId: number,
     state: "FAILED" | "UNKNOWN_DELIVERY",
     diagnostic: NormalizedDeliveryError
-  ): void
-  {
+  ): void {
     return this.batch.recordTicketBatchDeliveryFailure(answerPackageId, ticketId, state, diagnostic);
   }
 
@@ -269,18 +318,20 @@ export class SupportDatabase {
     state: TicketBatchFailureEventState,
     messageId?: number | null,
     options: { nextRetryAt?: string | null; incrementAttempt?: boolean } = {}
-  ): void
-  {
+  ): void {
     return this.batch.recordTicketBatchFailureEvent(answerPackageId, ticketId, state, messageId, options);
   }
 
-  listPendingTicketBatchFailureEvents(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[]
-  {
+  listPendingTicketBatchFailureEvents(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[] {
     return this.batch.listPendingTicketBatchFailureEvents(staffChatId, at, limit);
   }
 
-  recordTicketBatchSummaryDelivery(answerPackageId: string, staffChatId: number, state: TicketBatchSummaryDeliveryState, error: string | null = null): void
-  {
+  recordTicketBatchSummaryDelivery(
+    answerPackageId: string,
+    staffChatId: number,
+    state: TicketBatchSummaryDeliveryState,
+    error: string | null = null
+  ): void {
     return this.batch.recordTicketBatchSummaryDelivery(answerPackageId, staffChatId, state, error);
   }
 
@@ -288,98 +339,118 @@ export class SupportDatabase {
     answerPackageId: string,
     staffChatId: number,
     input: { text: string; chatId: number; originChatId?: number | null; originMessageId?: number | null }
-  ): void
-  {
+  ): void {
     return this.batch.queueTicketBatchFinalSummary(answerPackageId, staffChatId, input);
   }
 
-  queueTicketBatchFinalSummaryRefresh(answerPackageId: string, staffChatId: number, text: string): boolean
-  {
+  queueTicketBatchFinalSummaryRefresh(answerPackageId: string, staffChatId: number, text: string): boolean {
     return this.batch.queueTicketBatchFinalSummaryRefresh(answerPackageId, staffChatId, text);
   }
 
-  listPendingTicketBatchFinalSummaries(staffChatId: number, at: string, limit = 20): TicketBatchAnswerPackageRecord[]
-  {
+  listPendingTicketBatchFinalSummaries(staffChatId: number, at: string, limit = 20): TicketBatchAnswerPackageRecord[] {
     return this.batch.listPendingTicketBatchFinalSummaries(staffChatId, at, limit);
   }
 
-  recordTicketBatchFinalSummaryAttempt(answerPackageId: string, staffChatId: number): void
-  {
+  recordTicketBatchFinalSummaryAttempt(answerPackageId: string, staffChatId: number): void {
     return this.batch.recordTicketBatchFinalSummaryAttempt(answerPackageId, staffChatId);
   }
 
-  recordTicketBatchFinalSummarySent(answerPackageId: string, staffChatId: number, messageId: number): void
-  {
+  recordTicketBatchFinalSummarySent(answerPackageId: string, staffChatId: number, messageId: number): void {
     return this.batch.recordTicketBatchFinalSummarySent(answerPackageId, staffChatId, messageId);
   }
 
-  recordTicketBatchFinalSummaryFailure(answerPackageId: string, staffChatId: number, state: "FAILED" | "UNKNOWN_DELIVERY", error: string, nextRetryAt: string | null): void
-  {
+  recordTicketBatchFinalSummaryFailure(
+    answerPackageId: string,
+    staffChatId: number,
+    state: "FAILED" | "UNKNOWN_DELIVERY",
+    error: string,
+    nextRetryAt: string | null
+  ): void {
     return this.batch.recordTicketBatchFinalSummaryFailure(answerPackageId, staffChatId, state, error, nextRetryAt);
   }
 
-  recordTicketBatchTopicEcho(answerPackageId: string, ticketId: number, state: TicketBatchTopicEchoState, options: { chatId?: number | null; threadId?: number | null; messageId?: number | null; lastError?: string | null; nextRetryAt?: string | null; incrementAttempt?: boolean; diagnostic?: NormalizedDeliveryError } = {}): void
-  {
+  recordTicketBatchTopicEcho(
+    answerPackageId: string,
+    ticketId: number,
+    state: TicketBatchTopicEchoState,
+    options: {
+      chatId?: number | null;
+      threadId?: number | null;
+      messageId?: number | null;
+      lastError?: string | null;
+      nextRetryAt?: string | null;
+      incrementAttempt?: boolean;
+      diagnostic?: NormalizedDeliveryError;
+    } = {}
+  ): void {
     return this.batch.recordTicketBatchTopicEcho(answerPackageId, ticketId, state, options);
   }
 
-  listPendingTicketBatchTopicEchoes(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[]
-  {
+  listPendingTicketBatchTopicEchoes(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[] {
     return this.batch.listPendingTicketBatchTopicEchoes(staffChatId, at, limit);
   }
 
-  listClosedTicketBatchReplyAndClosePendingEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[]
-  {
+  listClosedTicketBatchReplyAndClosePendingEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {
     return this.batch.listClosedTicketBatchReplyAndClosePendingEchoes(staffChatId, limit);
   }
 
-  setTicketBatchPostDeliveryRetry(answerPackageId: string, ticketId: number, nextRetryAt: string | null, lastError: string | null): void
-  {
+  setTicketBatchPostDeliveryRetry(
+    answerPackageId: string,
+    ticketId: number,
+    nextRetryAt: string | null,
+    lastError: string | null
+  ): void {
     return this.batch.setTicketBatchPostDeliveryRetry(answerPackageId, ticketId, nextRetryAt, lastError);
   }
 
-  listPendingTicketBatchReplyAndCloseContinuations(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[]
-  {
+  listPendingTicketBatchReplyAndCloseContinuations(
+    staffChatId: number,
+    at: string,
+    limit = 20
+  ): TicketBatchAnswerItemRecord[] {
     return this.batch.listPendingTicketBatchReplyAndCloseContinuations(staffChatId, at, limit);
   }
 
-  getNextTicketBatchStaffRetryAt(staffChatId: number): string | undefined
-  {
+  getNextTicketBatchStaffRetryAt(staffChatId: number): string | undefined {
     return this.batch.getNextTicketBatchStaffRetryAt(staffChatId);
   }
 
-  listInvalidTicketBatchSuccessEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[]
-  {
+  listInvalidTicketBatchSuccessEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {
     return this.batch.listInvalidTicketBatchSuccessEchoes(staffChatId, limit);
   }
 
-  getTicketBatchRecoveryAudit(staffChatId: number, at: string): TicketBatchRecoveryAudit
-  {
+  getTicketBatchRecoveryAudit(staffChatId: number, at: string): TicketBatchRecoveryAudit {
     return this.batch.getTicketBatchRecoveryAudit(staffChatId, at);
   }
 
-  setTicketFollowUpContext(ticketId: number, input: { followUpState: TicketFollowUpState; internalNote: string | null; escalationTarget: TicketEscalationTarget; sourceAnswerPackageId?: string | null }): TicketRecord | undefined
-  {
+  setTicketFollowUpContext(
+    ticketId: number,
+    input: {
+      followUpState: TicketFollowUpState;
+      internalNote: string | null;
+      escalationTarget: TicketEscalationTarget;
+      sourceAnswerPackageId?: string | null;
+    }
+  ): TicketRecord | undefined {
     return this.tickets.setTicketFollowUpContext(ticketId, input);
   }
 
-  clearWaitingUserFollowUp(ticketId: number): TicketRecord | undefined
-  {
+  clearWaitingUserFollowUp(ticketId: number): TicketRecord | undefined {
     return this.tickets.clearWaitingUserFollowUp(ticketId);
   }
 
-  listTicketFollowUpHistory(ticketId: number): TicketFollowUpHistoryRecord[]
-  {
+  listTicketFollowUpHistory(ticketId: number): TicketFollowUpHistoryRecord[] {
     return this.tickets.listTicketFollowUpHistory(ticketId);
   }
 
-  finalizeTicketBatchAnswerPackage(answerPackageId: string, staffChatId: number): TicketBatchAnswerPackageRecord | undefined
-  {
+  finalizeTicketBatchAnswerPackage(
+    answerPackageId: string,
+    staffChatId: number
+  ): TicketBatchAnswerPackageRecord | undefined {
     return this.batch.finalizeTicketBatchAnswerPackage(answerPackageId, staffChatId);
   }
 
-  getLanguageModerationUserState(chatId: number, userId: number): LanguageModerationUserState | undefined
-  {
+  getLanguageModerationUserState(chatId: number, userId: number): LanguageModerationUserState | undefined {
     return this.moderation.getLanguageModerationUserState(chatId, userId);
   }
 
@@ -389,68 +460,80 @@ export class SupportDatabase {
     userTelegramId: number;
     username?: string | null;
     messageThreadId?: number | null;
-  }): boolean
-  {
+  }): boolean {
     return this.moderation.addLanguageModerationMessageAuthor(input);
   }
 
-  getLanguageModerationMessageAuthor(chatId: number, messageId: number): LanguageModerationMessageAuthor | undefined
-  {
+  getLanguageModerationMessageAuthor(chatId: number, messageId: number): LanguageModerationMessageAuthor | undefined {
     return this.moderation.getLanguageModerationMessageAuthor(chatId, messageId);
   }
 
-  upsertLanguageModerationUserState(input: Omit<LanguageModerationUserState, "updated_at">): void
-  {
+  upsertLanguageModerationUserState(input: Omit<LanguageModerationUserState, "updated_at">): void {
     return this.moderation.upsertLanguageModerationUserState(input);
   }
 
-  addLanguageModerationViolation(input: Pick<LanguageModerationViolation, "chat_id" | "user_telegram_id" | "message_id" | "username" | "cycle_tier"> & { message_thread_id?: number | null }): boolean
-  {
+  addLanguageModerationViolation(
+    input: Pick<
+      LanguageModerationViolation,
+      "chat_id" | "user_telegram_id" | "message_id" | "username" | "cycle_tier"
+    > & { message_thread_id?: number | null }
+  ): boolean {
     return this.moderation.addLanguageModerationViolation(input);
   }
 
-  getLanguageModerationViolation(chatId: number, messageId: number): LanguageModerationViolation | undefined
-  {
+  getLanguageModerationViolation(chatId: number, messageId: number): LanguageModerationViolation | undefined {
     return this.moderation.getLanguageModerationViolation(chatId, messageId);
   }
 
-  listLanguageModerationViolations(chatId: number, since: string): LanguageModerationViolation[]
-  {
+  listLanguageModerationViolations(chatId: number, since: string): LanguageModerationViolation[] {
     return this.moderation.listLanguageModerationViolations(chatId, since);
   }
 
-  claimLanguageModerationFirstStrikes(chatId: number, since: string, messageThreadId: number | null = null): Array<{ userId: number; username: string | null; messageId: number }>
-  {
+  claimLanguageModerationFirstStrikes(
+    chatId: number,
+    since: string,
+    messageThreadId: number | null = null
+  ): Array<{ userId: number; username: string | null; messageId: number }> {
     return this.moderation.claimLanguageModerationFirstStrikes(chatId, since, messageThreadId);
   }
 
-  clearLanguageModerationViolations(chatId: number, userId: number): void
-  {
+  clearLanguageModerationViolations(chatId: number, userId: number): void {
     return this.moderation.clearLanguageModerationViolations(chatId, userId);
   }
 
-  listLanguageModerationCycleViolations(chatId: number, userId: number, cycleTier: number): LanguageModerationViolation[]
-  {
+  listLanguageModerationCycleViolations(
+    chatId: number,
+    userId: number,
+    cycleTier: number
+  ): LanguageModerationViolation[] {
     return this.moderation.listLanguageModerationCycleViolations(chatId, userId, cycleTier);
   }
 
-  listPendingLanguageModerationCycleViolations(chatId: number, userId: number, cycleTier: number): LanguageModerationViolation[]
-  {
+  listPendingLanguageModerationCycleViolations(
+    chatId: number,
+    userId: number,
+    cycleTier: number
+  ): LanguageModerationViolation[] {
     return this.moderation.listPendingLanguageModerationCycleViolations(chatId, userId, cycleTier);
   }
 
-  assignLanguageModerationViolationCycle(chatId: number, userId: number, cycleTier: number, cycleId: string): number
-  {
+  assignLanguageModerationViolationCycle(chatId: number, userId: number, cycleTier: number, cycleId: string): number {
     return this.moderation.assignLanguageModerationViolationCycle(chatId, userId, cycleTier, cycleId);
   }
 
-  listLanguageModerationCleanupCycleViolations(chatId: number, userId: number, cycleId: string): LanguageModerationViolation[]
-  {
+  listLanguageModerationCleanupCycleViolations(
+    chatId: number,
+    userId: number,
+    cycleId: string
+  ): LanguageModerationViolation[] {
     return this.moderation.listLanguageModerationCleanupCycleViolations(chatId, userId, cycleId);
   }
 
-  listPendingLanguageModerationCleanupCycleViolations(chatId: number, userId: number, cycleId: string): LanguageModerationViolation[]
-  {
+  listPendingLanguageModerationCleanupCycleViolations(
+    chatId: number,
+    userId: number,
+    cycleId: string
+  ): LanguageModerationViolation[] {
     return this.moderation.listPendingLanguageModerationCleanupCycleViolations(chatId, userId, cycleId);
   }
 
@@ -462,162 +545,197 @@ export class SupportDatabase {
     errorCategory?: string | null;
     errorCode?: number | null;
     errorDescription?: string | null;
-  }): void
-  {
+  }): void {
     return this.moderation.recordLanguageModerationViolationCleanupResult(input);
   }
 
-  clearLanguageModerationCycleViolations(chatId: number, userId: number, cycleTier: number): void
-  {
+  clearLanguageModerationCycleViolations(chatId: number, userId: number, cycleTier: number): void {
     return this.moderation.clearLanguageModerationCycleViolations(chatId, userId, cycleTier);
   }
 
-  clearLanguageModerationCleanupCycleViolations(chatId: number, userId: number, cycleId: string): void
-  {
+  clearLanguageModerationCleanupCycleViolations(chatId: number, userId: number, cycleId: string): void {
     return this.moderation.clearLanguageModerationCleanupCycleViolations(chatId, userId, cycleId);
   }
 
-  getLanguageModerationChatState(chatId: number): LanguageModerationWarningState | undefined
-  {
+  getLanguageModerationChatState(chatId: number): LanguageModerationWarningState | undefined {
     return this.moderation.getLanguageModerationChatState(chatId);
   }
 
-  upsertLanguageModerationChatState(chatId: number, values: { lastWarningMessageId?: number | null; lastWarningAt?: string | null; ordinaryMessagesSinceWarning: number; pendingWarningDueAt?: string | null; pendingWarningStartedAt?: string | null }): void
-  {
+  upsertLanguageModerationChatState(
+    chatId: number,
+    values: {
+      lastWarningMessageId?: number | null;
+      lastWarningAt?: string | null;
+      ordinaryMessagesSinceWarning: number;
+      pendingWarningDueAt?: string | null;
+      pendingWarningStartedAt?: string | null;
+    }
+  ): void {
     return this.moderation.upsertLanguageModerationChatState(chatId, values);
   }
 
-  getLanguageModerationWarningState(chatId: number, messageThreadId: number | null): LanguageModerationWarningState | undefined
-  {
+  getLanguageModerationWarningState(
+    chatId: number,
+    messageThreadId: number | null
+  ): LanguageModerationWarningState | undefined {
     return this.moderation.getLanguageModerationWarningState(chatId, messageThreadId);
   }
 
   upsertLanguageModerationWarningState(
     chatId: number,
     messageThreadId: number | null,
-    values: { lastWarningMessageId?: number | null; lastWarningAt?: string | null; ordinaryMessagesSinceWarning: number; pendingWarningDueAt?: string | null; pendingWarningStartedAt?: string | null }
-  ): void
-  {
+    values: {
+      lastWarningMessageId?: number | null;
+      lastWarningAt?: string | null;
+      ordinaryMessagesSinceWarning: number;
+      pendingWarningDueAt?: string | null;
+      pendingWarningStartedAt?: string | null;
+    }
+  ): void {
     return this.moderation.upsertLanguageModerationWarningState(chatId, messageThreadId, values);
   }
 
-  createLanguageModerationCleanupJob(input: Omit<LanguageModerationCleanupJob, "id" | "state" | "created_at" | "updated_at">): number
-  {
+  createLanguageModerationCleanupJob(
+    input: Omit<LanguageModerationCleanupJob, "id" | "state" | "created_at" | "updated_at">
+  ): number {
     return this.moderation.createLanguageModerationCleanupJob(input);
   }
 
-  getLanguageModerationCleanupJob(jobId: number): LanguageModerationCleanupJob | undefined
-  {
+  getLanguageModerationCleanupJob(jobId: number): LanguageModerationCleanupJob | undefined {
     return this.moderation.getLanguageModerationCleanupJob(jobId);
   }
 
-  listLanguageModerationRecoveryJobs(staffChatId: number, nowIso: string): LanguageModerationCleanupJob[]
-  {
+  listLanguageModerationRecoveryJobs(staffChatId: number, nowIso: string): LanguageModerationCleanupJob[] {
     return this.moderation.listLanguageModerationRecoveryJobs(staffChatId, nowIso);
   }
 
-  updateLanguageModerationCleanupJob(id: number, state: LanguageModerationCleanupJob["state"]): void
-  {
+  updateLanguageModerationCleanupJob(id: number, state: LanguageModerationCleanupJob["state"]): void {
     return this.moderation.updateLanguageModerationCleanupJob(id, state);
   }
 
-  claimEntityNotificationPublication(input: { provider: string; entityType: string; entityId: string; eventType: "created"; observedAt: string; targetChatId: number }): EntityNotificationPublicationState
-  {
+  claimEntityNotificationPublication(input: {
+    provider: string;
+    entityType: string;
+    entityId: string;
+    eventType: "created";
+    observedAt: string;
+    targetChatId: number;
+  }): EntityNotificationPublicationState {
     return this.installation.claimEntityNotificationPublication(input);
   }
 
-  recordEntityNotificationPublished(provider: string, entityType: string, entityId: string, eventType: "created", telegramMessageId: number): void
-  {
-    return this.installation.recordEntityNotificationPublished(provider, entityType, entityId, eventType, telegramMessageId);
+  recordEntityNotificationPublished(
+    provider: string,
+    entityType: string,
+    entityId: string,
+    eventType: "created",
+    telegramMessageId: number
+  ): void {
+    return this.installation.recordEntityNotificationPublished(
+      provider,
+      entityType,
+      entityId,
+      eventType,
+      telegramMessageId
+    );
   }
 
-  recordEntityNotificationFailure(provider: string, entityType: string, entityId: string, eventType: "created", error: string): void
-  {
+  recordEntityNotificationFailure(
+    provider: string,
+    entityType: string,
+    entityId: string,
+    eventType: "created",
+    error: string
+  ): void {
     return this.installation.recordEntityNotificationFailure(provider, entityType, entityId, eventType, error);
   }
 
-  countEntityNotificationPublications(state?: EntityNotificationPublicationState): number
-  {
+  countEntityNotificationPublications(state?: EntityNotificationPublicationState): number {
     return this.installation.countEntityNotificationPublications(state);
   }
 
-  getSetting(key: string): string | undefined
-  {
+  getSetting(key: string): string | undefined {
     return this.installation.getSetting(key);
   }
 
-  setSetting(key: string, value: string): void
-  {
+  setSetting(key: string, value: string): void {
     return this.installation.setSetting(key, value);
   }
 
-  seedQuickReplies(categories: ReadonlyArray<{ id: string; title: string; templates: ReadonlyArray<{ id: string; title: string; text: string }> }>): void
-  {
+  seedQuickReplies(
+    categories: ReadonlyArray<{
+      id: string;
+      title: string;
+      templates: ReadonlyArray<{ id: string; title: string; text: string }>;
+    }>
+  ): void {
     return this.quickReplies.seedQuickReplies(categories);
   }
 
-  listQuickReplyCategories(): QuickReplyCategoryRecord[]
-  {
+  listQuickReplyCategories(): QuickReplyCategoryRecord[] {
     return this.quickReplies.listQuickReplyCategories();
   }
 
-  listQuickReplyTemplates(categoryId: string): QuickReplyTemplateRecord[]
-  {
+  listQuickReplyTemplates(categoryId: string): QuickReplyTemplateRecord[] {
     return this.quickReplies.listQuickReplyTemplates(categoryId);
   }
 
-  getQuickReplyTemplate(templateId: string): QuickReplyTemplateRecord | undefined
-  {
+  getQuickReplyTemplate(templateId: string): QuickReplyTemplateRecord | undefined {
     return this.quickReplies.getQuickReplyTemplate(templateId);
   }
 
-  updateQuickReplyTemplate(templateId: string, input: { title: string; text: string }): QuickReplyTemplateRecord | undefined
-  {
+  updateQuickReplyTemplate(
+    templateId: string,
+    input: { title: string; text: string }
+  ): QuickReplyTemplateRecord | undefined {
     return this.quickReplies.updateQuickReplyTemplate(templateId, input);
   }
 
-  createQuickReplyTemplate(input: { id: string; categoryId: string; title: string; text: string }): QuickReplyTemplateRecord
-  {
+  createQuickReplyTemplate(input: {
+    id: string;
+    categoryId: string;
+    title: string;
+    text: string;
+  }): QuickReplyTemplateRecord {
     return this.quickReplies.createQuickReplyTemplate(input);
   }
 
-  deleteQuickReplyTemplate(templateId: string): "DELETED" | "NOT_FOUND" | "LAST_TEMPLATE"
-  {
+  deleteQuickReplyTemplate(templateId: string): "DELETED" | "NOT_FOUND" | "LAST_TEMPLATE" {
     return this.quickReplies.deleteQuickReplyTemplate(templateId);
   }
 
-  getInstallationState(): InstallationStateRecord
-  {
+  getInstallationState(): InstallationStateRecord {
     return this.installation.getInstallationState();
   }
 
-  setInstallationState(input: Partial<Pick<InstallationStateRecord, "setup_state" | "authorization_mode" | "active_workspace_id">>): void
-  {
+  setInstallationState(
+    input: Partial<Pick<InstallationStateRecord, "setup_state" | "authorization_mode" | "active_workspace_id">>
+  ): void {
     return this.installation.setInstallationState(input);
   }
 
-  upsertWorkspace(input: { telegramChatId: number; title?: string | null; username?: string | null; importedFromLegacy?: boolean }): WorkspaceRecord
-  {
+  upsertWorkspace(input: {
+    telegramChatId: number;
+    title?: string | null;
+    username?: string | null;
+    importedFromLegacy?: boolean;
+  }): WorkspaceRecord {
     return this.installation.upsertWorkspace(input);
   }
 
-  getWorkspaceByChatId(chatId: number): WorkspaceRecord | undefined
-  {
+  getWorkspaceByChatId(chatId: number): WorkspaceRecord | undefined {
     return this.installation.getWorkspaceByChatId(chatId);
   }
 
-  getActiveWorkspace(): WorkspaceRecord | undefined
-  {
+  getActiveWorkspace(): WorkspaceRecord | undefined {
     return this.installation.getActiveWorkspace();
   }
 
-  listWorkspaces(): WorkspaceRecord[]
-  {
+  listWorkspaces(): WorkspaceRecord[] {
     return this.installation.listWorkspaces();
   }
 
-  importManagedPublicChat(chatId: number, workspaceId: number): void
-  {
+  importManagedPublicChat(chatId: number, workspaceId: number): void {
     return this.installation.importManagedPublicChat(chatId, workspaceId);
   }
 
@@ -627,34 +745,32 @@ export class SupportDatabase {
     title?: string | null;
     username?: string | null;
     isForum?: boolean;
-  }): ManagedPublicChatRecord
-  {
+  }): ManagedPublicChatRecord {
     return this.installation.upsertManagedPublicChat(input);
   }
 
-  getManagedPublicChat(chatId: number, includeInactive = false): ManagedPublicChatRecord | undefined
-  {
+  getManagedPublicChat(chatId: number, includeInactive = false): ManagedPublicChatRecord | undefined {
     return this.installation.getManagedPublicChat(chatId, includeInactive);
   }
 
-  listManagedPublicChats(includeInactive = false): ManagedPublicChatRecord[]
-  {
+  listManagedPublicChats(includeInactive = false): ManagedPublicChatRecord[] {
     return this.installation.listManagedPublicChats(includeInactive);
   }
 
-  updateManagedPublicChatConfig(chatId: number, input: {
-    warningText: string;
-    allowlist: readonly string[];
-    warningCooldownMinutes: number;
-    warningMessageThreshold: number;
-    lookbackMinutes: number;
-  }): boolean
-  {
+  updateManagedPublicChatConfig(
+    chatId: number,
+    input: {
+      warningText: string;
+      allowlist: readonly string[];
+      warningCooldownMinutes: number;
+      warningMessageThreshold: number;
+      lookbackMinutes: number;
+    }
+  ): boolean {
     return this.installation.updateManagedPublicChatConfig(chatId, input);
   }
 
-  setManagedPublicChatModerationEnabled(chatId: number, enabled: boolean): boolean
-  {
+  setManagedPublicChatModerationEnabled(chatId: number, enabled: boolean): boolean {
     return this.installation.setManagedPublicChatModerationEnabled(chatId, enabled);
   }
 
@@ -666,118 +782,118 @@ export class SupportDatabase {
     title?: string | null;
     username?: string | null;
     isForum?: boolean;
-  }): boolean
-  {
+  }): boolean {
     return this.installation.recordManagedPublicChatPermissionHealth(input);
   }
 
-  recordManagedPublicChatUnreachable(chatId: number): boolean
-  {
+  recordManagedPublicChatUnreachable(chatId: number): boolean {
     return this.installation.recordManagedPublicChatUnreachable(chatId);
   }
 
-  deactivateManagedPublicChat(chatId: number): boolean
-  {
+  deactivateManagedPublicChat(chatId: number): boolean {
     return this.installation.deactivateManagedPublicChat(chatId);
   }
 
-  getTeamMember(userId: number): TeamMemberRecord | undefined
-  {
+  getTeamMember(userId: number): TeamMemberRecord | undefined {
     return this.installation.getTeamMember(userId);
   }
 
-  listTeamMembers(): TeamMemberRecord[]
-  {
+  listTeamMembers(): TeamMemberRecord[] {
     return this.installation.listTeamMembers();
   }
 
-  upsertTeamMember(input: { userId: number; username?: string | null; displayName?: string | null; role: TeamRole; addedBy?: number | null }): void
-  {
+  upsertTeamMember(input: {
+    userId: number;
+    username?: string | null;
+    displayName?: string | null;
+    role: TeamRole;
+    addedBy?: number | null;
+  }): void {
     return this.installation.upsertTeamMember(input);
   }
 
-  revokeTeamMember(userId: number): boolean
-  {
+  revokeTeamMember(userId: number): boolean {
     return this.installation.revokeTeamMember(userId);
   }
 
-  transferOwner(newOwnerId: number): void
-  {
+  transferOwner(newOwnerId: number): void {
     return this.installation.transferOwner(newOwnerId);
   }
 
-  invalidateUnconsumedTokens(kind: SecureTokenRecord["kind"]): void
-  {
+  invalidateUnconsumedTokens(kind: SecureTokenRecord["kind"]): void {
     return this.installation.invalidateUnconsumedTokens(kind);
   }
 
-  insertSecureToken(input: { tokenHash: string; kind: SecureTokenRecord["kind"]; role?: TeamRole | null; createdBy?: number | null; expiresAt: string }): void
-  {
+  insertSecureToken(input: {
+    tokenHash: string;
+    kind: SecureTokenRecord["kind"];
+    role?: TeamRole | null;
+    createdBy?: number | null;
+    expiresAt: string;
+  }): void {
     return this.installation.insertSecureToken(input);
   }
 
-  listUnconsumedTokens(kind?: SecureTokenRecord["kind"]): SecureTokenRecord[]
-  {
+  listUnconsumedTokens(kind?: SecureTokenRecord["kind"]): SecureTokenRecord[] {
     return this.installation.listUnconsumedTokens(kind);
   }
 
-  consumeOwnerTokenAndCreateOwner(tokenId: number, user: UserInput, at: string): "PAIRED" | "TRANSFER_PENDING" | "INVALID"
-  {
+  consumeOwnerTokenAndCreateOwner(
+    tokenId: number,
+    user: UserInput,
+    at: string
+  ): "PAIRED" | "TRANSFER_PENDING" | "INVALID" {
     return this.installation.consumeOwnerTokenAndCreateOwner(tokenId, user, at);
   }
 
-  invalidateTokenAndAssignMember(tokenId: number, user: UserInput, role: TeamRole, at: string): void
-  {
+  invalidateTokenAndAssignMember(tokenId: number, user: UserInput, role: TeamRole, at: string): void {
     return this.installation.invalidateTokenAndAssignMember(tokenId, user, role, at);
   }
 
-  hasPendingOwnerTransfer(userId: number): boolean
-  {
+  hasPendingOwnerTransfer(userId: number): boolean {
     return this.installation.hasPendingOwnerTransfer(userId);
   }
 
-  confirmOwnerTransfer(userId: number): void
-  {
+  confirmOwnerTransfer(userId: number): void {
     return this.installation.confirmOwnerTransfer(userId);
   }
 
-  saveOnboardingSession(userId: number, stage: string, state = "ACTIVE", candidateChatId?: number | null): void
-  {
+  saveOnboardingSession(userId: number, stage: string, state = "ACTIVE", candidateChatId?: number | null): void {
     return this.installation.saveOnboardingSession(userId, stage, state, candidateChatId);
   }
 
-  getOnboardingSession(userId: number): OnboardingSessionRecord | undefined
-  {
+  getOnboardingSession(userId: number): OnboardingSessionRecord | undefined {
     return this.installation.getOnboardingSession(userId);
   }
 
-  setOnboardingPrimaryMessage(userId: number, chatId: number | null, messageId: number | null): void
-  {
+  setOnboardingPrimaryMessage(userId: number, chatId: number | null, messageId: number | null): void {
     return this.installation.setOnboardingPrimaryMessage(userId, chatId, messageId);
   }
 
-  getInstallationOperationalCounts(): { publicChats: number; moderationEnabled: number; unhealthyModerationChats: number; pendingCleanup: number; pendingArchives: number; pendingBatchStaffOperations: number }
-  {
+  getInstallationOperationalCounts(): {
+    publicChats: number;
+    moderationEnabled: number;
+    unhealthyModerationChats: number;
+    pendingCleanup: number;
+    pendingArchives: number;
+    pendingBatchStaffOperations: number;
+  } {
     return this.installation.getInstallationOperationalCounts();
   }
 
-  getBannedUser(userTelegramId: number): BannedUserRecord | undefined
-  {
+  getBannedUser(userTelegramId: number): BannedUserRecord | undefined {
     return this.tickets.getBannedUser(userTelegramId);
   }
 
-  banUser(input: BanUserInput): void
-  {
+  banUser(input: BanUserInput): void {
     return this.tickets.banUser(input);
   }
 
-  unbanUser(userTelegramId: number): boolean
-  {
+  unbanUser(userTelegramId: number): boolean {
     return this.tickets.unbanUser(userTelegramId);
   }
 
-  listBannedUsers(limit = 50): BannedUserRecord[]
-  {
+  listBannedUsers(limit = 50): BannedUserRecord[] {
     return this.tickets.listBannedUsers(limit);
   }
 
@@ -851,7 +967,7 @@ export class SupportDatabase {
               updated_at TEXT NOT NULL
             );
           `);
-        }
+        },
       },
       {
         id: 2,
@@ -867,7 +983,7 @@ export class SupportDatabase {
           this.addColumnIfMissing("tickets", "closed_by_type", "TEXT");
           this.addColumnIfMissing("tickets", "closed_by_display_name", "TEXT");
           this.addColumnIfMissing("tickets", "closed_by_username", "TEXT");
-        }
+        },
       },
       {
         id: 3,
@@ -882,7 +998,7 @@ export class SupportDatabase {
               created_at TEXT NOT NULL
             );
           `);
-        }
+        },
       },
       {
         id: 4,
@@ -904,7 +1020,7 @@ export class SupportDatabase {
             CREATE INDEX IF NOT EXISTS idx_messages_ticket_created
               ON messages(ticket_id, created_at);
           `);
-        }
+        },
       },
       {
         id: 5,
@@ -934,7 +1050,7 @@ export class SupportDatabase {
               ON tickets(user_telegram_id, staff_chat_id)
               WHERE status != 'CLOSED';
           `);
-        }
+        },
       },
       {
         id: 6,
@@ -967,7 +1083,7 @@ export class SupportDatabase {
                 ON staff_message_links(staff_chat_id, staff_message_id);
             `);
           }
-        }
+        },
       },
       {
         id: 7,
@@ -997,7 +1113,7 @@ export class SupportDatabase {
             CREATE INDEX IF NOT EXISTS idx_tickets_archive_pending
               ON tickets(staff_chat_id, status, archived_at);
           `);
-        }
+        },
       },
       {
         id: 8,
@@ -1020,7 +1136,7 @@ export class SupportDatabase {
               FOREIGN KEY (export_id) REFERENCES ticket_batch_exports(export_id) ON DELETE CASCADE
             );
           `);
-        }
+        },
       },
       {
         id: 9,
@@ -1043,7 +1159,7 @@ export class SupportDatabase {
               FOREIGN KEY (answer_package_id) REFERENCES ticket_batch_answer_packages(answer_package_id) ON DELETE CASCADE
             );
           `);
-        }
+        },
       },
       {
         id: 10,
@@ -1081,7 +1197,7 @@ export class SupportDatabase {
             CREATE INDEX IF NOT EXISTS idx_language_moderation_cleanup_due
               ON language_moderation_cleanup_jobs(staff_chat_id, state, cleanup_due_at);
           `);
-        }
+        },
       },
       {
         id: 11,
@@ -1093,7 +1209,7 @@ export class SupportDatabase {
             CREATE INDEX idx_language_moderation_cleanup_due
               ON language_moderation_cleanup_jobs(staff_chat_id, state, cleanup_due_at);
           `);
-        }
+        },
       },
       {
         id: 12,
@@ -1118,7 +1234,7 @@ export class SupportDatabase {
             CREATE INDEX IF NOT EXISTS idx_entity_notification_publications_state
               ON entity_notification_publications(state, updated_at);
           `);
-        }
+        },
       },
       {
         id: 13,
@@ -1139,15 +1255,23 @@ export class SupportDatabase {
             CREATE INDEX IF NOT EXISTS idx_ticket_batch_exports_delivery
               ON ticket_batch_exports(staff_chat_id, delivery_state, created_at);
           `);
-        }
+        },
       },
       {
         id: 14,
         name: "add_ticket_follow_up_history_and_batch_topic_echoes",
         up: () => {
-          this.addColumnIfMissing("tickets", "follow_up_state", "TEXT NOT NULL DEFAULT 'NONE' CHECK(follow_up_state IN ('NONE','WAITING_USER','WAITING_DEVS','WAITING_QUEST_OWNER','MONITORING'))");
+          this.addColumnIfMissing(
+            "tickets",
+            "follow_up_state",
+            "TEXT NOT NULL DEFAULT 'NONE' CHECK(follow_up_state IN ('NONE','WAITING_USER','WAITING_DEVS','WAITING_QUEST_OWNER','MONITORING'))"
+          );
           this.addColumnIfMissing("tickets", "internal_note", "TEXT");
-          this.addColumnIfMissing("tickets", "escalation_target", "TEXT NOT NULL DEFAULT 'NONE' CHECK(escalation_target IN ('NONE','DEVS','PAYMENTS','SECURITY','QUEST_OWNER','SUPPORT'))");
+          this.addColumnIfMissing(
+            "tickets",
+            "escalation_target",
+            "TEXT NOT NULL DEFAULT 'NONE' CHECK(escalation_target IN ('NONE','DEVS','PAYMENTS','SECURITY','QUEST_OWNER','SUPPORT'))"
+          );
           this.addColumnIfMissing("tickets", "follow_up_updated_at", "TEXT");
           this.addColumnIfMissing("tickets", "follow_up_source_answer_package_id", "TEXT");
           this.addColumnIfMissing("ticket_batch_answer_items", "follow_up_state", "TEXT NOT NULL DEFAULT 'NONE'");
@@ -1174,7 +1298,7 @@ export class SupportDatabase {
             CREATE INDEX IF NOT EXISTS idx_ticket_batch_answer_item_echo
               ON ticket_batch_answer_items(answer_package_id, topic_echo_state, ticket_id);
           `);
-        }
+        },
       },
       {
         id: 15,
@@ -1189,34 +1313,58 @@ export class SupportDatabase {
           this.addColumnIfMissing("ticket_batch_answer_items", "delivery_error_description", "TEXT");
           this.addColumnIfMissing("ticket_batch_answer_items", "delivery_failed_at", "TEXT");
           this.addColumnIfMissing("ticket_batch_answer_items", "delivery_attempt_count", "INTEGER NOT NULL DEFAULT 0");
-          this.addColumnIfMissing("ticket_batch_answer_items", "delivery_failure_event_state", "TEXT NOT NULL DEFAULT 'NOT_REQUIRED'");
+          this.addColumnIfMissing(
+            "ticket_batch_answer_items",
+            "delivery_failure_event_state",
+            "TEXT NOT NULL DEFAULT 'NOT_REQUIRED'"
+          );
           this.addColumnIfMissing("ticket_batch_answer_items", "delivery_failure_event_message_id", "INTEGER");
-          this.addColumnIfMissing("ticket_batch_answer_packages", "summary_delivery_state", "TEXT NOT NULL DEFAULT 'NOT_ATTEMPTED'");
+          this.addColumnIfMissing(
+            "ticket_batch_answer_packages",
+            "summary_delivery_state",
+            "TEXT NOT NULL DEFAULT 'NOT_ATTEMPTED'"
+          );
           this.addColumnIfMissing("ticket_batch_answer_packages", "summary_delivery_error", "TEXT");
           this.addColumnIfMissing("ticket_batch_answer_packages", "summary_delivery_attempted_at", "TEXT");
           this.db.exec(`
             CREATE INDEX IF NOT EXISTS idx_ticket_batch_answer_items_delivery_failure
               ON ticket_batch_answer_items(answer_package_id, delivery_error_permanence, ticket_id);
           `);
-        }
+        },
       },
       {
         id: 16,
         name: "make_ticket_batch_staff_finalization_retryable",
         up: () => {
-          this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_state", "TEXT NOT NULL DEFAULT 'NOT_PENDING'");
+          this.addColumnIfMissing(
+            "ticket_batch_answer_packages",
+            "final_summary_state",
+            "TEXT NOT NULL DEFAULT 'NOT_PENDING'"
+          );
           this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_text", "TEXT");
           this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_chat_id", "INTEGER");
           this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_origin_chat_id", "INTEGER");
           this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_origin_message_id", "INTEGER");
           this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_message_id", "INTEGER");
-          this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_attempt_count", "INTEGER NOT NULL DEFAULT 0");
+          this.addColumnIfMissing(
+            "ticket_batch_answer_packages",
+            "final_summary_attempt_count",
+            "INTEGER NOT NULL DEFAULT 0"
+          );
           this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_next_retry_at", "TEXT");
           this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_last_error", "TEXT");
           this.addColumnIfMissing("ticket_batch_answer_packages", "final_summary_delivered_at", "TEXT");
-          this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_attempt_count", "INTEGER NOT NULL DEFAULT 0");
+          this.addColumnIfMissing(
+            "ticket_batch_answer_items",
+            "topic_echo_attempt_count",
+            "INTEGER NOT NULL DEFAULT 0"
+          );
           this.addColumnIfMissing("ticket_batch_answer_items", "topic_echo_next_retry_at", "TEXT");
-          this.addColumnIfMissing("ticket_batch_answer_items", "delivery_failure_event_attempt_count", "INTEGER NOT NULL DEFAULT 0");
+          this.addColumnIfMissing(
+            "ticket_batch_answer_items",
+            "delivery_failure_event_attempt_count",
+            "INTEGER NOT NULL DEFAULT 0"
+          );
           this.addColumnIfMissing("ticket_batch_answer_items", "delivery_failure_event_next_retry_at", "TEXT");
           this.db.exec(`
             CREATE INDEX IF NOT EXISTS idx_ticket_batch_final_summary_recovery
@@ -1246,7 +1394,7 @@ export class SupportDatabase {
             WHERE delivery_failure_event_state IN ('PENDING', 'FAILED')
               AND delivery_error_category IS NOT NULL;
           `);
-        }
+        },
       },
       {
         id: 17,
@@ -1283,7 +1431,7 @@ export class SupportDatabase {
             WHERE delivery_failure_event_state IN ('PENDING', 'FAILED')
               AND ticket_id IN (SELECT id FROM tickets WHERE status = 'CLOSED');
           `);
-        }
+        },
       },
       {
         id: 18,
@@ -1293,7 +1441,11 @@ export class SupportDatabase {
             return;
           }
           this.addColumnIfMissing("language_moderation_violations", "cleanup_state", "TEXT NOT NULL DEFAULT 'PENDING'");
-          this.addColumnIfMissing("language_moderation_violations", "cleanup_attempt_count", "INTEGER NOT NULL DEFAULT 0");
+          this.addColumnIfMissing(
+            "language_moderation_violations",
+            "cleanup_attempt_count",
+            "INTEGER NOT NULL DEFAULT 0"
+          );
           this.addColumnIfMissing("language_moderation_violations", "cleanup_last_error_category", "TEXT");
           this.addColumnIfMissing("language_moderation_violations", "cleanup_last_error_code", "INTEGER");
           this.addColumnIfMissing("language_moderation_violations", "cleanup_last_error_description", "TEXT");
@@ -1302,7 +1454,7 @@ export class SupportDatabase {
             CREATE INDEX IF NOT EXISTS idx_language_moderation_violations_cleanup
               ON language_moderation_violations(chat_id, user_telegram_id, cycle_tier, cleanup_state, message_id);
           `);
-        }
+        },
       },
       {
         id: 19,
@@ -1317,7 +1469,7 @@ export class SupportDatabase {
             CREATE INDEX IF NOT EXISTS idx_language_moderation_violations_cycle
               ON language_moderation_violations(chat_id, user_telegram_id, moderation_cycle_id, cleanup_state, message_id);
           `);
-        }
+        },
       },
       {
         id: 20,
@@ -1394,25 +1546,65 @@ export class SupportDatabase {
               FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
             );
           `);
-          this.db.prepare(`INSERT OR IGNORE INTO installation_state (id, setup_state, authorization_mode, active_workspace_id, updated_at)
-            VALUES (1, 'SETUP_REQUIRED', 'LEGACY_TRUSTED_GROUP', NULL, ?)`).run(now());
-        }
+          this.db
+            .prepare(
+              `INSERT OR IGNORE INTO installation_state (id, setup_state, authorization_mode, active_workspace_id, updated_at)
+            VALUES (1, 'SETUP_REQUIRED', 'LEGACY_TRUSTED_GROUP', NULL, ?)`
+            )
+            .run(now());
+        },
       },
       {
         id: 21,
         name: "add_multi_chat_topic_aware_moderation",
         up: () => {
           if (!this.hasTable("managed_public_chats")) return;
-          this.addColumnIfMissing("managed_public_chats", "is_forum", "INTEGER NOT NULL DEFAULT 0 CHECK(is_forum IN (0,1))");
-          this.addColumnIfMissing("managed_public_chats", "moderation_enabled", "INTEGER NOT NULL DEFAULT 0 CHECK(moderation_enabled IN (0,1))");
-          this.addColumnIfMissing("managed_public_chats", "warning_text", "TEXT NOT NULL DEFAULT 'Please use English in the main chat. Further violations may be reviewed by an authorized moderator under the current community policy.'");
+          this.addColumnIfMissing(
+            "managed_public_chats",
+            "is_forum",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(is_forum IN (0,1))"
+          );
+          this.addColumnIfMissing(
+            "managed_public_chats",
+            "moderation_enabled",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(moderation_enabled IN (0,1))"
+          );
+          this.addColumnIfMissing(
+            "managed_public_chats",
+            "warning_text",
+            "TEXT NOT NULL DEFAULT 'Please use English in the main chat. Further violations may be reviewed by an authorized moderator under the current community policy.'"
+          );
           this.addColumnIfMissing("managed_public_chats", "allowlist_json", "TEXT NOT NULL DEFAULT '[]'");
-          this.addColumnIfMissing("managed_public_chats", "warning_cooldown_minutes", "INTEGER NOT NULL DEFAULT 10 CHECK(warning_cooldown_minutes > 0)");
-          this.addColumnIfMissing("managed_public_chats", "warning_message_threshold", "INTEGER NOT NULL DEFAULT 15 CHECK(warning_message_threshold > 0)");
-          this.addColumnIfMissing("managed_public_chats", "lookback_minutes", "INTEGER NOT NULL DEFAULT 5 CHECK(lookback_minutes > 0)");
-          this.addColumnIfMissing("managed_public_chats", "permission_status", "TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK(permission_status IN ('UNKNOWN','HEALTHY','UNHEALTHY'))");
-          this.addColumnIfMissing("managed_public_chats", "reaction_status", "TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK(reaction_status IN ('UNKNOWN','AVAILABLE','UNAVAILABLE'))");
-          this.addColumnIfMissing("managed_public_chats", "connection_status", "TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK(connection_status IN ('UNKNOWN','CONNECTED','UNREACHABLE'))");
+          this.addColumnIfMissing(
+            "managed_public_chats",
+            "warning_cooldown_minutes",
+            "INTEGER NOT NULL DEFAULT 10 CHECK(warning_cooldown_minutes > 0)"
+          );
+          this.addColumnIfMissing(
+            "managed_public_chats",
+            "warning_message_threshold",
+            "INTEGER NOT NULL DEFAULT 15 CHECK(warning_message_threshold > 0)"
+          );
+          this.addColumnIfMissing(
+            "managed_public_chats",
+            "lookback_minutes",
+            "INTEGER NOT NULL DEFAULT 5 CHECK(lookback_minutes > 0)"
+          );
+          this.addColumnIfMissing(
+            "managed_public_chats",
+            "permission_status",
+            "TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK(permission_status IN ('UNKNOWN','HEALTHY','UNHEALTHY'))"
+          );
+          this.addColumnIfMissing(
+            "managed_public_chats",
+            "reaction_status",
+            "TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK(reaction_status IN ('UNKNOWN','AVAILABLE','UNAVAILABLE'))"
+          );
+          this.addColumnIfMissing(
+            "managed_public_chats",
+            "connection_status",
+            "TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK(connection_status IN ('UNKNOWN','CONNECTED','UNREACHABLE'))"
+          );
           this.addColumnIfMissing("managed_public_chats", "permissions_checked_at", "TEXT");
 
           if (this.hasTable("language_moderation_violations")) {
@@ -1448,13 +1640,24 @@ export class SupportDatabase {
           const target = this.hasTable("settings") ? Number(this.getSetting("language_moderation:target")) : Number.NaN;
           if (Number.isSafeInteger(target) && target !== 0) {
             const legacy = this.installation.getLegacyManagedPublicChatConfig();
-            this.db.prepare(`UPDATE managed_public_chats SET moderation_enabled = ?, warning_text = ?, allowlist_json = ?,
+            this.db
+              .prepare(
+                `UPDATE managed_public_chats SET moderation_enabled = ?, warning_text = ?, allowlist_json = ?,
               warning_cooldown_minutes = ?, warning_message_threshold = ?, lookback_minutes = ?, updated_at = ?
-              WHERE chat_id = ? AND imported_from_legacy = 1`)
-              .run(legacy.enabled ? 1 : 0, legacy.warningText, JSON.stringify(legacy.allowlist), legacy.warningCooldownMinutes,
-                legacy.warningMessageThreshold, legacy.lookbackMinutes, now(), target);
+              WHERE chat_id = ? AND imported_from_legacy = 1`
+              )
+              .run(
+                legacy.enabled ? 1 : 0,
+                legacy.warningText,
+                JSON.stringify(legacy.allowlist),
+                legacy.warningCooldownMinutes,
+                legacy.warningMessageThreshold,
+                legacy.lookbackMinutes,
+                now(),
+                target
+              );
           }
-        }
+        },
       },
       {
         id: 22,
@@ -1481,7 +1684,7 @@ export class SupportDatabase {
             CREATE INDEX IF NOT EXISTS idx_quick_reply_templates_category_order
               ON quick_reply_templates(category_id, sort_order, id);
           `);
-        }
+        },
       },
       {
         id: 23,
@@ -1498,8 +1701,8 @@ export class SupportDatabase {
               PRIMARY KEY(chat_id, message_id)
             );
           `);
-        }
-      }
+        },
+      },
     ];
 
     for (const migration of migrations) {
@@ -1519,28 +1722,46 @@ export class SupportDatabase {
   }
 
   private hasMigration(id: number): boolean {
-    const row = this.db
-      .prepare("SELECT id FROM schema_migrations WHERE id = ?")
-      .get(id) as { id: number } | undefined;
+    const row = this.db.prepare("SELECT id FROM schema_migrations WHERE id = ?").get(id) as { id: number } | undefined;
 
     return Boolean(row);
   }
 
-  private hasColumn(tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs" | "language_moderation_violations" | "language_moderation_chat_state" | "managed_public_chats" | "ticket_batch_exports" | "ticket_batch_answer_packages" | "ticket_batch_answer_items", columnName: string): boolean {
+  private hasColumn(
+    tableName:
+      | "tickets"
+      | "messages"
+      | "language_moderation_cleanup_jobs"
+      | "language_moderation_violations"
+      | "language_moderation_chat_state"
+      | "managed_public_chats"
+      | "ticket_batch_exports"
+      | "ticket_batch_answer_packages"
+      | "ticket_batch_answer_items",
+    columnName: string
+  ): boolean {
     const rows = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as TableColumnInfo[];
     return rows.some((row) => row.name === columnName);
   }
 
   private hasTable(tableName: string): boolean {
-    const row = this.db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
-      .get(tableName) as { name: string } | undefined;
+    const row = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName) as
+      { name: string } | undefined;
 
     return Boolean(row);
   }
 
   private addColumnIfMissing(
-    tableName: "tickets" | "messages" | "language_moderation_cleanup_jobs" | "language_moderation_violations" | "language_moderation_chat_state" | "managed_public_chats" | "ticket_batch_exports" | "ticket_batch_answer_packages" | "ticket_batch_answer_items",
+    tableName:
+      | "tickets"
+      | "messages"
+      | "language_moderation_cleanup_jobs"
+      | "language_moderation_violations"
+      | "language_moderation_chat_state"
+      | "managed_public_chats"
+      | "ticket_batch_exports"
+      | "ticket_batch_answer_packages"
+      | "ticket_batch_answer_items",
     columnName: string,
     columnDefinition: string
   ): void {

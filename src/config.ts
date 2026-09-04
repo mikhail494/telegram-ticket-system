@@ -9,13 +9,27 @@ const hostSchema = z.object({
   STAFF_CHAT_ID: z.union([z.coerce.number().int(), z.literal("")]).optional(),
   DATABASE_URL: z.string().trim().min(1).default("file:./data/support.db"),
   LOG_LEVEL: z.string().trim().min(1).default("info"),
-  BACKUP_ENABLED: z.string().trim().toLowerCase().pipe(z.enum(["true", "false", "1", "0"])).default("true"),
-  BACKUP_DIR: z.string().trim().transform((value) => value || undefined).optional(),
+  BACKUP_ENABLED: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .pipe(z.enum(["true", "false", "1", "0"]))
+    .default("true"),
+  BACKUP_DIR: z
+    .string()
+    .trim()
+    .transform((value) => value || undefined)
+    .optional(),
   BACKUP_INTERVAL_HOURS: z.coerce.number().int().min(1).max(8760).default(24),
   BACKUP_RETENTION_COUNT: z.coerce.number().int().min(1).max(365).default(14),
-  OPS_HTTP_ENABLED: z.string().trim().toLowerCase().pipe(z.enum(["true", "false", "1", "0"])).default("false"),
+  OPS_HTTP_ENABLED: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .pipe(z.enum(["true", "false", "1", "0"]))
+    .default("false"),
   OPS_HTTP_HOST: z.string().trim().min(1, "OPS_HTTP_HOST must not be empty").default("127.0.0.1"),
-  OPS_HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(3000)
+  OPS_HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
 });
 
 export interface HostConfig {
@@ -38,12 +52,21 @@ export function loadHostConfig(options: { env?: NodeJS.ProcessEnv; envFile?: str
   const envPath = options.envFile === undefined ? path.resolve(process.cwd(), ".env") : options.envFile;
   let local: Record<string, string> = {};
   if (envPath) {
-    try { local = dotenv.parse(readFileSync(envPath)); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    try {
+      local = dotenv.parse(readFileSync(envPath));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   }
-  const merged = { ...local, ...Object.fromEntries(Object.entries(explicit).filter(([, value]) => value !== undefined)) };
+  const merged = {
+    ...local,
+    ...Object.fromEntries(Object.entries(explicit).filter(([, value]) => value !== undefined)),
+  };
   const parsed = hostSchema.safeParse(merged);
-  if (!parsed.success) throw new Error(`Invalid host configuration: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}. Run npm run setup.`);
+  if (!parsed.success)
+    throw new Error(
+      `Invalid host configuration: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}. Run npm run setup.`
+    );
   return {
     nodeEnv: parsed.data.NODE_ENV,
     botToken: parsed.data.BOT_TOKEN,
@@ -56,13 +79,15 @@ export function loadHostConfig(options: { env?: NodeJS.ProcessEnv; envFile?: str
     backupRetentionCount: parsed.data.BACKUP_RETENTION_COUNT,
     opsHttpEnabled: parsed.data.OPS_HTTP_ENABLED === "true" || parsed.data.OPS_HTTP_ENABLED === "1",
     opsHttpHost: parsed.data.OPS_HTTP_HOST,
-    opsHttpPort: parsed.data.OPS_HTTP_PORT
+    opsHttpPort: parsed.data.OPS_HTTP_PORT,
   };
 }
 
 export const hostConfig = loadHostConfig();
 let runtimeStaffChatId = hostConfig.staffChatId;
-export function setRuntimeStaffChatId(chatId: number | null): void { runtimeStaffChatId = chatId; }
+export function setRuntimeStaffChatId(chatId: number | null): void {
+  runtimeStaffChatId = chatId;
+}
 export const config = {
   nodeEnv: hostConfig.nodeEnv,
   botToken: hostConfig.botToken,
@@ -78,5 +103,5 @@ export const config = {
   get staffChatId(): number {
     if (runtimeStaffChatId === null) throw new Error("Staff workspace is not configured yet.");
     return runtimeStaffChatId;
-  }
+  },
 } as const;

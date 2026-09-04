@@ -22,23 +22,49 @@ test("host config allows an omitted STAFF_CHAT_ID", () => {
 });
 
 test("host config validates backup settings", () => {
-  assert.throws(() => loadHostConfig({ env: { BOT_TOKEN: "123:test", BACKUP_INTERVAL_HOURS: "0" }, envFile: false }), /BACKUP_INTERVAL_HOURS/);
-  assert.throws(() => loadHostConfig({ env: { BOT_TOKEN: "123:test", BACKUP_RETENTION_COUNT: "0" }, envFile: false }), /BACKUP_RETENTION_COUNT/);
-  assert.equal(loadHostConfig({ env: { BOT_TOKEN: "123:test", BACKUP_ENABLED: "0" }, envFile: false }).backupEnabled, false);
+  assert.throws(
+    () => loadHostConfig({ env: { BOT_TOKEN: "123:test", BACKUP_INTERVAL_HOURS: "0" }, envFile: false }),
+    /BACKUP_INTERVAL_HOURS/
+  );
+  assert.throws(
+    () => loadHostConfig({ env: { BOT_TOKEN: "123:test", BACKUP_RETENTION_COUNT: "0" }, envFile: false }),
+    /BACKUP_RETENTION_COUNT/
+  );
+  assert.equal(
+    loadHostConfig({ env: { BOT_TOKEN: "123:test", BACKUP_ENABLED: "0" }, envFile: false }).backupEnabled,
+    false
+  );
   assert.equal(loadHostConfig({ env: { BOT_TOKEN: "123:test", BACKUP_DIR: "" }, envFile: false }).backupDir, null);
 });
 
 test("host config validates operational HTTP settings", () => {
-  for (const [value, expected] of [["true", true], ["1", true], ["false", false], ["0", false]] as const) {
-    assert.equal(loadHostConfig({ env: { BOT_TOKEN: "123:test", OPS_HTTP_ENABLED: value }, envFile: false }).opsHttpEnabled, expected);
+  for (const [value, expected] of [
+    ["true", true],
+    ["1", true],
+    ["false", false],
+    ["0", false],
+  ] as const) {
+    assert.equal(
+      loadHostConfig({ env: { BOT_TOKEN: "123:test", OPS_HTTP_ENABLED: value }, envFile: false }).opsHttpEnabled,
+      expected
+    );
   }
-  const configured = loadHostConfig({ env: { BOT_TOKEN: "123:test", OPS_HTTP_HOST: "0.0.0.0", OPS_HTTP_PORT: "3210" }, envFile: false });
+  const configured = loadHostConfig({
+    env: { BOT_TOKEN: "123:test", OPS_HTTP_HOST: "0.0.0.0", OPS_HTTP_PORT: "3210" },
+    envFile: false,
+  });
   assert.equal(configured.opsHttpHost, "0.0.0.0");
   assert.equal(configured.opsHttpPort, 3210);
   for (const port of ["0", "65536", "not-a-port"]) {
-    assert.throws(() => loadHostConfig({ env: { BOT_TOKEN: "123:test", OPS_HTTP_PORT: port }, envFile: false }), /OPS_HTTP_PORT/);
+    assert.throws(
+      () => loadHostConfig({ env: { BOT_TOKEN: "123:test", OPS_HTTP_PORT: port }, envFile: false }),
+      /OPS_HTTP_PORT/
+    );
   }
-  assert.throws(() => loadHostConfig({ env: { BOT_TOKEN: "123:test", OPS_HTTP_HOST: "   " }, envFile: false }), /OPS_HTTP_HOST/);
+  assert.throws(
+    () => loadHostConfig({ env: { BOT_TOKEN: "123:test", OPS_HTTP_HOST: "   " }, envFile: false }),
+    /OPS_HTTP_HOST/
+  );
 });
 
 test("example environment remains parse-compatible when a token is supplied", () => {
@@ -57,7 +83,9 @@ test("explicit environment overrides local file values", async () => {
     assert.equal(config.botToken, "process-token");
     assert.equal(config.databaseUrl, "file:from-file.db");
     assert.equal(config.logLevel, "debug");
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("setup validates the token and writes an atomic env without printing it", async () => {
@@ -67,11 +95,12 @@ test("setup validates the token and writes an atomic env without printing it", a
   const token = "123456:VERY_SECRET_TOKEN";
   try {
     const result = await runSetup({
-      env: {}, envPath,
+      env: {},
+      envPath,
       promptToken: async () => ` ${token} `,
       confirmOverwrite: async () => true,
       verifyToken: async () => ({ id: 77, username: "safe_bot" }),
-      writeOutput: (line) => output.push(line)
+      writeOutput: (line) => output.push(line),
     });
     assert.equal(result.botUsername, "safe_bot");
     assert.equal(output.join("\n").includes(token), false);
@@ -79,7 +108,9 @@ test("setup validates the token and writes an atomic env without printing it", a
     assert.match(saved, /^BOT_TOKEN=123456:VERY_SECRET_TOKEN$/m);
     assert.match(saved, /^DATABASE_URL=file:\.\/data\/support\.db$/m);
     assert.match(saved, /^LOG_LEVEL=info$/m);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("non-interactive setup without a token fails clearly", async () => {
@@ -91,9 +122,16 @@ test("explicit environment does not overwrite a different saved token without co
   const envPath = path.join(directory, ".env");
   try {
     await writeFile(envPath, "BOT_TOKEN=123456:SAVED_TOKEN_VALUE\nDATABASE_URL=file:old.db\n");
-    await runSetup({ env: { BOT_TOKEN: "654321:PROCESS_TOKEN_VALUE" }, envPath, verifyToken: async () => ({ id: 1, username: "bot" }), writeOutput: () => undefined });
+    await runSetup({
+      env: { BOT_TOKEN: "654321:PROCESS_TOKEN_VALUE" },
+      envPath,
+      verifyToken: async () => ({ id: 1, username: "bot" }),
+      writeOutput: () => undefined,
+    });
     assert.match(await readFile(envPath, "utf8"), /^BOT_TOKEN=123456:SAVED_TOKEN_VALUE$/m);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("confirmed token replacement removes the superseded secret", async () => {
@@ -106,7 +144,7 @@ test("confirmed token replacement removes the superseded secret", async () => {
       envPath,
       confirmOverwrite: async () => true,
       verifyToken: async () => ({ id: 1, username: "bot" }),
-      writeOutput: () => undefined
+      writeOutput: () => undefined,
     });
     const saved = await readFile(envPath, "utf8");
     assert.doesNotMatch(saved, /OLD_TOKEN_VALUE/);
@@ -114,7 +152,9 @@ test("confirmed token replacement removes the superseded secret", async () => {
     assert.match(saved, /^BOT_TOKEN=654321:NEW_TOKEN_VALUE$/m);
     assert.match(saved, /^# keep this comment$/m);
     assert.match(saved, /^CUSTOM_VALUE=preserved$/m);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("setup removes superseded duplicate assignments even when the effective token is unchanged", async () => {
@@ -126,13 +166,15 @@ test("setup removes superseded duplicate assignments even when the effective tok
       env: {},
       envPath,
       verifyToken: async () => ({ id: 1, username: "bot" }),
-      writeOutput: () => undefined
+      writeOutput: () => undefined,
     });
     const saved = await readFile(envPath, "utf8");
     assert.doesNotMatch(saved, /OLD_TOKEN_VALUE/);
     assert.equal(saved.match(/^BOT_TOKEN=/gm)?.length, 1);
     assert.match(saved, /^BOT_TOKEN=654321:CURRENT_TOKEN_VALUE$/m);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("setup preserves existing env comments, quoting, and unrelated values", async () => {
@@ -145,7 +187,7 @@ test("setup preserves existing env comments, quoting, and unrelated values", asy
     "A.B=one",
     "AXB=two",
     "DATABASE_URL=file:old.db",
-    ""
+    "",
   ].join("\n");
   try {
     await writeFile(envPath, original);
@@ -153,7 +195,7 @@ test("setup preserves existing env comments, quoting, and unrelated values", asy
       env: {},
       envPath,
       verifyToken: async () => ({ id: 1, username: "bot" }),
-      writeOutput: () => undefined
+      writeOutput: () => undefined,
     });
     const saved = await readFile(envPath, "utf8");
     assert.match(saved, /^# deployment note$/m);
@@ -163,5 +205,7 @@ test("setup preserves existing env comments, quoting, and unrelated values", asy
     assert.match(saved, /^AXB=two$/m);
     assert.match(saved, /^DATABASE_URL=file:old\.db$/m);
     assert.match(saved, /^LOG_LEVEL=info$/m);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

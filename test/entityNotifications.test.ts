@@ -8,7 +8,7 @@ import {
   createEntityNotificationProviderRegistry,
   processEntityNotificationEvent,
   renderEntityNotification,
-  validateEntityNotificationEvent
+  validateEntityNotificationEvent,
 } from "../src/entityNotifications.js";
 import { SupportDatabase } from "../src/db.js";
 import { createBotHarness, type BotHarness } from "./helpers/botHarness.js";
@@ -29,8 +29,8 @@ const EVENT = {
     displayedCapacity: "100 spots",
     settlementLabel: "Instant Pay",
     requirements: "Verified account",
-    canonicalLink: "https://example.com/quests/quest-123"
-  }
+    canonicalLink: "https://example.com/quests/quest-123",
+  },
 };
 
 const harnesses: BotHarness[] = [];
@@ -50,7 +50,7 @@ function provider(available = true): EntityNotificationProvider {
     key: "fixture_test",
     authoritative: true,
     isAvailable: () => available,
-    status: () => (available ? "fixture available" : "fixture unavailable")
+    status: () => (available ? "fixture available" : "fixture unavailable"),
   };
 }
 
@@ -60,7 +60,7 @@ function settings(overrides: Partial<Parameters<typeof processEntityNotification
     targetChatId: TARGET_CHAT_ID,
     providerKey: "fixture_test",
     providers: createEntityNotificationProviderRegistry([provider()]),
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -79,7 +79,7 @@ describe("entity notification event contracts", () => {
       { ...EVENT, entity_id: "" },
       { ...EVENT, observed_at: "not-a-date" },
       { ...EVENT, payload: { ...EVENT.payload, reward: 100 } },
-      { ...EVENT, payload: { ...EVENT.payload, unexpected: "value" } }
+      { ...EVENT, payload: { ...EVENT.payload, unexpected: "value" } },
     ]) {
       assert.throws(() => validateEntityNotificationEvent(input), EntityNotificationValidationError);
     }
@@ -87,7 +87,17 @@ describe("entity notification event contracts", () => {
 
   it("ignores unsupported lifecycle events without treating them as publishable", async () => {
     const harness = createHarness();
-    for (const eventType of ["CREATED", "updated", "update", "ended", "completed", "cancelled", "removed", "deleted", "unknown"]) {
+    for (const eventType of [
+      "CREATED",
+      "updated",
+      "update",
+      "ended",
+      "completed",
+      "cancelled",
+      "removed",
+      "deleted",
+      "unknown",
+    ]) {
       const result = await processEntityNotificationEvent(
         harness.bot.api,
         harness.db,
@@ -106,10 +116,18 @@ describe("entity notification event contracts", () => {
       /title.*500/i
     );
     assert.throws(
-      () => renderEntityNotification(validateEntityNotificationEvent({
-        ...EVENT,
-        payload: Object.fromEntries(Object.keys(EVENT.payload).map((key) => [key, key === "canonicalLink" ? `https://example.com/${"x".repeat(500)}` : "x".repeat(500)]))
-      })),
+      () =>
+        renderEntityNotification(
+          validateEntityNotificationEvent({
+            ...EVENT,
+            payload: Object.fromEntries(
+              Object.keys(EVENT.payload).map((key) => [
+                key,
+                key === "canonicalLink" ? `https://example.com/${"x".repeat(500)}` : "x".repeat(500),
+              ])
+            ),
+          })
+        ),
       /4096|message.*limit/i
     );
   });
@@ -128,8 +146,14 @@ describe("entity notification rendering", () => {
   });
 
   it("omits absent fields and renders equivalent events identically", () => {
-    const one = validateEntityNotificationEvent({ ...EVENT, payload: { title: "Only title", canonicalLink: EVENT.payload.canonicalLink } });
-    const two = validateEntityNotificationEvent({ ...EVENT, payload: { canonicalLink: EVENT.payload.canonicalLink, title: "Only title" } });
+    const one = validateEntityNotificationEvent({
+      ...EVENT,
+      payload: { title: "Only title", canonicalLink: EVENT.payload.canonicalLink },
+    });
+    const two = validateEntityNotificationEvent({
+      ...EVENT,
+      payload: { canonicalLink: EVENT.payload.canonicalLink, title: "Only title" },
+    });
     assert.equal(renderEntityNotification(one), renderEntityNotification(two));
     assert.doesNotMatch(renderEntityNotification(one), /Objective|Reward|Settlement|Requirements/);
   });
@@ -142,7 +166,10 @@ describe("entity notification publication state", () => {
     const second = await processEntityNotificationEvent(harness.bot.api, harness.db, EVENT, settings());
     assert.equal(first.status, "PUBLISHED");
     assert.equal(second.status, "DUPLICATE");
-    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TARGET_CHAT_ID).length, 1);
+    assert.equal(
+      harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TARGET_CHAT_ID).length,
+      1
+    );
     assert.equal(harness.db.countEntityNotificationPublications("PUBLISHED"), 1);
   });
 
@@ -153,7 +180,10 @@ describe("entity notification publication state", () => {
       harness.bot.api,
       harness.db,
       { ...EVENT, provider: "other_fixture" },
-      settings({ providers: createEntityNotificationProviderRegistry([provider(), otherProvider]), providerKey: "other_fixture" })
+      settings({
+        providers: createEntityNotificationProviderRegistry([provider(), otherProvider]),
+        providerKey: "other_fixture",
+      })
     );
     assert.equal(result.status, "PUBLISHED");
     assert.equal(harness.countApiCalls("sendMessage"), 1);
@@ -163,11 +193,14 @@ describe("entity notification publication state", () => {
     const harness = createHarness();
     const results = await Promise.all([
       processEntityNotificationEvent(harness.bot.api, harness.db, EVENT, settings()),
-      processEntityNotificationEvent(harness.bot.api, harness.db, EVENT, settings())
+      processEntityNotificationEvent(harness.bot.api, harness.db, EVENT, settings()),
     ]);
     assert.equal(results.filter((result) => result.status === "PUBLISHED").length, 1);
     assert.equal(results.filter((result) => result.status === "IN_FLIGHT").length, 1);
-    assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TARGET_CHAT_ID).length, 1);
+    assert.equal(
+      harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TARGET_CHAT_ID).length,
+      1
+    );
   });
 
   it("does not mark failed Telegram delivery as published and allows a failed replay", async () => {
@@ -183,14 +216,17 @@ describe("entity notification publication state", () => {
   it("suppresses an interrupted CLAIMED identity conservatively", async () => {
     const harness = createHarness();
     const event = validateEntityNotificationEvent(EVENT);
-    assert.equal(harness.db.claimEntityNotificationPublication({
-      provider: event.provider,
-      entityType: event.entityType,
-      entityId: event.entityId,
-      eventType: "created",
-      observedAt: event.observedAt,
-      targetChatId: TARGET_CHAT_ID
-    }), "CLAIMED");
+    assert.equal(
+      harness.db.claimEntityNotificationPublication({
+        provider: event.provider,
+        entityType: event.entityType,
+        entityId: event.entityId,
+        eventType: "created",
+        observedAt: event.observedAt,
+        targetChatId: TARGET_CHAT_ID,
+      }),
+      "CLAIMED"
+    );
     const result = await processEntityNotificationEvent(harness.bot.api, harness.db, EVENT, settings());
     assert.equal(result.status, "IN_FLIGHT");
     assert.equal(harness.countApiCalls("sendMessage"), 0);
@@ -205,7 +241,16 @@ describe("entity notification publication state", () => {
       settings({ providers: createEntityNotificationProviderRegistry([]) }),
       settings({ providers: createEntityNotificationProviderRegistry([{ ...provider(), authoritative: false }]) }),
       settings({ providers: createEntityNotificationProviderRegistry([provider(false)]) }),
-      settings({ providers: createEntityNotificationProviderRegistry([{ ...provider(), isAvailable: () => { throw new Error("provider status failed"); } }]) })
+      settings({
+        providers: createEntityNotificationProviderRegistry([
+          {
+            ...provider(),
+            isAvailable: () => {
+              throw new Error("provider status failed");
+            },
+          },
+        ]),
+      }),
     ]) {
       const result = await processEntityNotificationEvent(harness.bot.api, harness.db, EVENT, configuration);
       assert.match(result.status, /DISABLED|SKIPPED|UNAVAILABLE/);

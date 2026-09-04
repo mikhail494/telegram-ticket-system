@@ -10,7 +10,9 @@ test("a new database starts in setup-required legacy authorization mode", () => 
     assert.equal(service.getState().setupState, "SETUP_REQUIRED");
     assert.equal(service.getState().authorizationMode, "LEGACY_TRUSTED_GROUP");
     assert.equal(service.getStaffChatId(), null);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("legacy workspace adoption is ready, idempotent, and does not activate RBAC", () => {
@@ -24,13 +26,15 @@ test("legacy workspace adoption is ready, idempotent, and does not activate RBAC
     assert.deepEqual(service.getState(), {
       setupState: "READY",
       authorizationMode: "LEGACY_TRUSTED_GROUP",
-      activeWorkspaceId: 1
+      activeWorkspaceId: 1,
     });
     assert.equal(service.getStaffChatId(), -10042);
     assert.equal(db.getSetting("support_logs_thread_id:-10042"), "77");
     assert.equal(db.getSetting("staff_help_sent:-10042"), "true");
     assert.equal(service.listWorkspaces().length, 1);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("legacy adoption does not replace a workspace selected after initial import", () => {
@@ -45,7 +49,9 @@ test("legacy adoption does not replace a workspace selected after initial import
     assert.equal(active.telegram_chat_id, -10077);
     assert.equal(service.getStaffChatId(), -10077);
     assert.equal(service.getState().setupState, "READY");
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("legacy adoption preserves operational settings and imports the moderation target", () => {
@@ -68,7 +74,9 @@ test("legacy adoption preserves operational settings and imports the moderation 
     assert.equal(imported?.moderation_enabled, 1);
     assert.equal(imported?.warning_text, "Existing warning");
     assert.deepEqual(imported?.allowlist, ["uid"]);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("legacy adoption imports a missing moderation target for an existing active workspace", () => {
@@ -84,7 +92,9 @@ test("legacy adoption imports a missing moderation target for an existing active
     assert.equal(service.getStaffChatId(), -10042);
     assert.equal(db.getManagedPublicChat(-10088)?.moderation_enabled, 1);
     assert.equal(service.listWorkspaces().length, 1);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("legacy adoption does not reactivate a deliberately removed moderation target", () => {
@@ -99,7 +109,9 @@ test("legacy adoption does not reactivate a deliberately removed moderation targ
 
     assert.equal(db.getManagedPublicChat(-10088), undefined);
     assert.equal(db.getManagedPublicChat(-10088, true)?.active, 0);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("owner pairing is single-use and creates exactly one active owner", () => {
@@ -111,7 +123,9 @@ test("owner pairing is single-use and creates exactly one active owner", () => {
     assert.equal(service.consumeOwnerPairingToken(token, { telegramId: 11 }).kind, "INVALID");
     assert.equal(service.getOwner()?.userTelegramId, 10);
     assert.equal(service.listTeamMembers().filter((member) => member.role === "OWNER").length, 1);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("owner pairing tokens cannot be reused as owner recovery tokens", () => {
@@ -126,7 +140,9 @@ test("owner pairing tokens cannot be reused as owner recovery tokens", () => {
     const pairingAfterOwner = service.createOwnerPairingToken();
     assert.equal(service.consumeOwnerPairingToken(pairingAfterOwner, { telegramId: 11 }).kind, "INVALID");
     assert.equal(service.getOwner()?.userTelegramId, 10);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("expired owner pairing token is rejected", () => {
@@ -138,7 +154,9 @@ test("expired owner pairing token is rejected", () => {
     now = new Date("2026-08-02T10:00:02Z");
     assert.equal(service.consumeOwnerPairingToken(token, { telegramId: 10 }).kind, "EXPIRED");
     assert.equal(service.getOwner(), null);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("a ready installation with an owner automatically activates role-based access", () => {
@@ -149,7 +167,9 @@ test("a ready installation with an owner automatically activates role-based acce
     service.consumeOwnerPairingToken(service.createOwnerPairingToken(), { telegramId: 10 });
     assert.equal(service.getState().authorizationMode, "RBAC_ACTIVE");
     assert.equal(service.activateReadyRoleBasedAccess(), false);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("automatic role-based access preserves elevated roles and enrolls only unknown staff as agents", () => {
@@ -170,7 +190,9 @@ test("automatic role-based access preserves elevated roles and enrolls only unkn
     assert.equal(service.getMember(2)?.role, "ADMIN");
     assert.equal(service.getMember(3)?.role, "SENIOR_AGENT");
     assert.equal(service.getMember(4)?.role, "AGENT");
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("role permissions enforce owner/admin/agent boundaries", () => {
@@ -193,7 +215,9 @@ test("role permissions enforce owner/admin/agent boundaries", () => {
     assert.equal(service.can(4, "REPLY_TO_TICKETS"), true);
     assert.throws(() => service.assignRole(2, 5, "ADMIN"));
     assert.throws(() => service.revokeMember(2, 1));
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("team invitations are hashed, expiring, and single-use", () => {
@@ -209,7 +233,9 @@ test("team invitations are hashed, expiring, and single-use", () => {
     const expiring = service.createTeamInvitation(1, "AGENT");
     now = new Date("2026-08-02T10:00:02Z");
     assert.equal(service.consumeTeamInvitation(expiring, { telegramId: 3 }).kind, "EXPIRED");
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("an active owner cannot be demoted by consuming a team invitation", () => {
@@ -224,7 +250,9 @@ test("an active owner cannot be demoted by consuming a team invitation", () => {
     assert.equal(service.listTeamMembers().filter((member) => member.role === "OWNER").length, 1);
     assert.equal(service.consumeTeamInvitation(token, { telegramId: 2, username: "admin" }).kind, "JOINED");
     assert.equal(service.getMember(2)?.role, "ADMIN");
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("owner recovery keeps old owner until explicit private confirmation", () => {
@@ -238,7 +266,9 @@ test("owner recovery keeps old owner until explicit private confirmation", () =>
     service.confirmOwnerTransfer(2);
     assert.equal(service.getOwner()?.userTelegramId, 2);
     assert.equal(service.listTeamMembers().filter((member) => member.role === "OWNER").length, 1);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("onboarding state survives service recreation", () => {
@@ -248,7 +278,9 @@ test("onboarding state survives service recreation", () => {
     first.saveOnboardingStage(1, "STAFF_WORKSPACE");
     const second = new InstallationService(db);
     assert.equal(second.getOnboardingSession(1)?.stage, "STAFF_WORKSPACE");
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("explicit private batch Apply mode survives service recreation", () => {
@@ -258,5 +290,7 @@ test("explicit private batch Apply mode survives service recreation", () => {
     first.saveOnboardingStage(1, "BATCH_APPLY");
     const second = new InstallationService(db);
     assert.equal(second.getOnboardingSession(1)?.stage, "BATCH_APPLY");
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });

@@ -18,7 +18,7 @@ const QUEST_FIELDS = new Set([
   "displayedCapacity",
   "settlementLabel",
   "requirements",
-  "canonicalLink"
+  "canonicalLink",
 ]);
 
 export interface EntityNotificationEventInput {
@@ -157,7 +157,7 @@ export function renderEntityNotification(event: ValidatedEntityNotificationEvent
     ["displayedCapacity", "Displayed capacity"],
     ["settlementLabel", "Settlement"],
     ["requirements", "Requirements"],
-    ["canonicalLink", "Link"]
+    ["canonicalLink", "Link"],
   ];
   for (const [key, label] of labels) {
     const value = event.payload[key];
@@ -165,7 +165,9 @@ export function renderEntityNotification(event: ValidatedEntityNotificationEvent
   }
   const rendered = lines.join("\n");
   if (rendered.length > TELEGRAM_MESSAGE_LIMIT) {
-    throw new EntityNotificationValidationError(`Rendered notification exceeds Telegram's ${TELEGRAM_MESSAGE_LIMIT}-character message limit.`);
+    throw new EntityNotificationValidationError(
+      `Rendered notification exceeds Telegram's ${TELEGRAM_MESSAGE_LIMIT}-character message limit.`
+    );
   }
   return rendered;
 }
@@ -186,10 +188,12 @@ export async function processEntityNotificationEvent(
   if (!settings.enabled) return { status: "DISABLED", reason: "Entity notifications are disabled." };
   if (settings.targetChatId === null) return { status: "SKIPPED", reason: "No notification target is configured." };
   if (!settings.providerKey) return { status: "UNAVAILABLE", reason: "No notification provider is configured." };
-  if (event.provider !== settings.providerKey) return { status: "UNAVAILABLE", reason: "Event provider does not match the active provider." };
+  if (event.provider !== settings.providerKey)
+    return { status: "UNAVAILABLE", reason: "Event provider does not match the active provider." };
   const provider = settings.providers.get(settings.providerKey);
   if (!provider) return { status: "UNAVAILABLE", reason: "Configured notification provider is not registered." };
-  if (!provider.authoritative) return { status: "UNAVAILABLE", reason: "Configured notification provider is not authoritative." };
+  if (!provider.authoritative)
+    return { status: "UNAVAILABLE", reason: "Configured notification provider is not authoritative." };
   let available = false;
   try {
     available = provider.isAvailable();
@@ -204,7 +208,7 @@ export async function processEntityNotificationEvent(
     entityId: event.entityId,
     eventType: event.eventType,
     observedAt: event.observedAt,
-    targetChatId: settings.targetChatId
+    targetChatId: settings.targetChatId,
   });
   if (claimed === "PUBLISHED") return { status: "DUPLICATE" };
   if (claimed === "UNKNOWN_DELIVERY") return { status: "IN_FLIGHT" };
@@ -214,12 +218,24 @@ export async function processEntityNotificationEvent(
   try {
     rendered = renderEntityNotification(event);
   } catch (error) {
-    db.recordEntityNotificationFailure(event.provider, event.entityType, event.entityId, event.eventType, conciseError(error));
+    db.recordEntityNotificationFailure(
+      event.provider,
+      event.entityType,
+      event.entityId,
+      event.eventType,
+      conciseError(error)
+    );
     return { status: "INVALID", reason: error instanceof Error ? error.message : "Notification rendering failed." };
   }
   try {
     const sent = await api.sendMessage(settings.targetChatId, rendered);
-    db.recordEntityNotificationPublished(event.provider, event.entityType, event.entityId, event.eventType, sent.message_id);
+    db.recordEntityNotificationPublished(
+      event.provider,
+      event.entityType,
+      event.entityId,
+      event.eventType,
+      sent.message_id
+    );
     return { status: "PUBLISHED", telegramMessageId: sent.message_id };
   } catch (error) {
     const reason = conciseError(error);
@@ -229,8 +245,10 @@ export async function processEntityNotificationEvent(
 }
 
 function requiredString(value: unknown, field: string, maxLength: number): string {
-  if (typeof value !== "string" || !value.trim()) throw new EntityNotificationValidationError(`${field} must be a non-empty string.`);
-  if (value.length > maxLength) throw new EntityNotificationValidationError(`${field} must be at most ${maxLength} characters.`);
+  if (typeof value !== "string" || !value.trim())
+    throw new EntityNotificationValidationError(`${field} must be a non-empty string.`);
+  if (value.length > maxLength)
+    throw new EntityNotificationValidationError(`${field} must be at most ${maxLength} characters.`);
   return value;
 }
 

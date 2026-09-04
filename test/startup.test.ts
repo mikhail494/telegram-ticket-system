@@ -10,20 +10,48 @@ test("setup mode skips every staff-workspace startup task", async () => {
     const service = new InstallationService(db);
     service.activateWorkspace({ chatId: -10041, title: "Pending setup workspace" });
     const calls: string[] = [];
-    const task = (name: string) => async () => { calls.push(name); };
-    assert.equal(await runWorkspaceStartup(service, { initializeSupportLogs: task("logs"), recoverArchives: task("archives"), recoverModeration: task("moderation"), recoverBatch: task("batch"), sendLegacyStaffOnboarding: task("onboarding") }), "SETUP_REQUIRED");
+    const task = (name: string) => async () => {
+      calls.push(name);
+    };
+    assert.equal(
+      await runWorkspaceStartup(service, {
+        initializeSupportLogs: task("logs"),
+        recoverArchives: task("archives"),
+        recoverModeration: task("moderation"),
+        recoverBatch: task("batch"),
+        sendLegacyStaffOnboarding: task("onboarding"),
+      }),
+      "SETUP_REQUIRED"
+    );
     assert.deepEqual(calls, []);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("legacy workspace starts recoveries without creating onboarding noise", async () => {
   const db = new SupportDatabase(":memory:");
   try {
-    const service = new InstallationService(db); service.adoptLegacyInstallation(-10042);
-    const calls: string[] = []; const task = (name: string) => async () => { calls.push(name); };
-    assert.equal(await runWorkspaceStartup(service, { initializeSupportLogs: task("logs"), recoverArchives: task("archives"), recoverModeration: task("moderation"), recoverBatch: task("batch"), sendLegacyStaffOnboarding: task("onboarding") }), "READY");
+    const service = new InstallationService(db);
+    service.adoptLegacyInstallation(-10042);
+    const calls: string[] = [];
+    const task = (name: string) => async () => {
+      calls.push(name);
+    };
+    assert.equal(
+      await runWorkspaceStartup(service, {
+        initializeSupportLogs: task("logs"),
+        recoverArchives: task("archives"),
+        recoverModeration: task("moderation"),
+        recoverBatch: task("batch"),
+        sendLegacyStaffOnboarding: task("onboarding"),
+      }),
+      "READY"
+    );
     assert.deepEqual(calls, ["logs", "archives", "moderation", "batch"]);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });
 
 test("ready startup automatically switches an adopted installation with an owner to role-based access", async () => {
@@ -39,9 +67,11 @@ test("ready startup automatically switches an adopted installation with an owner
       recoverArchives: task,
       recoverModeration: task,
       recoverBatch: task,
-      sendLegacyStaffOnboarding: task
+      sendLegacyStaffOnboarding: task,
     });
 
     assert.equal(service.getState().authorizationMode, "RBAC_ACTIVE");
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });

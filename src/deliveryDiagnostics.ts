@@ -10,7 +10,7 @@ export const DELIVERY_ERROR_CATEGORIES = [
   "TELEGRAM_SERVER_ERROR",
   "NETWORK_TIMEOUT",
   "NETWORK_ERROR",
-  "UNKNOWN_TELEGRAM_ERROR"
+  "UNKNOWN_TELEGRAM_ERROR",
 ] as const;
 
 export type DeliveryErrorCategory = (typeof DELIVERY_ERROR_CATEGORIES)[number];
@@ -68,7 +68,7 @@ export function normalizeTelegramDeliveryError(error: unknown, occurredAt = new 
       httpStatus: null,
       retryAfterSeconds: retryAfter,
       description,
-      occurredAt: occurredAt.toISOString()
+      occurredAt: occurredAt.toISOString(),
     };
   }
 
@@ -85,7 +85,7 @@ export function normalizeTelegramDeliveryError(error: unknown, occurredAt = new 
       httpStatus: null,
       retryAfterSeconds: null,
       description: null,
-      occurredAt: occurredAt.toISOString()
+      occurredAt: occurredAt.toISOString(),
     };
   }
 
@@ -97,7 +97,7 @@ export function normalizeTelegramDeliveryError(error: unknown, occurredAt = new 
     httpStatus: null,
     retryAfterSeconds: null,
     description: null,
-    occurredAt: occurredAt.toISOString()
+    occurredAt: occurredAt.toISOString(),
   };
 }
 
@@ -106,11 +106,17 @@ export function formatDeliveryFailureCategory(category: DeliveryErrorCategory): 
 }
 
 function sanitizeDescription(value: string): string {
-  return value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, MAX_DESCRIPTION_LENGTH);
+  return value
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_DESCRIPTION_LENGTH);
 }
 
 function errorCodeOf(value: unknown): string | null {
-  return typeof value === "object" && value !== null && "code" in value && typeof value.code === "string" ? value.code : null;
+  return typeof value === "object" && value !== null && "code" in value && typeof value.code === "string"
+    ? value.code
+    : null;
 }
 
 function errorNameOf(value: unknown): string | null {

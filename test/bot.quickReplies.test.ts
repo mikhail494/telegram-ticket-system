@@ -8,7 +8,7 @@ import {
   buildStaffCallbackUpdate,
   createBotHarness,
   type BotHarness,
-  type RecordedApiCall
+  type RecordedApiCall,
 } from "./helpers/botHarness.js";
 
 const harnesses: BotHarness[] = [];
@@ -31,11 +31,7 @@ function callbackAnswers(harness: BotHarness): RecordedApiCall[] {
   return harness.findApiCalls("answerCallbackQuery");
 }
 
-function assertCallbackAnswer(
-  harness: BotHarness,
-  expectedText?: string,
-  expectedShowAlert?: boolean
-): void {
+function assertCallbackAnswer(harness: BotHarness, expectedText?: string, expectedShowAlert?: boolean): void {
   const answers = callbackAnswers(harness);
   assert.equal(answers.length, 1);
 
@@ -67,8 +63,8 @@ function inlineButtons(call: RecordedApiCall): Array<{ text: string; callbackDat
       return [
         {
           text: button.text,
-          callbackData: typeof button.callback_data === "string" ? button.callback_data : undefined
-        }
+          callbackData: typeof button.callback_data === "string" ? button.callback_data : undefined,
+        },
       ];
     });
   });
@@ -84,14 +80,14 @@ function createPaginationRegistry(templateCount = 13): QuickRepliesRegistry {
       Object.freeze({
         id: `reply_${index}`,
         title: `Reply ${index}`,
-        text: `Template reply ${index}`
+        text: `Template reply ${index}`,
       })
     )
   ) as readonly QuickReplyTemplate[];
   const category = Object.freeze({
     id: "bulk",
     title: "Bulk replies",
-    templates
+    templates,
   }) as QuickReplyCategory;
   const categories = Object.freeze([category]) as readonly QuickReplyCategory[];
   const templateById = new Map(templates.map((template) => [template.id, template]));
@@ -100,7 +96,7 @@ function createPaginationRegistry(templateCount = 13): QuickRepliesRegistry {
     listCategories: () => categories,
     findCategory: (categoryId: string) => (categoryId === category.id ? category : undefined),
     listTemplates: (categoryId: string) => (categoryId === category.id ? templates : Object.freeze([])),
-    findTemplate: (templateId: string) => templateById.get(templateId)
+    findTemplate: (templateId: string) => templateById.get(templateId),
   });
 }
 
@@ -134,33 +130,33 @@ describe("Quick Replies callbacks", () => {
     {
       name: "callbacks outside the staff chat",
       seed: {},
-      update: { callbackData: "qr:open:1", chatId: TEST_STAFF_CHAT_ID - 1 }
+      update: { callbackData: "qr:open:1", chatId: TEST_STAFF_CHAT_ID - 1 },
     },
     {
       name: "invalid ticket IDs",
       seed: {},
-      update: { callbackData: "qr:open:not-a-ticket" }
+      update: { callbackData: "qr:open:not-a-ticket" },
     },
     {
       name: "missing tickets",
       seed: {},
-      update: { callbackData: "qr:open:999" }
+      update: { callbackData: "qr:open:999" },
     },
     {
       name: "tickets from another staff chat",
       seed: { staffChatId: TEST_STAFF_CHAT_ID - 1 },
-      update: { callbackData: "qr:open:1" }
+      update: { callbackData: "qr:open:1" },
     },
     {
       name: "closed tickets",
       seed: { status: "CLOSED" as TicketStatus },
-      update: { callbackData: "qr:open:1" }
+      update: { callbackData: "qr:open:1" },
     },
     {
       name: "callbacks from another topic",
       seed: {},
-      update: { callbackData: "qr:open:1", messageThreadId: 9999 }
-    }
+      update: { callbackData: "qr:open:1", messageThreadId: 9999 },
+    },
   ]) {
     it(`does not open a menu for ${validationCase.name}`, async () => {
       const harness = createHarness();
@@ -240,8 +236,14 @@ describe("Quick Replies callbacks", () => {
     const edit = harness.findApiCalls("editMessageText")[0];
     assert.ok(edit);
     assert.equal(templateButtons(edit).length, 6);
-    assert.equal(inlineButtons(edit).some((button) => button.text === "Previous"), false);
-    assert.equal(inlineButtons(edit).some((button) => button.text === "Next"), true);
+    assert.equal(
+      inlineButtons(edit).some((button) => button.text === "Previous"),
+      false
+    );
+    assert.equal(
+      inlineButtons(edit).some((button) => button.text === "Next"),
+      true
+    );
     assertCallbackAnswer(harness, "Quick Replies category opened.");
   });
 
@@ -254,8 +256,14 @@ describe("Quick Replies callbacks", () => {
     const edit = harness.findApiCalls("editMessageText")[0];
     assert.ok(edit);
     assert.equal(templateButtons(edit).length, 6);
-    assert.equal(inlineButtons(edit).some((button) => button.text === "Previous"), true);
-    assert.equal(inlineButtons(edit).some((button) => button.text === "Next"), true);
+    assert.equal(
+      inlineButtons(edit).some((button) => button.text === "Previous"),
+      true
+    );
+    assert.equal(
+      inlineButtons(edit).some((button) => button.text === "Next"),
+      true
+    );
     assertCallbackAnswer(harness, "Quick Replies category opened.");
   });
 
@@ -268,8 +276,14 @@ describe("Quick Replies callbacks", () => {
     const edit = harness.findApiCalls("editMessageText")[0];
     assert.ok(edit);
     assert.equal(templateButtons(edit).length, 1);
-    assert.equal(inlineButtons(edit).some((button) => button.text === "Previous"), true);
-    assert.equal(inlineButtons(edit).some((button) => button.text === "Next"), false);
+    assert.equal(
+      inlineButtons(edit).some((button) => button.text === "Previous"),
+      true
+    );
+    assert.equal(
+      inlineButtons(edit).some((button) => button.text === "Next"),
+      false
+    );
     assertCallbackAnswer(harness, "Quick Replies category opened.");
   });
 
@@ -322,9 +336,7 @@ describe("Quick Replies callbacks", () => {
     );
     assertCallbackAnswer(harness, "Quick reply sent.");
 
-    const menuCleanup = harness
-      .findApiCalls("editMessageText")
-      .find((call) => call.payload.message_id === 7001);
+    const menuCleanup = harness.findApiCalls("editMessageText").find((call) => call.payload.message_id === 7001);
     assert.ok(menuCleanup);
     assert.equal(menuCleanup.payload.text, "Quick reply sent\nAsk for UID");
     assert.equal(menuCleanup.payload.reply_markup, undefined);
@@ -351,18 +363,18 @@ describe("Quick Replies callbacks", () => {
     {
       name: "unknown templates",
       seed: {},
-      update: { callbackData: "qr:template:1:unknown_template" }
+      update: { callbackData: "qr:template:1:unknown_template" },
     },
     {
       name: "closed tickets",
       seed: { status: "CLOSED" as TicketStatus },
-      update: { callbackData: "qr:template:1:ask_uid" }
+      update: { callbackData: "qr:template:1:ask_uid" },
     },
     {
       name: "callbacks from another topic",
       seed: {},
-      update: { callbackData: "qr:template:1:ask_uid", messageThreadId: 9999 }
-    }
+      update: { callbackData: "qr:template:1:ask_uid", messageThreadId: 9999 },
+    },
   ]) {
     it(`does not deliver ${invalidDeliveryCase.name}`, async () => {
       const harness = createHarness();
@@ -447,9 +459,8 @@ describe("Quick Replies callbacks", () => {
     await harness.bot.handleUpdate(buildStaffCallbackUpdate({ callbackData: `qr:open:${ticket.id}` }));
 
     assert.equal(
-      harness
-        .findApiCalls("sendMessage")
-        .filter((call) => call.payload.text === "Quick replies\nChoose a category:").length,
+      harness.findApiCalls("sendMessage").filter((call) => call.payload.text === "Quick replies\nChoose a category:")
+        .length,
       1
     );
     assert.equal(harness.countApiCalls("answerCallbackQuery"), 1);
@@ -470,9 +481,8 @@ describe("Quick Replies callbacks", () => {
     );
 
     assert.equal(
-      harness
-        .findApiCalls("sendMessage")
-        .filter((call) => call.payload.text === "Quick replies\nChoose a category:").length,
+      harness.findApiCalls("sendMessage").filter((call) => call.payload.text === "Quick replies\nChoose a category:")
+        .length,
       1
     );
     assert.equal(harness.countApiCalls("answerCallbackQuery"), 1);
