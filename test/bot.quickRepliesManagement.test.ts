@@ -17,10 +17,13 @@ function createReadyHarness(role: "OWNER" | "ADMIN" | "SENIOR_AGENT" | "AGENT") 
     installationServiceFactory: (db) => {
       installation = new InstallationService(db);
       installation.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
-      installation.consumeOwnerPairingToken(installation.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
+      installation.consumeOwnerPairingToken(installation.createOwnerPairingToken(), {
+        telegramId: 1,
+        username: "owner",
+      });
       if (role !== "OWNER") installation.assignRole(1, 2, role);
       return installation;
-    }
+    },
   });
   harness.setStaffMembership(role === "OWNER" ? 1 : 2);
   harnesses.push(harness);
@@ -35,8 +38,8 @@ function privateMessage(userId: number, text: string, messageId = 20): Update {
       date: 1,
       from: { id: userId, is_bot: false, first_name: `User ${userId}`, username: `user_${userId}` },
       chat: { id: userId, type: "private", first_name: `User ${userId}` },
-      text
-    }
+      text,
+    },
   };
 }
 
@@ -55,8 +58,13 @@ function privateCallback(userId: number, data: string, messageId = 10): Update {
       from: { id: userId, is_bot: false, first_name: `User ${userId}`, username: `user_${userId}` },
       chat_instance: "private",
       data,
-      message: { message_id: messageId, date: 1, chat: { id: userId, type: "private", first_name: `User ${userId}` }, text: "Dashboard" }
-    }
+      message: {
+        message_id: messageId,
+        date: 1,
+        chat: { id: userId, type: "private", first_name: `User ${userId}` },
+        text: "Dashboard",
+      },
+    },
   };
 }
 
@@ -85,7 +93,10 @@ async function beginPendingPrivateBatch(harness: BotHarness, userId: number): Pr
 }
 
 test("OWNER and ADMIN can open private Quick Replies management", async () => {
-  for (const [role, userId] of [["OWNER", 1], ["ADMIN", 2]] as const) {
+  for (const [role, userId] of [
+    ["OWNER", 1],
+    ["ADMIN", 2],
+  ] as const) {
     const harness = createReadyHarness(role);
     await harness.bot.handleUpdate(privateCallback(userId, "dashboard:quick"));
 
@@ -134,10 +145,19 @@ test("management lists human labels, edits persisted text, and ticket callbacks 
       from: { id: 42, is_bot: false, first_name: "Staff" },
       chat_instance: "staff",
       data: `qr:template:${ticket.id}:ask_uid`,
-      message: { message_id: 700, date: 1, chat: { id: TEST_STAFF_CHAT_ID, type: "supergroup", title: "Staff" }, message_thread_id: ticket.message_thread_id ?? 5000, text: "Ticket" }
-    }
+      message: {
+        message_id: 700,
+        date: 1,
+        chat: { id: TEST_STAFF_CHAT_ID, type: "supergroup", title: "Staff" },
+        message_thread_id: ticket.message_thread_id ?? 5000,
+        text: "Ticket",
+      },
+    },
   });
-  assert.equal(harness.findApiCalls("sendMessage").find((call) => call.payload.chat_id === ticket.user_telegram_id)?.payload.text, "Please share your account reference.");
+  assert.equal(
+    harness.findApiCalls("sendMessage").find((call) => call.payload.chat_id === ticket.user_telegram_id)?.payload.text,
+    "Please share your account reference."
+  );
 });
 
 test("invalid input and Back leave no mutation or competing management prompt", async () => {
@@ -179,7 +199,12 @@ test("pending Batch waits for files without hijacking Quick Reply or moderation 
   assert.equal(harness.db.getManagedPublicChat(-100710)?.warning_text, "Synthetic moderation warning.");
 
   assert.equal(harness.db.getSetting("private_batch_export:1"), exportId);
-  assert.equal(harness.findApiCalls("sendMessage").some((call) => String(call.payload.text).includes("That file is not an answer package")), false);
+  assert.equal(
+    harness
+      .findApiCalls("sendMessage")
+      .some((call) => String(call.payload.text).includes("That file is not an answer package")),
+    false
+  );
 });
 
 test("staff navigation disarms test-ticket mode before Quick Reply title input", async () => {
@@ -206,7 +231,12 @@ test("pending Batch ignores arbitrary private text but still leaves its export r
 
   assert.equal(harness.db.getSetting("private_batch_export:1"), exportId);
   assert.equal(harness.db.listTicketBatchAnswerItems("private_answers_1").length, 0);
-  assert.equal(harness.findApiCalls("sendMessage").some((call) => String(call.payload.text).includes("That file is not an answer package")), false);
+  assert.equal(
+    harness
+      .findApiCalls("sendMessage")
+      .some((call) => String(call.payload.text).includes("That file is not an answer package")),
+    false
+  );
 });
 
 test("Add persists only after preview confirmation and Delete requires confirmation", async () => {
@@ -216,9 +246,15 @@ test("Add persists only after preview confirmation and Delete requires confirmat
   await harness.bot.handleUpdate(privateCallback(1, "quick:add-category:status", currentScreenId(harness, 1)));
   await harness.bot.handleUpdate(privateMessage(1, "Resolved", 50));
   await harness.bot.handleUpdate(privateMessage(1, "This issue is resolved.", 51));
-  assert.equal(harness.registry.listTemplates("status").some((template) => template.title === "Resolved"), false);
+  assert.equal(
+    harness.registry.listTemplates("status").some((template) => template.title === "Resolved"),
+    false
+  );
   await harness.bot.handleUpdate(privateCallback(1, "quick:list", currentScreenId(harness, 1)));
-  assert.equal(harness.registry.listTemplates("status").some((template) => template.title === "Resolved"), false);
+  assert.equal(
+    harness.registry.listTemplates("status").some((template) => template.title === "Resolved"),
+    false
+  );
 
   await harness.bot.handleUpdate(privateCallback(1, "quick:add", currentScreenId(harness, 1)));
   await harness.bot.handleUpdate(privateCallback(1, "quick:add-category:status", currentScreenId(harness, 1)));
@@ -256,10 +292,19 @@ test("stale management callbacks and deleted ticket Quick Replies are inert", as
       from: { id: 42, is_bot: false, first_name: "Staff" },
       chat_instance: "staff",
       data: `qr:template:${ticket.id}:ask_uid`,
-      message: { message_id: 701, date: 1, chat: { id: TEST_STAFF_CHAT_ID, type: "supergroup", title: "Staff" }, message_thread_id: ticket.message_thread_id ?? 5000, text: "Ticket" }
-    }
+      message: {
+        message_id: 701,
+        date: 1,
+        chat: { id: TEST_STAFF_CHAT_ID, type: "supergroup", title: "Staff" },
+        message_thread_id: ticket.message_thread_id ?? 5000,
+        text: "Ticket",
+      },
+    },
   });
-  assert.equal(harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id).length, 0);
+  assert.equal(
+    harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id).length,
+    0
+  );
   assert.equal(harness.db.listMessagesChronological(ticket.id).length, 0);
   assert.match(String(harness.findApiCalls("answerCallbackQuery")[0]?.payload.text), /not found/i);
 });

@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { copyFile, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { BackupScheduler, BackupService, createAutomaticBackupScheduler, verifyBackupChecksum, verifyRestoreCandidate, verifySqlite } from "../src/backups.js";
+import {
+  BackupScheduler,
+  BackupService,
+  createAutomaticBackupScheduler,
+  verifyBackupChecksum,
+  verifyRestoreCandidate,
+  verifySqlite,
+} from "../src/backups.js";
 import { SupportDatabase } from "../src/db.js";
 
 async function fixture(): Promise<{ directory: string; db: SupportDatabase; backupDirectory: string }> {
@@ -16,7 +23,12 @@ async function fixture(): Promise<{ directory: string; db: SupportDatabase; back
 test("online backup is finalized with immutable checksum metadata and passes a restore drill", async () => {
   const { directory, db, backupDirectory } = await fixture();
   try {
-    const result = await new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 }).createBackup();
+    const result = await new BackupService(db, {
+      enabled: true,
+      directory: backupDirectory,
+      intervalMs: 1,
+      retentionCount: 14,
+    }).createBackup();
     assert.match(result.basename, /^support-\d{8}T\d{9}Z\.sqlite$/);
     const original = await readFile(result.path);
     const originalChecksum = await readFile(`${result.path}.sha256`, "utf8");
@@ -24,29 +36,64 @@ test("online backup is finalized with immutable checksum metadata and passes a r
     const restoreTarget = path.join(directory, "restore-target.sqlite");
     await copyFile(result.path, restoreTarget);
     const restored = new SupportDatabase(`file:${restoreTarget}`);
-    try { assert.equal(restored.getSetting("representative"), "preserved"); } finally { restored.close(); }
+    try {
+      assert.equal(restored.getSetting("representative"), "preserved");
+    } finally {
+      restored.close();
+    }
     await verifySqlite(restoreTarget);
     assert.deepEqual(await readFile(result.path), original);
     assert.equal(await readFile(`${result.path}.sha256`, "utf8"), originalChecksum);
-    assert.equal((await readdir(backupDirectory)).some((name) => name.endsWith(".tmp")), false);
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+    assert.equal(
+      (await readdir(backupDirectory)).some((name) => name.endsWith(".tmp")),
+      false
+    );
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("finalized backup discovery validates an isolated copy without mutating the backup directory", async () => {
   const { directory, db, backupDirectory } = await fixture();
   try {
-    const result = await new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 }).createBackup();
+    const result = await new BackupService(db, {
+      enabled: true,
+      directory: backupDirectory,
+      intervalMs: 1,
+      retentionCount: 14,
+    }).createBackup();
     const original = await readFile(result.path);
     const checksum = await readFile(`${result.path}.sha256`, "utf8");
-    const temporaryDirectoriesBefore = (await readdir(os.tmpdir())).filter((name) => name.startsWith("ticket-backup-verify-"));
-    const discovered = await new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 }).newestValidBackup();
-    const temporaryDirectoriesAfter = (await readdir(os.tmpdir())).filter((name) => name.startsWith("ticket-backup-verify-"));
+    const temporaryDirectoriesBefore = (await readdir(os.tmpdir())).filter((name) =>
+      name.startsWith("ticket-backup-verify-")
+    );
+    const discovered = await new BackupService(db, {
+      enabled: true,
+      directory: backupDirectory,
+      intervalMs: 1,
+      retentionCount: 14,
+    }).newestValidBackup();
+    const temporaryDirectoriesAfter = (await readdir(os.tmpdir())).filter((name) =>
+      name.startsWith("ticket-backup-verify-")
+    );
     assert.equal(discovered, result.path);
     assert.deepEqual(await readFile(result.path), original);
     assert.equal(await readFile(`${result.path}.sha256`, "utf8"), checksum);
     assert.deepEqual(temporaryDirectoriesAfter, temporaryDirectoriesBefore);
-    assert.equal((await readdir(backupDirectory)).some((name) => name === `${result.basename}-wal` || name === `${result.basename}-shm` || name === `${result.basename}-journal`), false);
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+    assert.equal(
+      (await readdir(backupDirectory)).some(
+        (name) =>
+          name === `${result.basename}-wal` ||
+          name === `${result.basename}-shm` ||
+          name === `${result.basename}-journal`
+      ),
+      false
+    );
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("successful backup removes only its own temporary database and WAL sidecars", async () => {
@@ -55,15 +102,36 @@ test("successful backup removes only its own temporary database and WAL sidecars
     const originalBackup = db.backupTo.bind(db);
     db.backupTo = async (destination) => {
       const result = await originalBackup(destination);
-      await Promise.all([writeFile(`${destination}-wal`, "temporary WAL"), writeFile(`${destination}-shm`, "temporary SHM")]);
+      await Promise.all([
+        writeFile(`${destination}-wal`, "temporary WAL"),
+        writeFile(`${destination}-shm`, "temporary SHM"),
+      ]);
       return result;
     };
-    const result = await new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 }).createBackup();
+    const result = await new BackupService(db, {
+      enabled: true,
+      directory: backupDirectory,
+      intervalMs: 1,
+      retentionCount: 14,
+    }).createBackup();
     const entries = await readdir(backupDirectory);
     assert.equal(entries.includes(path.basename(result.path)), true);
     assert.equal(entries.includes(`${path.basename(result.path)}.sha256`), true);
-    assert.equal(entries.some((name) => name.startsWith(".support-") && (name.endsWith(".tmp") || name.endsWith(".tmp.sha256") || name.endsWith(".tmp-wal") || name.endsWith(".tmp-shm"))), false);
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+    assert.equal(
+      entries.some(
+        (name) =>
+          name.startsWith(".support-") &&
+          (name.endsWith(".tmp") ||
+            name.endsWith(".tmp.sha256") ||
+            name.endsWith(".tmp-wal") ||
+            name.endsWith(".tmp-shm"))
+      ),
+      false
+    );
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("temporary sidecar cleanup failure does not roll back a finalized backup", async () => {
@@ -72,29 +140,43 @@ test("temporary sidecar cleanup failure does not roll back a finalized backup", 
     const originalBackup = db.backupTo.bind(db);
     db.backupTo = async (destination) => {
       const result = await originalBackup(destination);
-      await Promise.all([writeFile(`${destination}-wal`, "temporary WAL"), writeFile(`${destination}-shm`, "temporary SHM")]);
+      await Promise.all([
+        writeFile(`${destination}-wal`, "temporary WAL"),
+        writeFile(`${destination}-shm`, "temporary SHM"),
+      ]);
       return result;
     };
     let tick = 0;
     const now = () => new Date(1_700_000_000_000 + tick++);
-    const older = await new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 }, now).createBackup();
-    const service = new BackupService(db, {
-      enabled: true,
-      directory: backupDirectory,
-      intervalMs: 1,
-      retentionCount: 14,
-      removeTemporary: async (target, options) => {
-        if (String(target).endsWith(".tmp-shm")) throw new Error("temporary sidecar remains locked");
-        await rm(target, options);
-      }
-    }, now);
+    const older = await new BackupService(
+      db,
+      { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 },
+      now
+    ).createBackup();
+    const service = new BackupService(
+      db,
+      {
+        enabled: true,
+        directory: backupDirectory,
+        intervalMs: 1,
+        retentionCount: 14,
+        removeTemporary: async (target, options) => {
+          if (String(target).endsWith(".tmp-shm")) throw new Error("temporary sidecar remains locked");
+          await rm(target, options);
+        },
+      },
+      now
+    );
     const result = await service.createBackup();
     assert.equal(result.tempCleanupFailed, 1);
     await verifyBackupChecksum(result.path, { requireMetadata: true });
     await verifySqlite(result.path);
     assert.equal((await readdir(backupDirectory)).includes(path.basename(result.path)), true);
     assert.equal((await readdir(backupDirectory)).includes(path.basename(older.path)), true);
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("managed backup publication removes its own partial final file when checksum publication fails", async () => {
@@ -102,27 +184,46 @@ test("managed backup publication removes its own partial final file when checksu
   try {
     let moves = 0;
     const service = new BackupService(db, {
-      enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14,
+      enabled: true,
+      directory: backupDirectory,
+      intervalMs: 1,
+      retentionCount: 14,
       rename: async (from, to) => {
         moves += 1;
         if (moves === 2) throw new Error("checksum publish failed");
         await rename(from, to);
-      }
+      },
     });
     await assert.rejects(() => service.createBackup(), /checksum publish failed/);
     assert.deepEqual(await readdir(backupDirectory), []);
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("managed backup discovery ignores a half-published backup without checksum metadata", async () => {
   const { directory, db, backupDirectory } = await fixture();
   try {
-    const result = await new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 }).createBackup();
+    const result = await new BackupService(db, {
+      enabled: true,
+      directory: backupDirectory,
+      intervalMs: 1,
+      retentionCount: 14,
+    }).createBackup();
     await rm(`${result.path}.sha256`);
-    const service = new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 });
+    const service = new BackupService(db, {
+      enabled: true,
+      directory: backupDirectory,
+      intervalMs: 1,
+      retentionCount: 14,
+    });
     assert.equal(await service.newestValidBackup(), null);
     assert.equal((await verifyRestoreCandidate(result.path, db.databasePath)).checksum, "metadata absent");
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("retention failure does not invalidate the newly finalized backup", async () => {
@@ -133,69 +234,125 @@ test("retention failure does not invalidate the newly finalized backup", async (
       if (String(target).includes("support-20231114T221320000Z.sqlite")) throw new Error("old backup locked");
       return rm(target, options);
     };
-    const service = new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 1, remove: failOldRemoval }, () => new Date(1_700_000_000_000 + tick++));
+    const service = new BackupService(
+      db,
+      { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 1, remove: failOldRemoval },
+      () => new Date(1_700_000_000_000 + tick++)
+    );
     await service.createBackup();
     const second = await service.createBackup();
     assert.equal(second.retentionDeleted, 0);
     assert.equal(second.retentionFailed, 1);
     await verifyBackupChecksum(second.path, { requireMetadata: true });
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("restore verification rejects missing, corrupt, truncated, mismatched, and live candidates without mutating the original", async () => {
   const { directory, db, backupDirectory } = await fixture();
   try {
-    const result = await new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 }).createBackup();
+    const result = await new BackupService(db, {
+      enabled: true,
+      directory: backupDirectory,
+      intervalMs: 1,
+      retentionCount: 14,
+    }).createBackup();
     const bytes = await readFile(result.path);
     const checksum = await readFile(`${result.path}.sha256`, "utf8");
     await assert.rejects(() => verifyRestoreCandidate(path.join(directory, "missing.sqlite"), db.databasePath));
     await assert.rejects(() => verifyRestoreCandidate(result.path, result.path), /live database/i);
-    const random = path.join(directory, "not-a-database.sqlite"); await writeFile(random, "not sqlite");
+    const random = path.join(directory, "not-a-database.sqlite");
+    await writeFile(random, "not sqlite");
     await assert.rejects(() => verifyRestoreCandidate(random, db.databasePath));
-    const truncated = path.join(directory, "truncated.sqlite"); await writeFile(truncated, bytes.subarray(0, 64));
+    const truncated = path.join(directory, "truncated.sqlite");
+    await writeFile(truncated, bytes.subarray(0, 64));
     await assert.rejects(() => verifyRestoreCandidate(truncated, db.databasePath));
     await writeFile(`${result.path}.sha256`, "0".repeat(64));
     await assert.rejects(() => verifyRestoreCandidate(result.path, db.databasePath), /checksum/i);
     await writeFile(`${result.path}.sha256`, checksum);
     assert.deepEqual(await readFile(result.path), bytes);
     assert.equal(await readFile(`${result.path}.sha256`, "utf8"), checksum);
-    assert.equal((await readdir(backupDirectory)).some((name) => name === `${result.basename}-wal` || name === `${result.basename}-shm` || name === `${result.basename}-journal`), false);
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+    assert.equal(
+      (await readdir(backupDirectory)).some(
+        (name) =>
+          name === `${result.basename}-wal` ||
+          name === `${result.basename}-shm` ||
+          name === `${result.basename}-journal`
+      ),
+      false
+    );
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("discovery skips a corrupt newer finalized backup without creating sidecars", async () => {
   const { directory, db, backupDirectory } = await fixture();
   try {
     let tick = 0;
-    const service = new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 }, () => new Date(1_700_000_000_000 + tick++));
+    const service = new BackupService(
+      db,
+      { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 14 },
+      () => new Date(1_700_000_000_000 + tick++)
+    );
     const older = await service.createBackup();
     const newer = await service.createBackup();
     await writeFile(newer.path, "corrupt finalized backup");
     assert.equal(await service.newestValidBackup(), older.path);
-    assert.equal((await readdir(backupDirectory)).some((name) => name === `${newer.basename}-wal` || name === `${newer.basename}-shm` || name === `${newer.basename}-journal`), false);
-    assert.equal((await readdir(backupDirectory)).some((name) => name === `${older.basename}-wal` || name === `${older.basename}-shm` || name === `${older.basename}-journal`), false);
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+    assert.equal(
+      (await readdir(backupDirectory)).some(
+        (name) =>
+          name === `${newer.basename}-wal` || name === `${newer.basename}-shm` || name === `${newer.basename}-journal`
+      ),
+      false
+    );
+    assert.equal(
+      (await readdir(backupDirectory)).some(
+        (name) =>
+          name === `${older.basename}-wal` || name === `${older.basename}-shm` || name === `${older.basename}-journal`
+      ),
+      false
+    );
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("retention only removes managed finalized backups and overlapping triggers share one backup", async () => {
   const { directory, db, backupDirectory } = await fixture();
   try {
-    await (await import("node:fs/promises")).mkdir(backupDirectory); await writeFile(path.join(backupDirectory, "operator-notes.txt"), "keep");
+    await (await import("node:fs/promises")).mkdir(backupDirectory);
+    await writeFile(path.join(backupDirectory, "operator-notes.txt"), "keep");
     let tick = 0;
-    const service = new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 1 }, () => new Date(1_700_000_000_000 + tick++));
+    const service = new BackupService(
+      db,
+      { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 1 },
+      () => new Date(1_700_000_000_000 + tick++)
+    );
     const [first, duplicate] = await Promise.all([service.createBackup(), service.createBackup()]);
     assert.equal(first.path, duplicate.path);
     await service.createBackup();
     assert.equal((await readdir(backupDirectory)).filter((name) => /^support-.*\.sqlite$/.test(name)).length, 1);
     assert.equal((await readdir(backupDirectory)).includes("operator-notes.txt"), true);
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("retention removes only exact legacy sidecars for the managed backup it deletes", async () => {
   const { directory, db, backupDirectory } = await fixture();
   try {
     let tick = 0;
-    const service = new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 1 }, () => new Date(1_700_000_000_000 + tick++));
+    const service = new BackupService(
+      db,
+      { enabled: true, directory: backupDirectory, intervalMs: 1, retentionCount: 1 },
+      () => new Date(1_700_000_000_000 + tick++)
+    );
     const older = await service.createBackup();
     await Promise.all([
       writeFile(`${older.path}-wal`, "legacy WAL"),
@@ -204,29 +361,63 @@ test("retention removes only exact legacy sidecars for the managed backup it del
       writeFile(path.join(backupDirectory, "support.db-wal"), "live-like WAL"),
       writeFile(path.join(backupDirectory, "support.db-shm"), "live-like SHM"),
       writeFile(path.join(backupDirectory, "random.sqlite-wal"), "unrelated WAL"),
-      writeFile(path.join(backupDirectory, "notes.txt"), "keep")
+      writeFile(path.join(backupDirectory, "notes.txt"), "keep"),
     ]);
     const newest = await service.createBackup();
     assert.equal(newest.retentionDeleted, 1);
-    assert.equal((await readdir(backupDirectory)).some((name) => name === path.basename(older.path) || name === `${older.basename}.sha256` || name === `${older.basename}-wal` || name === `${older.basename}-shm` || name === `${older.basename}-journal`), false);
+    assert.equal(
+      (await readdir(backupDirectory)).some(
+        (name) =>
+          name === path.basename(older.path) ||
+          name === `${older.basename}.sha256` ||
+          name === `${older.basename}-wal` ||
+          name === `${older.basename}-shm` ||
+          name === `${older.basename}-journal`
+      ),
+      false
+    );
     assert.equal((await readdir(backupDirectory)).includes(path.basename(newest.path)), true);
     assert.equal((await readdir(backupDirectory)).includes("support.db-wal"), true);
     assert.equal((await readdir(backupDirectory)).includes("support.db-shm"), true);
     assert.equal((await readdir(backupDirectory)).includes("random.sqlite-wal"), true);
     assert.equal((await readdir(backupDirectory)).includes("notes.txt"), true);
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("scheduler does not duplicate a recent valid backup", async () => {
   const { directory, db, backupDirectory } = await fixture();
   try {
-    const service = new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 });
+    const service = new BackupService(db, {
+      enabled: true,
+      directory: backupDirectory,
+      intervalMs: 86_400_000,
+      retentionCount: 14,
+    });
     const result = await service.createBackup();
-    const scheduler = new BackupScheduler(service, { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 }, () => assert.fail("unexpected failure"));
-    await scheduler.start(); scheduler.stop();
+    const scheduler = new BackupScheduler(
+      service,
+      { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 },
+      () => assert.fail("unexpected failure")
+    );
+    await scheduler.start();
+    scheduler.stop();
     assert.equal((await readdir(backupDirectory)).filter((name) => /^support-.*\.sqlite$/.test(name)).length, 1);
-    assert.equal((await readdir(backupDirectory)).some((name) => name === `${result.basename}-wal` || name === `${result.basename}-shm` || name === `${result.basename}-journal`), false);
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+    assert.equal(
+      (await readdir(backupDirectory)).some(
+        (name) =>
+          name === `${result.basename}-wal` ||
+          name === `${result.basename}-shm` ||
+          name === `${result.basename}-journal`
+      ),
+      false
+    );
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("scheduler stops future work and drains an active backup before shutdown", async () => {
@@ -235,25 +426,43 @@ test("scheduler stops future work and drains an active backup before shutdown", 
     const originalBackup = db.backupTo.bind(db);
     let release!: () => void;
     let started!: () => void;
-    const active = new Promise<void>((resolve) => { release = resolve; });
-    const startedBackup = new Promise<void>((resolve) => { started = resolve; });
+    const active = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const startedBackup = new Promise<void>((resolve) => {
+      started = resolve;
+    });
     db.backupTo = async (destination) => {
       started();
       await active;
       return originalBackup(destination);
     };
-    const service = new BackupService(db, { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 });
-    const scheduler = new BackupScheduler(service, { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 }, () => assert.fail("unexpected failure"));
+    const service = new BackupService(db, {
+      enabled: true,
+      directory: backupDirectory,
+      intervalMs: 86_400_000,
+      retentionCount: 14,
+    });
+    const scheduler = new BackupScheduler(
+      service,
+      { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 },
+      () => assert.fail("unexpected failure")
+    );
     const startedScheduler = scheduler.start();
     await startedBackup;
     let drained = false;
-    const draining = scheduler.stopAndDrain().then(() => { drained = true; });
+    const draining = scheduler.stopAndDrain().then(() => {
+      drained = true;
+    });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(drained, false);
     release();
     await Promise.all([startedScheduler, draining]);
     assert.equal(drained, true);
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("scheduler drain treats temporary cleanup failure as a completed backup", async () => {
@@ -262,8 +471,12 @@ test("scheduler drain treats temporary cleanup failure as a completed backup", a
     const originalBackup = db.backupTo.bind(db);
     let release!: () => void;
     let started!: () => void;
-    const active = new Promise<void>((resolve) => { release = resolve; });
-    const startedBackup = new Promise<void>((resolve) => { started = resolve; });
+    const active = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const startedBackup = new Promise<void>((resolve) => {
+      started = resolve;
+    });
     db.backupTo = async (destination) => {
       started();
       await active;
@@ -280,27 +493,43 @@ test("scheduler drain treats temporary cleanup failure as a completed backup", a
       removeTemporary: async (target, options) => {
         if (String(target).endsWith(".tmp-shm")) throw new Error("temporary sidecar remains locked");
         await rm(target, options);
-      }
+      },
     });
-    const scheduler = new BackupScheduler(service, { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 }, () => assert.fail("unexpected failure"), (result) => results.push(result.tempCleanupFailed));
+    const scheduler = new BackupScheduler(
+      service,
+      { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 },
+      () => assert.fail("unexpected failure"),
+      (result) => results.push(result.tempCleanupFailed)
+    );
     const startedScheduler = scheduler.start();
     await startedBackup;
     const draining = scheduler.stopAndDrain();
     release();
     await Promise.all([startedScheduler, draining]);
     assert.deepEqual(results, [1]);
-  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("disabled or unsupported automatic backups never prevent normal database startup", () => {
   const db = new SupportDatabase(":memory:");
   try {
-    const disabled = createAutomaticBackupScheduler(db, { enabled: false, intervalMs: 1, retentionCount: 1 }, () => assert.fail("disabled backups should not report a failure"));
+    const disabled = createAutomaticBackupScheduler(db, { enabled: false, intervalMs: 1, retentionCount: 1 }, () =>
+      assert.fail("disabled backups should not report a failure")
+    );
     assert.equal(disabled, null);
     const failures: unknown[] = [];
-    const unsupported = createAutomaticBackupScheduler(db, { enabled: true, intervalMs: 1, retentionCount: 1 }, (error) => failures.push(error));
+    const unsupported = createAutomaticBackupScheduler(
+      db,
+      { enabled: true, intervalMs: 1, retentionCount: 1 },
+      (error) => failures.push(error)
+    );
     assert.equal(unsupported, null);
     assert.match(String(failures[0]), /file-backed SQLite/i);
     assert.equal(db.getSetting("representative") ?? null, null);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 });

@@ -5,16 +5,42 @@ import os from "node:os";
 import path from "node:path";
 import { Unzip, UnzipInflate, Zip, ZipDeflate, strFromU8, strToU8 } from "fflate";
 import { z } from "zod";
-import type { TicketBatchDeliveryFailureContext, TicketBatchExportItemRecord, TicketBatchStaffSyncContext, TicketFollowUpHistoryRecord, TicketMessageRecord, TicketWithUser } from "./db.js";
+import type {
+  TicketBatchDeliveryFailureContext,
+  TicketBatchExportItemRecord,
+  TicketBatchStaffSyncContext,
+  TicketFollowUpHistoryRecord,
+  TicketMessageRecord,
+  TicketWithUser,
+} from "./db.js";
 
 const MAX_ANSWER_TEXT_CHARACTERS = 3500;
 const MAX_INTERNAL_NOTE_CHARACTERS = 2000;
 const MAX_ARCHIVE_FILENAME_LENGTH = 120;
 const ARCHIVE_MTIME = new Date("1980-01-01T00:00:00.000Z");
 const WINDOWS_RESERVED_NAMES = new Set([
-  "CON", "PRN", "AUX", "NUL",
-  "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-  "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+  "CON",
+  "PRN",
+  "AUX",
+  "NUL",
+  "COM1",
+  "COM2",
+  "COM3",
+  "COM4",
+  "COM5",
+  "COM6",
+  "COM7",
+  "COM8",
+  "COM9",
+  "LPT1",
+  "LPT2",
+  "LPT3",
+  "LPT4",
+  "LPT5",
+  "LPT6",
+  "LPT7",
+  "LPT8",
+  "LPT9",
 ]);
 
 export interface TicketBatchSource {
@@ -55,7 +81,7 @@ export interface TicketBatchExportRecord {
   };
   snapshot_token: string;
   messages: TicketMessageRecord[];
-    follow_up_history: TicketFollowUpHistoryRecord[];
+  follow_up_history: TicketFollowUpHistoryRecord[];
   batch_delivery_failure?: TicketBatchDeliveryFailureContext;
   batch_staff_sync?: TicketBatchStaffSyncContext;
 }
@@ -199,39 +225,58 @@ const answerFieldsSchema = z
     ticket_id: z.number().int().min(1),
     snapshot_token: z.string().min(1).max(256),
     action: z.enum(["reply_keep_open", "reply_and_close", "no_action"]),
-    reply_text: z.string().nullable()
+    reply_text: z.string().nullable(),
   })
   .strict();
 
 function validateAnswerText(answer: { action: string; reply_text: string | null }, ctx: z.RefinementCtx): void {
-    if ((answer.action === "reply_keep_open" || answer.action === "reply_and_close") && !answer.reply_text?.trim()) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reply_text"], message: "Reply actions require non-empty reply_text." });
-    }
-    if (answer.action === "no_action" && answer.reply_text !== null) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reply_text"], message: "no_action requires reply_text to be null." });
-    }
-    if (answer.reply_text !== null && Array.from(answer.reply_text).length > MAX_ANSWER_TEXT_CHARACTERS) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reply_text"], message: `reply_text must not exceed ${MAX_ANSWER_TEXT_CHARACTERS} Unicode characters.` });
-    }
+  if ((answer.action === "reply_keep_open" || answer.action === "reply_and_close") && !answer.reply_text?.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reply_text"],
+      message: "Reply actions require non-empty reply_text.",
+    });
+  }
+  if (answer.action === "no_action" && answer.reply_text !== null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reply_text"],
+      message: "no_action requires reply_text to be null.",
+    });
+  }
+  if (answer.reply_text !== null && Array.from(answer.reply_text).length > MAX_ANSWER_TEXT_CHARACTERS) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reply_text"],
+      message: `reply_text must not exceed ${MAX_ANSWER_TEXT_CHARACTERS} Unicode characters.`,
+    });
+  }
 }
 
 const answerSchemaV1 = answerFieldsSchema.superRefine(validateAnswerText).transform((answer): TicketBatchAnswer => ({
   ...answer,
   follow_up_state: "NONE",
   internal_note: null,
-  escalation_target: "NONE"
+  escalation_target: "NONE",
 }));
 
-const answerSchemaV2 = answerFieldsSchema.extend({
-  follow_up_state: z.enum(FOLLOW_UP_STATES),
-  internal_note: z.string().trim().min(1).max(MAX_INTERNAL_NOTE_CHARACTERS).nullable(),
-  escalation_target: z.enum(ESCALATION_TARGETS)
-}).strict().superRefine((answer, ctx) => {
-  validateAnswerText(answer, ctx);
-  if (answer.action === "reply_and_close" && answer.follow_up_state !== "NONE") {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["follow_up_state"], message: "reply_and_close requires follow_up_state NONE." });
-  }
-});
+const answerSchemaV2 = answerFieldsSchema
+  .extend({
+    follow_up_state: z.enum(FOLLOW_UP_STATES),
+    internal_note: z.string().trim().min(1).max(MAX_INTERNAL_NOTE_CHARACTERS).nullable(),
+    escalation_target: z.enum(ESCALATION_TARGETS),
+  })
+  .strict()
+  .superRefine((answer, ctx) => {
+    validateAnswerText(answer, ctx);
+    if (answer.action === "reply_and_close" && answer.follow_up_state !== "NONE") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["follow_up_state"],
+        message: "reply_and_close requires follow_up_state NONE.",
+      });
+    }
+  });
 
 const answerPackageV1Schema = z
   .object({
@@ -240,7 +285,7 @@ const answerPackageV1Schema = z
     export_id: z.string().min(1),
     answer_package_id: z.string().min(1),
     created_at: z.string().datetime(),
-    answers: z.array(answerSchemaV1).min(1)
+    answers: z.array(answerSchemaV1).min(1),
   })
   .strict();
 
@@ -251,7 +296,7 @@ const answerPackageV2Schema = z
     export_id: z.string().min(1),
     answer_package_id: z.string().min(1),
     created_at: z.string().datetime(),
-    answers: z.array(answerSchemaV2).min(1)
+    answers: z.array(answerSchemaV2).min(1),
   })
   .strict();
 
@@ -289,8 +334,8 @@ export function getAnswerPackageHash(answerPackage: TicketAnswerPackage): string
         reply_text: answer.reply_text,
         follow_up_state: answer.follow_up_state,
         internal_note: answer.internal_note,
-        escalation_target: answer.escalation_target
-      }))
+        escalation_target: answer.escalation_target,
+      })),
   };
   return `sha256:${createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex")}`;
 }
@@ -321,8 +366,8 @@ export function getTicketSnapshotToken(ticket: TicketWithUser, messages: TicketM
       media_type: message.media_type,
       filename: message.filename,
       file_id: message.file_id,
-      created_at: message.created_at
-    }))
+      created_at: message.created_at,
+    })),
   };
   return `sha256:${createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex")}`;
 }
@@ -341,7 +386,7 @@ export function buildTicketBatchExportSnapshot(input: TicketBatchExportSnapshotI
           sourceMessageId: message.source_message_id,
           fileId: message.file_id,
           mediaType: message.media_type,
-          filename: message.filename
+          filename: message.filename,
         });
       }
     }
@@ -358,19 +403,19 @@ export function buildTicketBatchExportSnapshot(input: TicketBatchExportSnapshotI
         follow_up_updated_at: ticket.follow_up_updated_at,
         follow_up_source_answer_package_id: ticket.follow_up_source_answer_package_id,
         created_at: ticket.created_at,
-        updated_at: ticket.updated_at
+        updated_at: ticket.updated_at,
       },
       user: {
         telegram_id: ticket.user_telegram_id,
         username: ticket.username,
         first_name: ticket.first_name,
-        last_name: ticket.last_name
+        last_name: ticket.last_name,
       },
       snapshot_token: getTicketSnapshotToken(ticket, orderedMessages),
       messages: orderedMessages,
       follow_up_history: [...followUpHistory],
       ...(deliveryFailure ? { batch_delivery_failure: deliveryFailure } : {}),
-      ...(staffSync ? { batch_staff_sync: staffSync } : {})
+      ...(staffSync ? { batch_staff_sync: staffSync } : {}),
     };
   });
   const messageCount = records.reduce((count, record) => count + record.messages.length, 0);
@@ -388,7 +433,7 @@ export function buildTicketBatchExportSnapshot(input: TicketBatchExportSnapshotI
     updated_at: record.ticket.updated_at,
     message_count: record.messages.length,
     attachment_count: record.messages.filter((message) => message.media_type).length,
-    snapshot_token: record.snapshot_token
+    snapshot_token: record.snapshot_token,
   }));
   return {
     exportId: input.exportId,
@@ -414,10 +459,10 @@ export function buildTicketBatchExportSnapshot(input: TicketBatchExportSnapshotI
       answer_schema_file: "answer-package.schema.json",
       expected_answer_filename: `ticket-answers_${input.exportId}.json`,
       attachments_mode: "embedded",
-      tickets: ticketsInventory
+      tickets: ticketsInventory,
     },
     records,
-    attachmentSources
+    attachmentSources,
   };
 }
 
@@ -434,18 +479,30 @@ export async function createTicketBatchZip(
     const manifest: TicketBatchExportManifest = {
       ...snapshot.manifest,
       embedded_attachment_count: embeddedAttachments.length,
-      failed_attachment_count: attachments.length - embeddedAttachments.length
+      failed_attachment_count: attachments.length - embeddedAttachments.length,
     };
     const records = renderTicketRecords(snapshot, attachments);
     const mediaIndex = attachments.map(stripDiskPath);
     const entries: ArchiveEntry[] = [
       { archivePath: "manifest.json", bytes: strToU8(`${JSON.stringify(manifest, null, 2)}\n`) },
-      { archivePath: "tickets.jsonl", bytes: strToU8(`${records.map((record) => JSON.stringify(record)).join("\n")}\n`) },
+      {
+        archivePath: "tickets.jsonl",
+        bytes: strToU8(`${records.map((record) => JSON.stringify(record)).join("\n")}\n`),
+      },
       { archivePath: "tickets.md", bytes: strToU8(formatTicketsMarkdown(snapshot, records)) },
       { archivePath: "media-index.json", bytes: strToU8(`${JSON.stringify(mediaIndex, null, 2)}\n`) },
-      { archivePath: "ANSWER_PACKAGE_INSTRUCTIONS.md", bytes: strToU8(buildAnswerPackageInstructions(snapshot.exportId)) },
-      { archivePath: "answer-package.schema.json", bytes: strToU8(`${JSON.stringify(getAnswerPackageJsonSchema(), null, 2)}\n`) },
-      ...embeddedAttachments.map((attachment) => ({ archivePath: attachment.archive_path, filePath: attachment.disk_path }))
+      {
+        archivePath: "ANSWER_PACKAGE_INSTRUCTIONS.md",
+        bytes: strToU8(buildAnswerPackageInstructions(snapshot.exportId)),
+      },
+      {
+        archivePath: "answer-package.schema.json",
+        bytes: strToU8(`${JSON.stringify(getAnswerPackageJsonSchema(), null, 2)}\n`),
+      },
+      ...embeddedAttachments.map((attachment) => ({
+        archivePath: attachment.archive_path,
+        filePath: attachment.disk_path,
+      })),
     ];
     await writeZip(entries, filePath);
     await validateTicketBatchZip(filePath, manifest, records, attachments);
@@ -457,7 +514,7 @@ export async function createTicketBatchZip(
       messageCount: manifest.message_count,
       attachmentCount: attachments.length,
       embeddedAttachmentCount: embeddedAttachments.length,
-      failedAttachmentCount: attachments.length - embeddedAttachments.length
+      failedAttachmentCount: attachments.length - embeddedAttachments.length,
     };
   } catch (error) {
     await fs.rm(directory, { recursive: true, force: true });
@@ -472,7 +529,9 @@ export async function cleanupTicketBatchZip(zip: TemporaryTicketBatchZip): Promi
 export function parseAndValidateAnswerPackage(
   raw: string,
   expectedExportId: string,
-  exportedItems: ReadonlyArray<Pick<TicketBatchExportItemRecord, "ticket_id" | "snapshot_token"> | { ticketId: number; snapshotToken: string }>
+  exportedItems: ReadonlyArray<
+    Pick<TicketBatchExportItemRecord, "ticket_id" | "snapshot_token"> | { ticketId: number; snapshotToken: string }
+  >
 ): TicketAnswerPackage {
   let parsed: unknown;
   try {
@@ -482,7 +541,9 @@ export function parseAndValidateAnswerPackage(
   }
   const result = answerPackageSchema.safeParse(parsed);
   if (!result.success) {
-    throw new TicketBatchValidationError(`Answer package is invalid: ${result.error.issues.map((issue) => issue.message).join(" ")}`);
+    throw new TicketBatchValidationError(
+      `Answer package is invalid: ${result.error.issues.map((issue) => issue.message).join(" ")}`
+    );
   }
   const value = result.data;
   if (value.export_id !== expectedExportId) {
@@ -496,7 +557,9 @@ export function parseAndValidateAnswerPackage(
     }
     seen.add(answer.ticket_id);
     if (!expectedIds.has(answer.ticket_id)) {
-      throw new TicketBatchValidationError(`Answer package includes ticket #${answer.ticket_id}, which was not exported.`);
+      throw new TicketBatchValidationError(
+        `Answer package includes ticket #${answer.ticket_id}, which was not exported.`
+      );
     }
   }
   if (seen.size !== expectedIds.size) {
@@ -527,30 +590,64 @@ export interface TicketBatchPreview {
 
 export function buildAnswerPackagePreview(
   answerPackage: TicketAnswerPackage,
-  exportedItems: ReadonlyArray<Pick<TicketBatchExportItemRecord, "ticket_id" | "snapshot_token"> | { ticketId: number; snapshotToken: string }>,
+  exportedItems: ReadonlyArray<
+    Pick<TicketBatchExportItemRecord, "ticket_id" | "snapshot_token"> | { ticketId: number; snapshotToken: string }
+  >,
   currentTicket: (ticketId: number) => { status: string; snapshotToken: string } | null
 ): TicketBatchPreview {
   const tokens = new Map(exportedItems.map((item) => [itemTicketId(item), itemSnapshotToken(item)]));
-  const totals = { readyReplyKeepOpen: 0, readyReplyClose: 0, noAction: 0, staleChanged: 0, inactiveClosed: 0, validationFailures: 0, manualReview: 0 };
-  const entries = [...answerPackage.answers].sort((left, right) => left.ticket_id - right.ticket_id).map((answer) => {
-    const current = currentTicket(answer.ticket_id);
-    if (!current || current.status === "CLOSED") {
-      totals.inactiveClosed += 1;
-      return { ticketId: answer.ticket_id, classification: "inactive/closed" as const, action: answer.action, replyText: answer.reply_text };
-    }
-    if (current.snapshotToken !== tokens.get(answer.ticket_id) || answer.snapshot_token !== tokens.get(answer.ticket_id)) {
-      totals.staleChanged += 1;
-      return { ticketId: answer.ticket_id, classification: "stale/changed" as const, action: answer.action, replyText: answer.reply_text };
-    }
-    if (answer.action === "reply_keep_open") totals.readyReplyKeepOpen += 1;
-    else if (answer.action === "reply_and_close") totals.readyReplyClose += 1;
-    else totals.noAction += 1;
-    return { ticketId: answer.ticket_id, classification: "ready" as const, action: answer.action, replyText: answer.reply_text };
-  });
+  const totals = {
+    readyReplyKeepOpen: 0,
+    readyReplyClose: 0,
+    noAction: 0,
+    staleChanged: 0,
+    inactiveClosed: 0,
+    validationFailures: 0,
+    manualReview: 0,
+  };
+  const entries = [...answerPackage.answers]
+    .sort((left, right) => left.ticket_id - right.ticket_id)
+    .map((answer) => {
+      const current = currentTicket(answer.ticket_id);
+      if (!current || current.status === "CLOSED") {
+        totals.inactiveClosed += 1;
+        return {
+          ticketId: answer.ticket_id,
+          classification: "inactive/closed" as const,
+          action: answer.action,
+          replyText: answer.reply_text,
+        };
+      }
+      if (
+        current.snapshotToken !== tokens.get(answer.ticket_id) ||
+        answer.snapshot_token !== tokens.get(answer.ticket_id)
+      ) {
+        totals.staleChanged += 1;
+        return {
+          ticketId: answer.ticket_id,
+          classification: "stale/changed" as const,
+          action: answer.action,
+          replyText: answer.reply_text,
+        };
+      }
+      if (answer.action === "reply_keep_open") totals.readyReplyKeepOpen += 1;
+      else if (answer.action === "reply_and_close") totals.readyReplyClose += 1;
+      else totals.noAction += 1;
+      return {
+        ticketId: answer.ticket_id,
+        classification: "ready" as const,
+        action: answer.action,
+        replyText: answer.reply_text,
+      };
+    });
   return { entries, totals };
 }
 
-export function buildTicketBatchPreviewPages(exportId: string, preview: TicketBatchPreview, maxCharacters = 3900): string[] {
+export function buildTicketBatchPreviewPages(
+  exportId: string,
+  preview: TicketBatchPreview,
+  maxCharacters = 3900
+): string[] {
   const header = formatTicketBatchPreviewHeader(exportId, preview.totals);
   const pages: string[] = [];
   let current: string[] = [];
@@ -559,7 +656,9 @@ export function buildTicketBatchPreviewPages(exportId: string, preview: TicketBa
     const item = formatTicketBatchPreviewEntry(entry);
     const required = item.length + (current.length ? 2 : 0);
     if (header.length + item.length > maxCharacters) {
-      throw new TicketBatchValidationError(`Ticket #${entry.ticketId} preview item is too large to display without truncation.`);
+      throw new TicketBatchValidationError(
+        `Ticket #${entry.ticketId} preview item is too large to display without truncation.`
+      );
     }
     if (current.length && currentLength + required > maxCharacters) {
       pages.push(`${header}\n\n${current.join("\n\n")}`);
@@ -617,60 +716,103 @@ export function buildAnswerPackageInstructions(exportId: string): string {
     "If review is required but the operator has not supplied the needed context, do not guess. During an interactive preparation session, ask first. If a package must be produced before clarification, prefer `no_action` with existing internal follow-up context indicating that manual attachment review is required.",
     "",
     "```json",
-    JSON.stringify({
-      schema: "telegram_ticket_answer_package",
-      version: 2,
-      export_id: exportId,
-      answer_package_id: "answer_package_001",
-      created_at: "2026-07-31T00:00:00.000Z",
-      answers: [
-        { ticket_id: 29, snapshot_token: "<exact snapshot token>", action: "reply_keep_open", reply_text: "...", follow_up_state: "WAITING_DEVS", internal_note: "...", escalation_target: "DEVS" },
-        { ticket_id: 66, snapshot_token: "<exact snapshot token>", action: "reply_and_close", reply_text: "...", follow_up_state: "NONE", internal_note: null, escalation_target: "NONE" },
-        { ticket_id: 75, snapshot_token: "<exact snapshot token>", action: "no_action", reply_text: null, follow_up_state: "MONITORING", internal_note: "...", escalation_target: "PAYMENTS" }
-      ]
-    }, null, 2),
+    JSON.stringify(
+      {
+        schema: "telegram_ticket_answer_package",
+        version: 2,
+        export_id: exportId,
+        answer_package_id: "answer_package_001",
+        created_at: "2026-07-31T00:00:00.000Z",
+        answers: [
+          {
+            ticket_id: 29,
+            snapshot_token: "<exact snapshot token>",
+            action: "reply_keep_open",
+            reply_text: "...",
+            follow_up_state: "WAITING_DEVS",
+            internal_note: "...",
+            escalation_target: "DEVS",
+          },
+          {
+            ticket_id: 66,
+            snapshot_token: "<exact snapshot token>",
+            action: "reply_and_close",
+            reply_text: "...",
+            follow_up_state: "NONE",
+            internal_note: null,
+            escalation_target: "NONE",
+          },
+          {
+            ticket_id: 75,
+            snapshot_token: "<exact snapshot token>",
+            action: "no_action",
+            reply_text: null,
+            follow_up_state: "MONITORING",
+            internal_note: "...",
+            escalation_target: "PAYMENTS",
+          },
+        ],
+      },
+      null,
+      2
+    ),
     "```",
-    ""
+    "",
   ].join("\n");
 }
 
 export function getAnswerPackageJsonSchema(): Record<string, unknown> {
   return {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://agenton.example/schemas/telegram-ticket-answer-package-v2.json",
-    "type": "object",
-    "additionalProperties": false,
-    "required": ["schema", "version", "export_id", "answer_package_id", "created_at", "answers"],
-    "properties": {
-      "schema": { "const": "telegram_ticket_answer_package" },
-      "version": { "const": 2 },
-      "export_id": { "type": "string", "minLength": 1 },
-      "answer_package_id": { "type": "string", "minLength": 1 },
-      "created_at": { "type": "string", "format": "date-time" },
-      "answers": {
-        "type": "array",
-        "minItems": 1,
-        "items": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["ticket_id", "snapshot_token", "action", "reply_text", "follow_up_state", "internal_note", "escalation_target"],
-          "properties": {
-            "ticket_id": { "type": "integer", "minimum": 1 },
-            "snapshot_token": { "type": "string", "minLength": 1, "maxLength": 256 },
-            "action": { "enum": ["no_action", "reply_keep_open", "reply_and_close"] },
-            "reply_text": { "type": ["string", "null"], "maxLength": MAX_ANSWER_TEXT_CHARACTERS },
-            "follow_up_state": { "enum": FOLLOW_UP_STATES },
-            "internal_note": { "type": ["string", "null"], "minLength": 1, "maxLength": MAX_INTERNAL_NOTE_CHARACTERS },
-            "escalation_target": { "enum": ESCALATION_TARGETS }
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://agenton.example/schemas/telegram-ticket-answer-package-v2.json",
+    type: "object",
+    additionalProperties: false,
+    required: ["schema", "version", "export_id", "answer_package_id", "created_at", "answers"],
+    properties: {
+      schema: { const: "telegram_ticket_answer_package" },
+      version: { const: 2 },
+      export_id: { type: "string", minLength: 1 },
+      answer_package_id: { type: "string", minLength: 1 },
+      created_at: { type: "string", format: "date-time" },
+      answers: {
+        type: "array",
+        minItems: 1,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "ticket_id",
+            "snapshot_token",
+            "action",
+            "reply_text",
+            "follow_up_state",
+            "internal_note",
+            "escalation_target",
+          ],
+          properties: {
+            ticket_id: { type: "integer", minimum: 1 },
+            snapshot_token: { type: "string", minLength: 1, maxLength: 256 },
+            action: { enum: ["no_action", "reply_keep_open", "reply_and_close"] },
+            reply_text: { type: ["string", "null"], maxLength: MAX_ANSWER_TEXT_CHARACTERS },
+            follow_up_state: { enum: FOLLOW_UP_STATES },
+            internal_note: { type: ["string", "null"], minLength: 1, maxLength: MAX_INTERNAL_NOTE_CHARACTERS },
+            escalation_target: { enum: ESCALATION_TARGETS },
           },
-          "allOf": [
-            { "if": { "properties": { "action": { "const": "no_action" } } }, "then": { "properties": { "reply_text": { "type": "null" } } } },
-            { "if": { "properties": { "action": { "enum": ["reply_keep_open", "reply_and_close"] } } }, "then": { "properties": { "reply_text": { "type": "string", "minLength": 1 } } } }
-          ]
-        }
-      }
+          allOf: [
+            {
+              if: { properties: { action: { const: "no_action" } } },
+              then: { properties: { reply_text: { type: "null" } } },
+            },
+            {
+              if: { properties: { action: { enum: ["reply_keep_open", "reply_and_close"] } } },
+              then: { properties: { reply_text: { type: "string", minLength: 1 } } },
+            },
+          ],
+        },
+      },
     },
-    "$comment": "Runtime validation also requires answer ticket IDs to be unique and to match the complete exported ticket set exactly. Version 1 packages remain accepted for backward compatibility."
+    $comment:
+      "Runtime validation also requires answer ticket IDs to be unique and to match the complete exported ticket set exactly. Version 1 packages remain accepted for backward compatibility.",
   };
 }
 
@@ -681,14 +823,20 @@ async function embedAttachments(
 ): Promise<TicketBatchExportAttachment[]> {
   const attachments: TicketBatchExportAttachment[] = [];
   const usedPaths = new Set<string>();
-  const messageById = new Map(snapshot.records.flatMap((record) => record.messages.map((message) => [message.id, message])));
+  const messageById = new Map(
+    snapshot.records.flatMap((record) => record.messages.map((message) => [message.id, message]))
+  );
   for (const source of snapshot.attachmentSources) {
     if (!source.fileId) {
-      throw new TicketBatchValidationError(`Ticket #${source.ticketId} message ${source.messageId} has no downloadable media reference.`);
+      throw new TicketBatchValidationError(
+        `Ticket #${source.ticketId} message ${source.messageId} has no downloadable media reference.`
+      );
     }
     const message = messageById.get(source.messageId);
     if (!message) {
-      throw new TicketBatchValidationError(`Ticket #${source.ticketId} message ${source.messageId} could not be mapped into the export.`);
+      throw new TicketBatchValidationError(
+        `Ticket #${source.ticketId} message ${source.messageId} could not be mapped into the export.`
+      );
     }
     const downloaded = await downloadAttachment(source);
     if (isUnavailableAttachment(downloaded)) {
@@ -703,12 +851,14 @@ async function embedAttachments(
         original_filename: source.filename,
         embedded: false,
         failure_category: downloaded.failureCategory,
-        failure_reason: downloaded.failureReason
+        failure_reason: downloaded.failureReason,
       });
       continue;
     }
     if (!(downloaded.bytes instanceof Uint8Array) || downloaded.bytes.byteLength === 0) {
-      throw new TicketBatchValidationError(`Ticket #${source.ticketId} message ${source.messageId} attachment could not be embedded.`);
+      throw new TicketBatchValidationError(
+        `Ticket #${source.ticketId} message ${source.messageId} attachment could not be embedded.`
+      );
     }
     const filename = uniqueAttachmentFilename(
       safeArchiveFilename(source.filename, source.mediaType, downloaded.telegramFilePath, downloaded.mimeType),
@@ -735,15 +885,21 @@ async function embedAttachments(
       byte_length: stored.byteLength,
       sha256,
       embedded: true,
-      disk_path: diskPath
+      disk_path: diskPath,
     });
   }
-  return attachments.sort((left, right) =>
-    left.ticket_id - right.ticket_id || left.database_message_id - right.database_message_id || attachmentSortKey(left).localeCompare(attachmentSortKey(right))
+  return attachments.sort(
+    (left, right) =>
+      left.ticket_id - right.ticket_id ||
+      left.database_message_id - right.database_message_id ||
+      attachmentSortKey(left).localeCompare(attachmentSortKey(right))
   );
 }
 
-function renderTicketRecords(snapshot: TicketBatchExportSnapshot, attachments: TicketBatchExportAttachment[]): Array<Record<string, unknown>> {
+function renderTicketRecords(
+  snapshot: TicketBatchExportSnapshot,
+  attachments: TicketBatchExportAttachment[]
+): Array<Record<string, unknown>> {
   const attachmentsByMessage = new Map<number, TicketBatchExportAttachment[]>();
   for (const attachment of attachments) {
     const items = attachmentsByMessage.get(attachment.database_message_id) ?? [];
@@ -775,7 +931,7 @@ function renderTicketRecords(snapshot: TicketBatchExportSnapshot, attachments: T
       internal_note: entry.internal_note,
       escalation_target: entry.escalation_target,
       source_answer_package_id: entry.source_answer_package_id,
-      created_at: entry.created_at
+      created_at: entry.created_at,
     })),
     messages: record.messages.map((message) => ({
       message_id: message.id,
@@ -789,8 +945,8 @@ function renderTicketRecords(snapshot: TicketBatchExportSnapshot, attachments: T
       text: message.media_type ? null : message.text,
       caption: message.media_type ? message.text : null,
       media_type: message.media_type,
-      attachments: (attachmentsByMessage.get(message.id) ?? []).map(stripDiskPath)
-    }))
+      attachments: (attachmentsByMessage.get(message.id) ?? []).map(stripDiskPath),
+    })),
   }));
 }
 
@@ -802,19 +958,56 @@ function formatTicketsMarkdown(snapshot: TicketBatchExportSnapshot, records: Arr
     `Created at: ${snapshot.createdAt}`,
     `Tickets: ${snapshot.manifest.ticket_count}`,
     `Expected response file: ticket-answers_${snapshot.exportId}.json`,
-    ""
+    "",
   ];
   for (const record of records) {
     const ticket = record as {
-      ticket_id: number; status: string; user_telegram_id: number; username: string | null; first_name: string | null; last_name: string | null;
-      created_at: string; updated_at: string; snapshot_token: string; follow_up_state: string; internal_note: string | null; escalation_target: string; follow_up_updated_at: string | null;
-      messages: Array<{ timestamp: string; sender_type: string | null; direction: string; text: string | null; caption: string | null; attachments: TicketBatchExportAttachment[] }>;
+      ticket_id: number;
+      status: string;
+      user_telegram_id: number;
+      username: string | null;
+      first_name: string | null;
+      last_name: string | null;
+      created_at: string;
+      updated_at: string;
+      snapshot_token: string;
+      follow_up_state: string;
+      internal_note: string | null;
+      escalation_target: string;
+      follow_up_updated_at: string | null;
+      messages: Array<{
+        timestamp: string;
+        sender_type: string | null;
+        direction: string;
+        text: string | null;
+        caption: string | null;
+        attachments: TicketBatchExportAttachment[];
+      }>;
     };
-    lines.push(`## Ticket #${ticket.ticket_id}`, "", `- Status: ${ticket.status}`, `- User Telegram ID: ${ticket.user_telegram_id}`);
+    lines.push(
+      `## Ticket #${ticket.ticket_id}`,
+      "",
+      `- Status: ${ticket.status}`,
+      `- User Telegram ID: ${ticket.user_telegram_id}`
+    );
     if (ticket.username) lines.push(`- Username: @${ticket.username}`);
     if (ticket.first_name) lines.push(`- First name: ${ticket.first_name}`);
     if (ticket.last_name) lines.push(`- Last name: ${ticket.last_name}`);
-    lines.push(`- Created: ${ticket.created_at}`, `- Updated: ${ticket.updated_at}`, `- Snapshot token: ${ticket.snapshot_token}`, "", "### Current follow-up", "", `- State: ${formatFollowUpForExport(ticket.follow_up_state)}`, `- Escalation: ${formatEscalationForExport(ticket.escalation_target)}`, `- Internal note: ${ticket.internal_note ?? "None"}`, `- Last staff reply: ${ticket.follow_up_updated_at ?? "None"}`, "", "### Conversation", "");
+    lines.push(
+      `- Created: ${ticket.created_at}`,
+      `- Updated: ${ticket.updated_at}`,
+      `- Snapshot token: ${ticket.snapshot_token}`,
+      "",
+      "### Current follow-up",
+      "",
+      `- State: ${formatFollowUpForExport(ticket.follow_up_state)}`,
+      `- Escalation: ${formatEscalationForExport(ticket.escalation_target)}`,
+      `- Internal note: ${ticket.internal_note ?? "None"}`,
+      `- Last staff reply: ${ticket.follow_up_updated_at ?? "None"}`,
+      "",
+      "### Conversation",
+      ""
+    );
     for (const message of ticket.messages) {
       lines.push(`#### ${message.timestamp} - ${message.sender_type ?? "UNKNOWN"}/${message.direction}`, "");
       const content = message.text ?? message.caption;
@@ -825,7 +1018,11 @@ function formatTicketsMarkdown(snapshot: TicketBatchExportSnapshot, records: Arr
           if (attachment.embedded) {
             lines.push(`- ${titleCase(attachment.media_type)}: \`${attachment.archive_path}\``);
           } else {
-            lines.push(`- ${titleCase(attachment.media_type)}: ${attachment.original_filename ?? "unnamed attachment"}`, "  Status: unavailable", "  Reason: exceeds the hosted Telegram Bot API download limit");
+            lines.push(
+              `- ${titleCase(attachment.media_type)}: ${attachment.original_filename ?? "unnamed attachment"}`,
+              "  Status: unavailable",
+              "  Reason: exceeds the hosted Telegram Bot API download limit"
+            );
           }
         }
         lines.push("");
@@ -850,7 +1047,8 @@ async function writeZip(entries: ArchiveEntry[], filePath: string): Promise<void
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
-      if (error) reject(error); else resolve();
+      if (error) reject(error);
+      else resolve();
     };
     const output = createWriteStream(filePath, { mode: 0o600 });
     const zip = new Zip((error, chunk, final) => {
@@ -893,8 +1091,13 @@ async function validateTicketBatchZip(
 ): Promise<void> {
   const embeddedAttachments = attachments.filter(isEmbeddedAttachment);
   const expectedPaths = new Set([
-    "manifest.json", "tickets.jsonl", "tickets.md", "media-index.json", "ANSWER_PACKAGE_INSTRUCTIONS.md", "answer-package.schema.json",
-    ...embeddedAttachments.map((attachment) => attachment.archive_path)
+    "manifest.json",
+    "tickets.jsonl",
+    "tickets.md",
+    "media-index.json",
+    "ANSWER_PACKAGE_INSTRUCTIONS.md",
+    "answer-package.schema.json",
+    ...embeddedAttachments.map((attachment) => attachment.archive_path),
   ]);
   const attachmentsByPath = new Map(embeddedAttachments.map((attachment) => [attachment.archive_path, attachment]));
   const metadataEntries = new Map<string, Uint8Array[]>();
@@ -923,11 +1126,14 @@ async function validateTicketBatchZip(
         metadataEntries.set(file.name, chunks);
         metadataLengths.set(file.name, (metadataLengths.get(file.name) ?? 0) + chunk.byteLength);
       }
-      if (final && attachment && (
-        byteLength !== attachment.byte_length ||
-        `sha256:${hash!.digest("hex")}` !== attachment.sha256
-      )) {
-        validationError ??= new TicketBatchValidationError(`Ticket #${attachment.ticket_id} message ${attachment.database_message_id} attachment integrity validation failed.`);
+      if (
+        final &&
+        attachment &&
+        (byteLength !== attachment.byte_length || `sha256:${hash!.digest("hex")}` !== attachment.sha256)
+      ) {
+        validationError ??= new TicketBatchValidationError(
+          `Ticket #${attachment.ticket_id} message ${attachment.database_message_id} attachment integrity validation failed.`
+        );
       }
     };
     file.start();
@@ -940,16 +1146,26 @@ async function validateTicketBatchZip(
     }
     unzip.push(new Uint8Array(), true);
   } catch (error) {
-    throw error instanceof TicketBatchValidationError ? error : new TicketBatchValidationError("Ticket export ZIP could not be reopened and validated.");
+    throw error instanceof TicketBatchValidationError
+      ? error
+      : new TicketBatchValidationError("Ticket export ZIP could not be reopened and validated.");
   }
   if (validationError) throw validationError;
   if (seenPaths.size !== expectedPaths.size || [...seenPaths].some((archivePath) => !expectedPaths.has(archivePath))) {
     throw new TicketBatchValidationError("Ticket export ZIP did not contain the expected files.");
   }
-  const parsedManifest = JSON.parse(strFromU8(requiredMetadataEntry(metadataEntries, metadataLengths, "manifest.json"))) as TicketBatchExportManifest;
-  const parsedMediaIndex = JSON.parse(strFromU8(requiredMetadataEntry(metadataEntries, metadataLengths, "media-index.json"))) as TicketBatchExportAttachment[];
+  const parsedManifest = JSON.parse(
+    strFromU8(requiredMetadataEntry(metadataEntries, metadataLengths, "manifest.json"))
+  ) as TicketBatchExportManifest;
+  const parsedMediaIndex = JSON.parse(
+    strFromU8(requiredMetadataEntry(metadataEntries, metadataLengths, "media-index.json"))
+  ) as TicketBatchExportAttachment[];
   JSON.parse(strFromU8(requiredMetadataEntry(metadataEntries, metadataLengths, "answer-package.schema.json")));
-  const parsedRecords = strFromU8(requiredMetadataEntry(metadataEntries, metadataLengths, "tickets.jsonl")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  const parsedRecords = strFromU8(requiredMetadataEntry(metadataEntries, metadataLengths, "tickets.jsonl"))
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
   const parsedMessageCount = parsedRecords.reduce((count, record) => {
     return count + (isRecord(record) && Array.isArray(record.messages) ? record.messages.length : 0);
   }, 0);
@@ -966,17 +1182,27 @@ async function validateTicketBatchZip(
   }
   const expectedAttachmentMetadata = attachments.map((attachment) => JSON.stringify(stripDiskPath(attachment))).sort();
   const mediaIndexMetadata = parsedMediaIndex.map((attachment) => JSON.stringify(attachment)).sort();
-  const recordAttachmentMetadata = parsedRecords.flatMap((record) => {
-    const messages = isRecord(record) && Array.isArray(record.messages) ? record.messages : [];
-    return messages.flatMap((message) => isRecord(message) && Array.isArray(message.attachments)
-      ? message.attachments.filter(isRecord).map((attachment) => JSON.stringify(attachment))
-      : []);
-  }).sort();
-  if (!sameStringArray(expectedAttachmentMetadata, mediaIndexMetadata) || !sameStringArray(expectedAttachmentMetadata, recordAttachmentMetadata)) {
+  const recordAttachmentMetadata = parsedRecords
+    .flatMap((record) => {
+      const messages = isRecord(record) && Array.isArray(record.messages) ? record.messages : [];
+      return messages.flatMap((message) =>
+        isRecord(message) && Array.isArray(message.attachments)
+          ? message.attachments.filter(isRecord).map((attachment) => JSON.stringify(attachment))
+          : []
+      );
+    })
+    .sort();
+  if (
+    !sameStringArray(expectedAttachmentMetadata, mediaIndexMetadata) ||
+    !sameStringArray(expectedAttachmentMetadata, recordAttachmentMetadata)
+  ) {
     throw new TicketBatchValidationError("Ticket export ZIP attachment metadata did not match embedded files.");
   }
   for (const attachment of embeddedAttachments) {
-    const mediaIndexItem = parsedMediaIndex.find((item): item is TicketBatchEmbeddedAttachment => isEmbeddedAttachment(item) && item.archive_path === attachment.archive_path);
+    const mediaIndexItem = parsedMediaIndex.find(
+      (item): item is TicketBatchEmbeddedAttachment =>
+        isEmbeddedAttachment(item) && item.archive_path === attachment.archive_path
+    );
     if (
       !mediaIndexItem ||
       mediaIndexItem.ticket_id !== attachment.ticket_id ||
@@ -989,7 +1215,11 @@ async function validateTicketBatchZip(
   }
 }
 
-function requiredMetadataEntry(chunksByPath: ReadonlyMap<string, Uint8Array[]>, lengthsByPath: ReadonlyMap<string, number>, archivePath: string): Uint8Array {
+function requiredMetadataEntry(
+  chunksByPath: ReadonlyMap<string, Uint8Array[]>,
+  lengthsByPath: ReadonlyMap<string, number>,
+  archivePath: string
+): Uint8Array {
   const chunks = chunksByPath.get(archivePath);
   if (!chunks) throw new TicketBatchValidationError(`Ticket export ZIP is missing ${archivePath}.`);
   const bytes = new Uint8Array(lengthsByPath.get(archivePath) ?? 0);
@@ -1009,7 +1239,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function stripDiskPath(attachment: TicketBatchExportAttachment): Omit<TicketBatchEmbeddedAttachment, "disk_path"> | TicketBatchUnavailableAttachment {
+function stripDiskPath(
+  attachment: TicketBatchExportAttachment
+): Omit<TicketBatchEmbeddedAttachment, "disk_path"> | TicketBatchUnavailableAttachment {
   if (!attachment.embedded) return attachment;
   const { disk_path: _diskPath, ...value } = attachment;
   return value;
@@ -1019,16 +1251,26 @@ function isEmbeddedAttachment(attachment: TicketBatchExportAttachment): attachme
   return attachment.embedded;
 }
 
-function isUnavailableAttachment(result: TicketBatchAttachmentDownloadResult): result is UnavailableTicketBatchAttachment {
+function isUnavailableAttachment(
+  result: TicketBatchAttachmentDownloadResult
+): result is UnavailableTicketBatchAttachment {
   return "unavailable" in result && result.unavailable;
 }
 
 function attachmentSortKey(attachment: TicketBatchExportAttachment): string {
-  return attachment.embedded ? attachment.archive_path : attachment.original_filename ?? attachment.failure_category;
+  return attachment.embedded ? attachment.archive_path : (attachment.original_filename ?? attachment.failure_category);
 }
 
-function safeArchiveFilename(originalFilename: string | null, mediaType: string, telegramFilePath?: string | null, mimeType?: string | null): string {
-  const candidate = originalFilename?.trim() || path.posix.basename(telegramFilePath ?? "") || `${mediaType}.${extensionFor(mediaType, mimeType)}`;
+function safeArchiveFilename(
+  originalFilename: string | null,
+  mediaType: string,
+  telegramFilePath?: string | null,
+  mimeType?: string | null
+): string {
+  const candidate =
+    originalFilename?.trim() ||
+    path.posix.basename(telegramFilePath ?? "") ||
+    `${mediaType}.${extensionFor(mediaType, mimeType)}`;
   let safe = candidate
     .replace(/[\u0000-\u001F\u007F]/g, "_")
     .replace(/[\\/:*?"<>|]/g, "_")
@@ -1045,7 +1287,12 @@ function safeArchiveFilename(originalFilename: string | null, mediaType: string,
   return `${stem.slice(0, Math.max(1, MAX_ARCHIVE_FILENAME_LENGTH - extension.length))}${extension || `.${extensionFor(mediaType, mimeType)}`}`;
 }
 
-function uniqueAttachmentFilename(filename: string, ticketId: number, messageId: number, usedPaths: Set<string>): string {
+function uniqueAttachmentFilename(
+  filename: string,
+  ticketId: number,
+  messageId: number,
+  usedPaths: Set<string>
+): string {
   const directory = `attachments/ticket-${ticketId}/message-${messageId}`;
   const extension = path.extname(filename);
   const stem = extension ? filename.slice(0, -extension.length) : filename;
@@ -1060,9 +1307,17 @@ function uniqueAttachmentFilename(filename: string, ticketId: number, messageId:
 }
 
 function isSafeArchivePath(value: string): boolean {
-  return /^attachments\/ticket-\d+\/message-\d+\/[A-Za-z0-9][A-Za-z0-9._ -]*$/.test(value) || [
-    "manifest.json", "tickets.jsonl", "tickets.md", "media-index.json", "ANSWER_PACKAGE_INSTRUCTIONS.md", "answer-package.schema.json"
-  ].includes(value);
+  return (
+    /^attachments\/ticket-\d+\/message-\d+\/[A-Za-z0-9][A-Za-z0-9._ -]*$/.test(value) ||
+    [
+      "manifest.json",
+      "tickets.jsonl",
+      "tickets.md",
+      "media-index.json",
+      "ANSWER_PACKAGE_INSTRUCTIONS.md",
+      "answer-package.schema.json",
+    ].includes(value)
+  );
 }
 
 function formatTicketBatchPreviewHeader(exportId: string, totals: TicketBatchPreview["totals"]): string {
@@ -1072,7 +1327,7 @@ function formatTicketBatchPreviewHeader(exportId: string, totals: TicketBatchPre
     "Package status: PENDING",
     `Expected tickets: ${totals.readyReplyKeepOpen + totals.readyReplyClose + totals.noAction + totals.staleChanged + totals.inactiveClosed + totals.validationFailures + totals.manualReview}`,
     `Ready: ${totals.readyReplyKeepOpen + totals.readyReplyClose} | keep open: ${totals.readyReplyKeepOpen} | close: ${totals.readyReplyClose} | no action: ${totals.noAction}`,
-    `Blocked: stale: ${totals.staleChanged} | inactive: ${totals.inactiveClosed} | validation: ${totals.validationFailures} | manual review: ${totals.manualReview}`
+    `Blocked: stale: ${totals.staleChanged} | inactive: ${totals.inactiveClosed} | validation: ${totals.validationFailures} | manual review: ${totals.manualReview}`,
   ].join("\n");
 }
 
@@ -1081,7 +1336,7 @@ function formatTicketBatchPreviewEntry(entry: TicketBatchPreviewEntry): string {
     `Ticket #${entry.ticketId}`,
     `Classification: ${entry.classification}`,
     `Action: ${entry.action}`,
-    entry.action === "no_action" ? "Reply: no_action" : `Reply:\n${entry.replyText ?? ""}`
+    entry.action === "no_action" ? "Reply: no_action" : `Reply:\n${entry.replyText ?? ""}`,
   ].join("\n");
 }
 
@@ -1105,19 +1360,55 @@ function extensionFor(mediaType: string, mimeType?: string | null): string {
   if (mimeType === "video/mp4") return "mp4";
   if (mimeType === "audio/mpeg") return "mp3";
   if (mimeType === "audio/ogg") return "ogg";
-  return ({ photo: "jpg", video: "mp4", animation: "gif", audio: "mp3", voice: "ogg", video_note: "mp4", sticker: "webp" } as Record<string, string>)[mediaType] ?? "bin";
+  return (
+    (
+      {
+        photo: "jpg",
+        video: "mp4",
+        animation: "gif",
+        audio: "mp3",
+        voice: "ogg",
+        video_note: "mp4",
+        sticker: "webp",
+      } as Record<string, string>
+    )[mediaType] ?? "bin"
+  );
 }
 
 function titleCase(value: string): string {
-  return value.split(/[_-]/).map((part) => part.slice(0, 1).toUpperCase() + part.slice(1)).join(" ");
+  return value
+    .split(/[_-]/)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function formatFollowUpForExport(value: string): string {
-  return ({ NONE: "None", WAITING_USER: "Waiting for user", WAITING_DEVS: "Waiting for developers", WAITING_QUEST_OWNER: "Waiting for quest owner", MONITORING: "Monitoring" } as Record<string, string>)[value] ?? value;
+  return (
+    (
+      {
+        NONE: "None",
+        WAITING_USER: "Waiting for user",
+        WAITING_DEVS: "Waiting for developers",
+        WAITING_QUEST_OWNER: "Waiting for quest owner",
+        MONITORING: "Monitoring",
+      } as Record<string, string>
+    )[value] ?? value
+  );
 }
 
 function formatEscalationForExport(value: string): string {
-  return ({ NONE: "None", DEVS: "Development", PAYMENTS: "Payments", SECURITY: "Security", QUEST_OWNER: "Quest owner", SUPPORT: "Support" } as Record<string, string>)[value] ?? value;
+  return (
+    (
+      {
+        NONE: "None",
+        DEVS: "Development",
+        PAYMENTS: "Payments",
+        SECURITY: "Security",
+        QUEST_OWNER: "Quest owner",
+        SUPPORT: "Support",
+      } as Record<string, string>
+    )[value] ?? value
+  );
 }
 
 function compareMessages(left: TicketMessageRecord, right: TicketMessageRecord): number {
@@ -1128,10 +1419,16 @@ function itemTicketId(item: Pick<TicketBatchExportItemRecord, "ticket_id"> | { t
   return "ticket_id" in item ? item.ticket_id : item.ticketId;
 }
 
-function itemSnapshotToken(item: Pick<TicketBatchExportItemRecord, "snapshot_token"> | { snapshotToken: string }): string {
+function itemSnapshotToken(
+  item: Pick<TicketBatchExportItemRecord, "snapshot_token"> | { snapshotToken: string }
+): string {
   return "snapshot_token" in item ? item.snapshot_token : item.snapshotToken;
 }
 
-async function missingAttachmentDownloader(source: Readonly<TicketBatchAttachmentSource>): Promise<DownloadedTicketBatchAttachment> {
-  throw new TicketBatchValidationError(`Ticket #${source.ticketId} message ${source.messageId} attachment could not be downloaded.`);
+async function missingAttachmentDownloader(
+  source: Readonly<TicketBatchAttachmentSource>
+): Promise<DownloadedTicketBatchAttachment> {
+  throw new TicketBatchValidationError(
+    `Ticket #${source.ticketId} message ${source.messageId} attachment could not be downloaded.`
+  );
 }

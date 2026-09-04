@@ -46,7 +46,10 @@ it("upgrades a v1.2.1 ticket batch schema through the current migrations without
   const timestamp = "2026-07-31T00:00:00.000Z";
   const insertMigration = legacy.prepare("INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)");
   for (let id = 1; id <= 12; id += 1) insertMigration.run(id, `migration_${id}`, timestamp);
-  legacy.prepare("INSERT INTO ticket_batch_exports (export_id, staff_chat_id, created_at, selection_mode, ticket_count) VALUES (?, ?, ?, ?, ?)")
+  legacy
+    .prepare(
+      "INSERT INTO ticket_batch_exports (export_id, staff_chat_id, created_at, selection_mode, ticket_count) VALUES (?, ?, ?, ?, ?)"
+    )
     .run("legacy_export", -100900, timestamp, "all_active", 1);
   legacy.close();
 
@@ -54,19 +57,46 @@ it("upgrades a v1.2.1 ticket batch schema through the current migrations without
   upgraded.close();
   const inspected = new Database(databasePath, { readonly: true });
   try {
-    const migrationIds = inspected.prepare("SELECT id FROM schema_migrations ORDER BY id ASC").all() as Array<{ id: number }>;
+    const migrationIds = inspected.prepare("SELECT id FROM schema_migrations ORDER BY id ASC").all() as Array<{
+      id: number;
+    }>;
     const exportColumns = inspected.prepare("PRAGMA table_info(ticket_batch_exports)").all() as Array<{ name: string }>;
-    const packageColumns = inspected.prepare("PRAGMA table_info(ticket_batch_answer_packages)").all() as Array<{ name: string }>;
-    const legacyExport = inspected.prepare("SELECT delivery_state, delivery_message_id, delivered_at, last_error FROM ticket_batch_exports WHERE export_id = ?")
-      .get("legacy_export") as { delivery_state: string; delivery_message_id: number | null; delivered_at: string | null; last_error: string | null };
+    const packageColumns = inspected.prepare("PRAGMA table_info(ticket_batch_answer_packages)").all() as Array<{
+      name: string;
+    }>;
+    const legacyExport = inspected
+      .prepare(
+        "SELECT delivery_state, delivery_message_id, delivered_at, last_error FROM ticket_batch_exports WHERE export_id = ?"
+      )
+      .get("legacy_export") as {
+      delivery_state: string;
+      delivery_message_id: number | null;
+      delivered_at: string | null;
+      last_error: string | null;
+    };
 
-    const itemColumns = inspected.prepare("PRAGMA table_info(ticket_batch_answer_items)").all() as Array<{ name: string }>;
+    const itemColumns = inspected.prepare("PRAGMA table_info(ticket_batch_answer_items)").all() as Array<{
+      name: string;
+    }>;
     const ticketColumns = inspected.prepare("PRAGMA table_info(tickets)").all() as Array<{ name: string }>;
-    assert.deepEqual(migrationIds.map((row) => row.id), Array.from({ length: 23 }, (_, index) => index + 1));
-    assert.ok(inspected.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'installation_state'").get());
+    assert.deepEqual(
+      migrationIds.map((row) => row.id),
+      Array.from({ length: 23 }, (_, index) => index + 1)
+    );
+    assert.ok(
+      inspected.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'installation_state'").get()
+    );
     assert.ok(inspected.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_members'").get());
-    assert.deepEqual(exportColumns.map((column) => column.name).filter((name) => name.startsWith("delivery_") || name === "delivered_at" || name === "last_error"), ["delivery_state", "delivery_message_id", "delivered_at", "last_error"]);
-    assert.deepEqual(packageColumns.map((column) => column.name).filter((name) => name.startsWith("preview_")), ["preview_token", "preview_chat_id", "preview_message_id", "preview_page"]);
+    assert.deepEqual(
+      exportColumns
+        .map((column) => column.name)
+        .filter((name) => name.startsWith("delivery_") || name === "delivered_at" || name === "last_error"),
+      ["delivery_state", "delivery_message_id", "delivered_at", "last_error"]
+    );
+    assert.deepEqual(
+      packageColumns.map((column) => column.name).filter((name) => name.startsWith("preview_")),
+      ["preview_token", "preview_chat_id", "preview_message_id", "preview_page"]
+    );
     assert.ok(itemColumns.some((column) => column.name === "topic_echo_state"));
     assert.ok(itemColumns.some((column) => column.name === "delivery_error_category"));
     assert.ok(itemColumns.some((column) => column.name === "delivery_failure_event_message_id"));
@@ -77,7 +107,12 @@ it("upgrades a v1.2.1 ticket batch schema through the current migrations without
     assert.ok(itemColumns.some((column) => column.name === "topic_echo_terminal_at"));
     assert.ok(itemColumns.some((column) => column.name === "delivery_failure_event_next_retry_at"));
     assert.ok(ticketColumns.some((column) => column.name === "follow_up_state"));
-    assert.deepEqual(legacyExport, { delivery_state: "DELIVERED", delivery_message_id: null, delivered_at: null, last_error: null });
+    assert.deepEqual(legacyExport, {
+      delivery_state: "DELIVERED",
+      delivery_message_id: null,
+      delivered_at: null,
+      last_error: null,
+    });
   } finally {
     inspected.close();
   }
@@ -106,7 +141,10 @@ it("normalizes a legacy terminal staff event and retains its safe category", asy
   const migration = legacy.prepare("INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)");
   for (let id = 1; id <= 16; id += 1) migration.run(id, `migration_${id}`, timestamp);
   legacy.prepare("INSERT INTO tickets (id, status) VALUES (29, 'OPEN')").run();
-  legacy.prepare(`INSERT INTO ticket_batch_answer_items VALUES (?, 29, 'no_action', 'WAITING_USER', 'context', 'NONE', 'FAILED', 'TELEGRAM_BAD_REQUEST', '9999-12-31T23:59:59.999Z', 'NOT_REQUIRED', NULL, ?)`)
+  legacy
+    .prepare(
+      `INSERT INTO ticket_batch_answer_items VALUES (?, 29, 'no_action', 'WAITING_USER', 'context', 'NONE', 'FAILED', 'TELEGRAM_BAD_REQUEST', '9999-12-31T23:59:59.999Z', 'NOT_REQUIRED', NULL, ?)`
+    )
     .run("terminal", timestamp);
   legacy.close();
 
@@ -114,9 +152,16 @@ it("normalizes a legacy terminal staff event and retains its safe category", asy
   upgraded.close();
   const inspected = new Database(databasePath, { readonly: true });
   try {
-    const item = inspected.prepare(`SELECT topic_echo_state, topic_echo_next_retry_at, topic_echo_error_category, topic_echo_terminal_at
-      FROM ticket_batch_answer_items WHERE answer_package_id = 'terminal'`).get() as {
-      topic_echo_state: string; topic_echo_next_retry_at: string | null; topic_echo_error_category: string | null; topic_echo_terminal_at: string | null;
+    const item = inspected
+      .prepare(
+        `SELECT topic_echo_state, topic_echo_next_retry_at, topic_echo_error_category, topic_echo_terminal_at
+      FROM ticket_batch_answer_items WHERE answer_package_id = 'terminal'`
+      )
+      .get() as {
+      topic_echo_state: string;
+      topic_echo_next_retry_at: string | null;
+      topic_echo_error_category: string | null;
+      topic_echo_terminal_at: string | null;
     };
     assert.equal(item.topic_echo_state, "TERMINAL_FAILED");
     assert.equal(item.topic_echo_next_retry_at, null);

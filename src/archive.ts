@@ -4,19 +4,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { config } from "./config.js";
-import {
-  SupportDatabase,
-  type MessageSenderType,
-  type TicketMessageRecord,
-  type TicketWithUser
-} from "./db.js";
+import { SupportDatabase, type MessageSenderType, type TicketMessageRecord, type TicketWithUser } from "./db.js";
 import { formatDate, truncate } from "./format.js";
 import { displayTelegramUser } from "./telegram.js";
 import { logger } from "./logger.js";
-import {
-  normalizeTelegramDeliveryError,
-  type NormalizedDeliveryError
-} from "./deliveryDiagnostics.js";
+import { normalizeTelegramDeliveryError, type NormalizedDeliveryError } from "./deliveryDiagnostics.js";
 
 const SUPPORT_LOGS_TOPIC_NAME = "📜 Support Logs";
 const SUPPORT_LOGS_THREAD_SETTING_PREFIX = "support_logs_message_thread_id";
@@ -72,23 +64,15 @@ export interface SupportLogsTopicInfo {
   state: SupportLogsTopicState;
 }
 
-export async function initializeSupportLogsTopic(
-  api: BotApi,
-  db: SupportDatabase
-): Promise<number> {
+export async function initializeSupportLogsTopic(api: BotApi, db: SupportDatabase): Promise<number> {
   const topic = await getSupportLogsTopicInfo(api, db);
   return topic.threadId;
 }
 
-export async function getSupportLogsTopicInfo(
-  api: BotApi,
-  db: SupportDatabase
-): Promise<SupportLogsTopicInfo> {
+export async function getSupportLogsTopicInfo(api: BotApi, db: SupportDatabase): Promise<SupportLogsTopicInfo> {
   const settingKey = supportLogsThreadSettingKey();
   const storedThreadId = parseStoredThreadId(db.getSetting(settingKey));
-  const storedTicketTopic = storedThreadId
-    ? db.findTicketByStaffThread(config.staffChatId, storedThreadId)
-    : undefined;
+  const storedTicketTopic = storedThreadId ? db.findTicketByStaffThread(config.staffChatId, storedThreadId) : undefined;
 
   if (storedThreadId && !storedTicketTopic) {
     const verification = await verifyForumTopic(api, storedThreadId);
@@ -96,7 +80,7 @@ export async function getSupportLogsTopicInfo(
       return {
         threadId: storedThreadId,
         previousThreadId: null,
-        state: "reachable"
+        state: "reachable",
       };
     }
 
@@ -106,7 +90,7 @@ export async function getSupportLogsTopicInfo(
         return {
           threadId: storedThreadId,
           previousThreadId: null,
-          state: "reopened"
+          state: "reopened",
         };
       } catch (error) {
         if (!isForumTopicUnavailable(error)) {
@@ -121,7 +105,7 @@ export async function getSupportLogsTopicInfo(
   return {
     threadId: topic.message_thread_id,
     previousThreadId: storedThreadId ?? null,
-    state: "created"
+    state: "created",
   };
 }
 
@@ -135,10 +119,7 @@ async function recreateSupportLogsTopic(api: BotApi, db: SupportDatabase): Promi
   return topic.message_thread_id;
 }
 
-export async function archiveClosedTicketsPendingUpload(
-  api: BotApi,
-  db: SupportDatabase
-): Promise<void> {
+export async function archiveClosedTicketsPendingUpload(api: BotApi, db: SupportDatabase): Promise<void> {
   const tickets = db.listClosedTicketsPendingArchive(config.staffChatId);
   for (const ticket of tickets) {
     await archiveTicketIfPossible(api, db, ticket.id);
@@ -185,14 +166,14 @@ export async function archiveTicketIfPossible(
           category: diagnostic.category,
           method: diagnostic.method,
           telegramErrorCode: diagnostic.telegramErrorCode,
-          httpStatus: diagnostic.httpStatus
+          httpStatus: diagnostic.httpStatus,
         },
         "Support Logs topic is unavailable; recreating and retrying transcript upload"
       );
 
       try {
         const delivery = await sendTranscriptToSupportLogs(api, db, ticket, tempFile.filePath, filename, {
-          recreateTopic: true
+          recreateTopic: true,
         });
         db.markTicketArchivedAndDeleteMessages(ticket.id, delivery.summaryMessageId, delivery.documentMessageId);
         await removeTicketTopicAfterArchive(api, ticket);
@@ -200,14 +181,17 @@ export async function archiveTicketIfPossible(
       } catch (retryError) {
         const retryDiagnostic = normalizeTelegramDeliveryError(retryError);
         options.onFailure?.(retryDiagnostic);
-        logger.error({
-          ticketId: ticket.id,
-          stage: "TRANSCRIPT_ARCHIVE_RETRY",
-          category: retryDiagnostic.category,
-          method: retryDiagnostic.method,
-          telegramErrorCode: retryDiagnostic.telegramErrorCode,
-          httpStatus: retryDiagnostic.httpStatus
-        }, "Could not archive ticket transcript after retry");
+        logger.error(
+          {
+            ticketId: ticket.id,
+            stage: "TRANSCRIPT_ARCHIVE_RETRY",
+            category: retryDiagnostic.category,
+            method: retryDiagnostic.method,
+            telegramErrorCode: retryDiagnostic.telegramErrorCode,
+            httpStatus: retryDiagnostic.httpStatus,
+          },
+          "Could not archive ticket transcript after retry"
+        );
         await notifyTicketTopicArchiveFailure(api, ticket, retryDiagnostic.category);
         return false;
       }
@@ -215,14 +199,17 @@ export async function archiveTicketIfPossible(
 
     const diagnostic = normalizeTelegramDeliveryError(error);
     options.onFailure?.(diagnostic);
-    logger.error({
-      ticketId: ticket.id,
-      stage: "TRANSCRIPT_ARCHIVE",
-      category: diagnostic.category,
-      method: diagnostic.method,
-      telegramErrorCode: diagnostic.telegramErrorCode,
-      httpStatus: diagnostic.httpStatus
-    }, "Could not archive ticket transcript");
+    logger.error(
+      {
+        ticketId: ticket.id,
+        stage: "TRANSCRIPT_ARCHIVE",
+        category: diagnostic.category,
+        method: diagnostic.method,
+        telegramErrorCode: diagnostic.telegramErrorCode,
+        httpStatus: diagnostic.httpStatus,
+      },
+      "Could not archive ticket transcript"
+    );
     await notifyTicketTopicArchiveFailure(api, ticket, diagnostic.category);
     return false;
   } finally {
@@ -230,15 +217,11 @@ export async function archiveTicketIfPossible(
   }
 }
 
-export async function logBanEvent(
-  api: BotApi,
-  db: SupportDatabase,
-  input: BanLogInput
-): Promise<void> {
+export async function logBanEvent(api: BotApi, db: SupportDatabase, input: BanLogInput): Promise<void> {
   try {
     const logsThreadId = await initializeSupportLogsTopic(api, db);
     await api.sendMessage(config.staffChatId, formatBanLog(input), {
-      message_thread_id: logsThreadId
+      message_thread_id: logsThreadId,
     });
   } catch (error) {
     logger.error(
@@ -248,21 +231,29 @@ export async function logBanEvent(
   }
 }
 
-export async function logModerationSanction(api: BotApi, db: SupportDatabase, input: ModerationLogInput): Promise<void> {
+export async function logModerationSanction(
+  api: BotApi,
+  db: SupportDatabase,
+  input: ModerationLogInput
+): Promise<void> {
   const topicId = await initializeSupportLogsTopic(api, db);
-  await api.sendMessage(config.staffChatId, [
-    "Public moderation sanction",
-    `User ID: ${input.userTelegramId}`,
-    `Username: ${input.username ? `@${input.username}` : "none"}`,
-    `Public chat ID: ${input.publicChatId}`,
-    `Public chat: ${input.publicChatTitle ?? "unknown"}`,
-    `Public username: ${input.publicChatUsername ? `@${input.publicChatUsername}` : "none"}`,
-    `Topic threads: ${input.messageThreadIds?.length ? input.messageThreadIds.join(", ") : "none"}`,
-    `Sanction tier: ${input.sanctionTier}`,
-    `Sanction: ${input.sanctionKind}`,
-    `UTC: ${input.timestamp}`,
-    "Reason: English-only rule"
-  ].join("\n"), { message_thread_id: topicId });
+  await api.sendMessage(
+    config.staffChatId,
+    [
+      "Public moderation sanction",
+      `User ID: ${input.userTelegramId}`,
+      `Username: ${input.username ? `@${input.username}` : "none"}`,
+      `Public chat ID: ${input.publicChatId}`,
+      `Public chat: ${input.publicChatTitle ?? "unknown"}`,
+      `Public username: ${input.publicChatUsername ? `@${input.publicChatUsername}` : "none"}`,
+      `Topic threads: ${input.messageThreadIds?.length ? input.messageThreadIds.join(", ") : "none"}`,
+      `Sanction tier: ${input.sanctionTier}`,
+      `Sanction: ${input.sanctionKind}`,
+      `UTC: ${input.timestamp}`,
+      "Reason: English-only rule",
+    ].join("\n"),
+    { message_thread_id: topicId }
+  );
 }
 
 function actorLabel(actor: ArchiveActor): string {
@@ -289,7 +280,7 @@ function userLabel(user: { username?: string | null; telegram_id?: number; id?: 
 async function verifyForumTopic(api: BotApi, messageThreadId: number): Promise<TopicVerification> {
   try {
     await api.sendChatAction(config.staffChatId, "typing", {
-      message_thread_id: messageThreadId
+      message_thread_id: messageThreadId,
     });
     return "ok";
   } catch (error) {
@@ -329,28 +320,23 @@ async function sendTranscriptToSupportLogs(
   const logsThreadId = options.recreateTopic
     ? await recreateSupportLogsTopic(api, db)
     : await initializeSupportLogsTopic(api, db);
-  const safeLogsThreadId = logsThreadId === ticket.message_thread_id
-    ? await recreateSupportLogsTopic(api, db)
-    : logsThreadId;
+  const safeLogsThreadId =
+    logsThreadId === ticket.message_thread_id ? await recreateSupportLogsTopic(api, db) : logsThreadId;
   let summaryMessageId: number | null = null;
 
   try {
     const summary = await api.sendMessage(config.staffChatId, formatTicketClosedLog(ticket), {
-      message_thread_id: safeLogsThreadId
+      message_thread_id: safeLogsThreadId,
     });
     summaryMessageId = summary.message_id;
 
-    const document = await api.sendDocument(
-      config.staffChatId,
-      new InputFile(filePath, filename),
-      {
-        message_thread_id: safeLogsThreadId
-      }
-    );
+    const document = await api.sendDocument(config.staffChatId, new InputFile(filePath, filename), {
+      message_thread_id: safeLogsThreadId,
+    });
 
     return {
       summaryMessageId: summary.message_id,
-      documentMessageId: document.message_id
+      documentMessageId: document.message_id,
     };
   } catch (error) {
     if (summaryMessageId !== null) {
@@ -385,14 +371,14 @@ function buildTranscript(ticket: TicketWithUser, messages: TicketMessageRecord[]
     "",
     "====================================================",
     "",
-    ...messages.flatMap(formatTranscriptMessage)
+    ...messages.flatMap(formatTranscriptMessage),
   ].join("\n");
 }
 
 function formatTranscriptMessage(message: TicketMessageRecord): string[] {
   const lines = [
     `[${formatTranscriptTime(message.created_at)}] ${messageSenderType(message)} ${messageSenderName(message)}`,
-    ""
+    "",
   ];
 
   const text = message.text?.trim();
@@ -483,7 +469,7 @@ function formatTicketClosedLog(ticket: TicketWithUser): string {
     "Final status:",
     ticket.status,
     "",
-    "Transcript attached below."
+    "Transcript attached below.",
   ].join("\n");
 }
 
@@ -497,20 +483,14 @@ function formatBanLog(input: BanLogInput): string {
     "",
     "Action:",
     input.action,
-    ""
+    "",
   ];
 
   if (input.reason) {
     lines.push("Reason:", input.reason, "");
   }
 
-  lines.push(
-    "Performed by:",
-    actorLabel(input.performedBy),
-    "",
-    "Timestamp:",
-    formatDate(new Date().toISOString())
-  );
+  lines.push("Performed by:", actorLabel(input.performedBy), "", "Timestamp:", formatDate(new Date().toISOString()));
 
   return lines.join("\n");
 }
@@ -532,88 +512,104 @@ async function removeTicketTopicAfterArchive(api: BotApi, ticket: TicketWithUser
 
   try {
     await api.deleteForumTopic(ticket.staff_chat_id, ticket.message_thread_id);
-    logger.info({
-      ticketId: ticket.id,
-      topicId: ticket.message_thread_id,
-      method: "deleteForumTopic",
-      outcome: "SUCCESS"
-    }, "Archived ticket topic cleanup completed");
+    logger.info(
+      {
+        ticketId: ticket.id,
+        topicId: ticket.message_thread_id,
+        method: "deleteForumTopic",
+        outcome: "SUCCESS",
+      },
+      "Archived ticket topic cleanup completed"
+    );
     return;
   } catch (error) {
     const diagnostic = normalizeTelegramDeliveryError(error);
     if (isResolvedTopicCleanupError(diagnostic.description)) {
-      logger.info({
+      logger.info(
+        {
+          ticketId: ticket.id,
+          topicId: ticket.message_thread_id,
+          method: "deleteForumTopic",
+          outcome: "TERMINAL_SUCCESS",
+          category: diagnostic.category,
+          telegramErrorCode: diagnostic.telegramErrorCode,
+        },
+        "Archived ticket topic was already unavailable"
+      );
+      return;
+    }
+    logger.warn(
+      {
         ticketId: ticket.id,
         topicId: ticket.message_thread_id,
         method: "deleteForumTopic",
-        outcome: "TERMINAL_SUCCESS",
+        outcome: "FAILED",
         category: diagnostic.category,
-        telegramErrorCode: diagnostic.telegramErrorCode
-      }, "Archived ticket topic was already unavailable");
-      return;
-    }
-    logger.warn({
-      ticketId: ticket.id,
-      topicId: ticket.message_thread_id,
-      method: "deleteForumTopic",
-      outcome: "FAILED",
-      category: diagnostic.category,
-      telegramErrorCode: diagnostic.telegramErrorCode,
-      httpStatus: diagnostic.httpStatus,
-      description: diagnostic.description
-    }, "Could not delete archived ticket topic");
+        telegramErrorCode: diagnostic.telegramErrorCode,
+        httpStatus: diagnostic.httpStatus,
+        description: diagnostic.description,
+      },
+      "Could not delete archived ticket topic"
+    );
   }
 
   try {
     await api.closeForumTopic(ticket.staff_chat_id, ticket.message_thread_id);
-    logger.info({
-      ticketId: ticket.id,
-      topicId: ticket.message_thread_id,
-      method: "closeForumTopic",
-      outcome: "SUCCESS"
-    }, "Archived ticket topic cleanup completed");
-  } catch (error) {
-    const diagnostic = normalizeTelegramDeliveryError(error);
-    if (isResolvedTopicCleanupError(diagnostic.description)) {
-      logger.info({
+    logger.info(
+      {
         ticketId: ticket.id,
         topicId: ticket.message_thread_id,
         method: "closeForumTopic",
-        outcome: "TERMINAL_SUCCESS",
-        category: diagnostic.category,
-        telegramErrorCode: diagnostic.telegramErrorCode
-      }, "Archived ticket topic was already closed or unavailable");
+        outcome: "SUCCESS",
+      },
+      "Archived ticket topic cleanup completed"
+    );
+  } catch (error) {
+    const diagnostic = normalizeTelegramDeliveryError(error);
+    if (isResolvedTopicCleanupError(diagnostic.description)) {
+      logger.info(
+        {
+          ticketId: ticket.id,
+          topicId: ticket.message_thread_id,
+          method: "closeForumTopic",
+          outcome: "TERMINAL_SUCCESS",
+          category: diagnostic.category,
+          telegramErrorCode: diagnostic.telegramErrorCode,
+        },
+        "Archived ticket topic was already closed or unavailable"
+      );
       return;
     }
-    logger.warn({
-      ticketId: ticket.id,
-      topicId: ticket.message_thread_id,
-      method: "closeForumTopic",
-      outcome: "FAILED",
-      category: diagnostic.category,
-      telegramErrorCode: diagnostic.telegramErrorCode,
-      httpStatus: diagnostic.httpStatus,
-      description: diagnostic.description
-    }, "Could not close archived ticket topic");
+    logger.warn(
+      {
+        ticketId: ticket.id,
+        topicId: ticket.message_thread_id,
+        method: "closeForumTopic",
+        outcome: "FAILED",
+        category: diagnostic.category,
+        telegramErrorCode: diagnostic.telegramErrorCode,
+        httpStatus: diagnostic.httpStatus,
+        description: diagnostic.description,
+      },
+      "Could not close archived ticket topic"
+    );
   }
 }
 
 function isResolvedTopicCleanupError(description: string | null): boolean {
   if (!description) return false;
   const normalized = description.toLowerCase();
-  return normalized.includes("message thread not found")
-    || normalized.includes("topic not found")
-    || normalized.includes("topic is closed")
-    || normalized.includes("topic was closed")
-    || normalized.includes("already closed")
-    || normalized.includes("message is not modified");
+  return (
+    normalized.includes("message thread not found") ||
+    normalized.includes("topic not found") ||
+    normalized.includes("topic is closed") ||
+    normalized.includes("topic was closed") ||
+    normalized.includes("already closed") ||
+    normalized.includes("message is not modified")
+  );
 }
 
-async function notifyTicketTopicArchiveFailure(
-  api: BotApi,
-  ticket: TicketWithUser,
-  error: string
-): Promise<void> {
+async function notifyTicketTopicArchiveFailure(api: BotApi, ticket: TicketWithUser, error: string): Promise<void> {
   if (!ticket.staff_chat_id || !ticket.message_thread_id) {
     return;
   }
@@ -626,19 +622,22 @@ async function notifyTicketTopicArchiveFailure(
         3500
       ),
       {
-        message_thread_id: ticket.message_thread_id
+        message_thread_id: ticket.message_thread_id,
       }
     );
   } catch (noticeError) {
     const diagnostic = normalizeTelegramDeliveryError(noticeError);
-    logger.warn({
-      ticketId: ticket.id,
-      stage: "ARCHIVE_FAILURE_NOTICE",
-      category: diagnostic.category,
-      method: diagnostic.method,
-      telegramErrorCode: diagnostic.telegramErrorCode,
-      httpStatus: diagnostic.httpStatus
-    }, "Could not notify staff about archive failure");
+    logger.warn(
+      {
+        ticketId: ticket.id,
+        stage: "ARCHIVE_FAILURE_NOTICE",
+        category: diagnostic.category,
+        method: diagnostic.method,
+        telegramErrorCode: diagnostic.telegramErrorCode,
+        httpStatus: diagnostic.httpStatus,
+      },
+      "Could not notify staff about archive failure"
+    );
   }
 }
 

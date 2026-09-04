@@ -7,7 +7,7 @@ import {
   QUICK_REPLIES_CONFIG_PATH,
   QuickRepliesConfigError,
   createPersistentQuickRepliesRegistry,
-  loadQuickRepliesRegistry
+  loadQuickRepliesRegistry,
 } from "../src/quickReplies.js";
 import { SupportDatabase } from "../src/db.js";
 
@@ -30,9 +30,9 @@ function validCategories() {
         {
           id: "ask_uid",
           title: "Ask for UID",
-          text: "Please send your AgentOn UID."
-        }
-      ]
+          text: "Please send your AgentOn UID.",
+        },
+      ],
     },
     {
       id: "status",
@@ -41,17 +41,17 @@ function validCategories() {
         {
           id: "checking",
           title: "We are checking",
-          text: "We are checking this issue."
-        }
-      ]
-    }
+          text: "We are checking this issue.",
+        },
+      ],
+    },
   ];
 }
 
 function validConfig() {
   return {
     version: 1,
-    categories: validCategories()
+    categories: validCategories(),
   };
 }
 
@@ -92,10 +92,9 @@ describe("Quick Replies configuration loader", () => {
 
   it("contains the configured category and template counts", () => {
     const registry = loadQuickRepliesRegistry();
-    const templateCount = registry.listCategories().reduce(
-      (count, category) => count + registry.listTemplates(category.id).length,
-      0
-    );
+    const templateCount = registry
+      .listCategories()
+      .reduce((count, category) => count + registry.listTemplates(category.id).length, 0);
 
     assert.equal(templateCount, 5);
   });
@@ -136,12 +135,12 @@ describe("Quick Replies configuration loader", () => {
     {
       name: "unsupported versions",
       config: { ...validConfig(), version: 2 },
-      issue: "Version must equal 1"
+      issue: "Version must equal 1",
     },
     {
       name: "empty category lists",
       config: { version: 1, categories: [] },
-      issue: "At least one category is required"
+      issue: "At least one category is required",
     },
     {
       name: "duplicate category IDs",
@@ -152,11 +151,11 @@ describe("Quick Replies configuration loader", () => {
           {
             id: "request_details",
             title: "Another category",
-            templates: [{ id: "another_template", title: "Another", text: "Another reply" }]
-          }
-        ]
+            templates: [{ id: "another_template", title: "Another", text: "Another reply" }],
+          },
+        ],
       },
-      issue: 'Category id "request_details" must be unique'
+      issue: 'Category id "request_details" must be unique',
     },
     {
       name: "duplicate template IDs across categories",
@@ -166,88 +165,100 @@ describe("Quick Replies configuration loader", () => {
           {
             id: "one",
             title: "One",
-            templates: [{ id: "duplicate", title: "One", text: "One" }]
+            templates: [{ id: "duplicate", title: "One", text: "One" }],
           },
           {
             id: "two",
             title: "Two",
-            templates: [{ id: "duplicate", title: "Two", text: "Two" }]
-          }
-        ]
+            templates: [{ id: "duplicate", title: "Two", text: "Two" }],
+          },
+        ],
       },
-      issue: 'Template id "duplicate" must be globally unique'
+      issue: 'Template id "duplicate" must be globally unique',
     },
     {
       name: "invalid category slugs",
       config: {
         version: 1,
-        categories: [{ id: "Invalid-slug", title: "Category", templates: [{ id: "template", title: "Reply", text: "Text" }] }]
+        categories: [
+          { id: "Invalid-slug", title: "Category", templates: [{ id: "template", title: "Reply", text: "Text" }] },
+        ],
       },
-      issue: "Category id must use lowercase letters, numbers, and underscores only"
+      issue: "Category id must use lowercase letters, numbers, and underscores only",
     },
     {
       name: "invalid template slugs",
       config: {
         version: 1,
-        categories: [{ id: "category", title: "Category", templates: [{ id: "Invalid-slug", title: "Reply", text: "Text" }] }]
+        categories: [
+          { id: "category", title: "Category", templates: [{ id: "Invalid-slug", title: "Reply", text: "Text" }] },
+        ],
       },
-      issue: "Template id must use lowercase letters, numbers, and underscores only"
+      issue: "Template id must use lowercase letters, numbers, and underscores only",
     },
     {
       name: "category IDs longer than 24 characters",
       config: {
         version: 1,
-        categories: [{ id: "a".repeat(25), title: "Category", templates: [{ id: "template", title: "Reply", text: "Text" }] }]
+        categories: [
+          { id: "a".repeat(25), title: "Category", templates: [{ id: "template", title: "Reply", text: "Text" }] },
+        ],
       },
-      issue: "Category id maximum length is 24 characters"
+      issue: "Category id maximum length is 24 characters",
     },
     {
       name: "template IDs longer than 24 characters",
       config: {
         version: 1,
-        categories: [{ id: "category", title: "Category", templates: [{ id: "a".repeat(25), title: "Reply", text: "Text" }] }]
+        categories: [
+          { id: "category", title: "Category", templates: [{ id: "a".repeat(25), title: "Reply", text: "Text" }] },
+        ],
       },
-      issue: "Template id maximum length is 24 characters"
+      issue: "Template id maximum length is 24 characters",
     },
     {
       name: "empty category titles",
       config: {
         version: 1,
-        categories: [{ id: "category", title: "", templates: [{ id: "template", title: "Reply", text: "Text" }] }]
+        categories: [{ id: "category", title: "", templates: [{ id: "template", title: "Reply", text: "Text" }] }],
       },
-      issue: "Category title must not be empty"
+      issue: "Category title must not be empty",
     },
     {
       name: "category titles longer than 32 characters",
       config: {
         version: 1,
-        categories: [{ id: "category", title: "a".repeat(33), templates: [{ id: "template", title: "Reply", text: "Text" }] }]
+        categories: [
+          { id: "category", title: "a".repeat(33), templates: [{ id: "template", title: "Reply", text: "Text" }] },
+        ],
       },
-      issue: "String must contain at most 32 character(s)"
+      issue: "String must contain at most 32 character(s)",
     },
     {
       name: "empty template titles",
       config: {
         version: 1,
-        categories: [{ id: "category", title: "Category", templates: [{ id: "template", title: "", text: "Text" }] }]
+        categories: [{ id: "category", title: "Category", templates: [{ id: "template", title: "", text: "Text" }] }],
       },
-      issue: "Template title must not be empty"
+      issue: "Template title must not be empty",
     },
     {
       name: "template titles longer than 32 characters",
       config: {
         version: 1,
-        categories: [{ id: "category", title: "Category", templates: [{ id: "template", title: "a".repeat(33), text: "Text" }] }]
+        categories: [
+          { id: "category", title: "Category", templates: [{ id: "template", title: "a".repeat(33), text: "Text" }] },
+        ],
       },
-      issue: "String must contain at most 32 character(s)"
+      issue: "String must contain at most 32 character(s)",
     },
     {
       name: "empty template text",
       config: {
         version: 1,
-        categories: [{ id: "category", title: "Category", templates: [{ id: "template", title: "Reply", text: "" }] }]
+        categories: [{ id: "category", title: "Category", templates: [{ id: "template", title: "Reply", text: "" }] }],
       },
-      issue: "Template text must not be empty"
+      issue: "Template text must not be empty",
     },
     {
       name: "template text longer than 3500 characters",
@@ -257,20 +268,20 @@ describe("Quick Replies configuration loader", () => {
           {
             id: "category",
             title: "Category",
-            templates: [{ id: "template", title: "Reply", text: "a".repeat(3501) }]
-          }
-        ]
+            templates: [{ id: "template", title: "Reply", text: "a".repeat(3501) }],
+          },
+        ],
       },
-      issue: "String must contain at most 3500 character(s)"
+      issue: "String must contain at most 3500 character(s)",
     },
     {
       name: "categories without templates",
       config: {
         version: 1,
-        categories: [{ id: "category", title: "Category", templates: [] }]
+        categories: [{ id: "category", title: "Category", templates: [] }],
       },
-      issue: "Each category must contain at least one template"
-    }
+      issue: "Each category must contain at least one template",
+    },
   ]) {
     it(`rejects ${validationCase.name}`, () => {
       assertConfigError(writeTemporaryJson(validationCase.config), validationCase.issue);
@@ -312,7 +323,7 @@ describe("Quick Replies configuration loader", () => {
     const added = managed.createTemplate({
       categoryId: "status",
       title: "Custom status",
-      text: "This is a custom persisted response."
+      text: "This is a custom persisted response.",
     });
     first.close();
 
@@ -323,7 +334,10 @@ describe("Quick Replies configuration loader", () => {
     assert.equal(persisted.findTemplate("ask_uid")?.text, "Please share your account reference.");
     assert.equal(persisted.findTemplate("ask_wallet"), undefined);
     assert.deepEqual(persisted.findTemplate(added.id), added);
-    assert.equal(persisted.listCategories().reduce((count, category) => count + category.templates.length, 0), 5);
+    assert.equal(
+      persisted.listCategories().reduce((count, category) => count + category.templates.length, 0),
+      5
+    );
     restarted.close();
 
     const restartedAgain = new SupportDatabase(databasePath);
@@ -331,7 +345,10 @@ describe("Quick Replies configuration loader", () => {
     assert.equal(restartedAgain.getSetting("quick_replies:seeded"), "true");
     assert.equal(persistedAgain.findTemplate("ask_wallet"), undefined);
     assert.deepEqual(persistedAgain.findTemplate(added.id), added);
-    assert.equal(persistedAgain.listCategories().reduce((count, category) => count + category.templates.length, 0), 5);
+    assert.equal(
+      persistedAgain.listCategories().reduce((count, category) => count + category.templates.length, 0),
+      5
+    );
     restartedAgain.close();
   });
 });

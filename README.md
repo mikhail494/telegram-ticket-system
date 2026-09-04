@@ -169,33 +169,33 @@ Media is represented as attachment text in the transcript. User media is not dup
 
 ### User Commands
 
-| Command | Purpose |
-| --- | --- |
-| `/start` | Start the bot and view intake instructions. |
-| `/status` | Show the latest ticket status. |
-| `/mytickets` | Show recent tickets. |
-| `/help` | Show user help. |
-| `Close ticket` button | Close the current active ticket. |
+| Command               | Purpose                                     |
+| --------------------- | ------------------------------------------- |
+| `/start`              | Start the bot and view intake instructions. |
+| `/status`             | Show the latest ticket status.              |
+| `/mytickets`          | Show recent tickets.                        |
+| `/help`               | Show user help.                             |
+| `Close ticket` button | Close the current active ticket.            |
 
 ### Staff Commands
 
-| Command | Purpose |
-| --- | --- |
-| `/help` | Show staff help in the staff group or a ticket topic. |
-| `/chatid` | Show the current staff chat ID. |
-| `/whois` | Show the current ticket and user information inside a ticket topic. |
-| `/ticket <id>` | Show ticket details. |
-| `/close <id>` | Close a ticket. |
-| `/ban <telegram_id> [reason]` | Prevent a user from opening tickets. |
-| `/unban <telegram_id>` | Restore a user's ticket access. |
-| `/bans` | List banned users. |
-| `/setlogs` | Assign the current non-ticket topic as Support Logs. |
-| `/logs` | Show or create the current Support Logs topic. |
-| `/exporttickets` | Export active tickets from the staff group's main topic. |
-| Answer-package upload | Preview a validated answer package, then Apply or Cancel it. |
-| `/moderation <subcommand>` | Configure and inspect public English-only moderation. |
-| `/questnotify <subcommand>` | Configure and inspect generic entity notifications. |
-| `Quick replies` button | Choose and send a configured response in an active ticket topic. |
+| Command                       | Purpose                                                             |
+| ----------------------------- | ------------------------------------------------------------------- |
+| `/help`                       | Show staff help in the staff group or a ticket topic.               |
+| `/chatid`                     | Show the current staff chat ID.                                     |
+| `/whois`                      | Show the current ticket and user information inside a ticket topic. |
+| `/ticket <id>`                | Show ticket details.                                                |
+| `/close <id>`                 | Close a ticket.                                                     |
+| `/ban <telegram_id> [reason]` | Prevent a user from opening tickets.                                |
+| `/unban <telegram_id>`        | Restore a user's ticket access.                                     |
+| `/bans`                       | List banned users.                                                  |
+| `/setlogs`                    | Assign the current non-ticket topic as Support Logs.                |
+| `/logs`                       | Show or create the current Support Logs topic.                      |
+| `/exporttickets`              | Export active tickets from the staff group's main topic.            |
+| Answer-package upload         | Preview a validated answer package, then Apply or Cancel it.        |
+| `/moderation <subcommand>`    | Configure and inspect public English-only moderation.               |
+| `/questnotify <subcommand>`   | Configure and inspect generic entity notifications.                 |
+| `Quick replies` button        | Choose and send a configured response in an active ticket topic.    |
 
 Primary moderation controls are `/moderation status`, `/moderation target <chat_id>`, `/moderation enable`, `/moderation disable`, `/moderation allowlist`, `/moderation allow <term>`, and `/moderation unallow <term>`. The remaining controls are `/moderation user <telegram_id>`, `/moderation resetstrikes <telegram_id>`, and `/moderation resettier <telegram_id>`.
 

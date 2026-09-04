@@ -19,7 +19,7 @@ const quickReplyCategories = quickRepliesRegistry.listCategories();
 logger.info(
   {
     categoryCount: quickReplyCategories.length,
-    templateCount: quickReplyCategories.reduce((count, category) => count + category.templates.length, 0)
+    templateCount: quickReplyCategories.reduce((count, category) => count + category.templates.length, 0),
   },
   "Quick Replies loaded successfully"
 );
@@ -30,14 +30,27 @@ setRuntimeStaffChatId(installationService.getStaffChatId());
 const entityNotificationProviders: EntityNotificationProviderRegistry = new Map();
 const backgroundTasks = new BackgroundTaskRegistry();
 const bot = createBot(db, quickRepliesRegistry, { entityNotificationProviders, installationService, backgroundTasks });
-const backupOptions = { enabled: config.backupEnabled, directory: config.backupDir, intervalMs: config.backupIntervalHours * 3_600_000, retentionCount: config.backupRetentionCount };
+const backupOptions = {
+  enabled: config.backupEnabled,
+  directory: config.backupDir,
+  intervalMs: config.backupIntervalHours * 3_600_000,
+  retentionCount: config.backupRetentionCount,
+};
 const backupScheduler = createAutomaticBackupScheduler(
   db,
   backupOptions,
   (error) => logger.warn({ err: error }, "Automatic SQLite backups are unavailable; support bot startup will continue"),
   (result) => {
-    const details = { backup: result.basename, size: result.size, sha256: result.sha256, retentionDeleted: result.retentionDeleted, retentionFailed: result.retentionFailed, tempCleanupFailed: result.tempCleanupFailed };
-    if (result.tempCleanupFailed) logger.warn(details, "Automatic SQLite backup completed with temporary cleanup failures");
+    const details = {
+      backup: result.basename,
+      size: result.size,
+      sha256: result.sha256,
+      retentionDeleted: result.retentionDeleted,
+      retentionFailed: result.retentionFailed,
+      tempCleanupFailed: result.tempCleanupFailed,
+    };
+    if (result.tempCleanupFailed)
+      logger.warn(details, "Automatic SQLite backup completed with temporary cleanup failures");
     else logger.info(details, "Automatic SQLite backup completed");
   }
 );
@@ -52,7 +65,7 @@ const lifecycle = new ApplicationLifecycle({
   stopAndDrainBackups: () => backupScheduler?.stopAndDrain() ?? Promise.resolve(),
   closeDatabase: () => db.close(),
   closeOperationalServer: () => operationalServer?.stop() ?? Promise.resolve(),
-  onDrainFailure: (stage, error) => logger.warn({ err: error, stage }, "Graceful shutdown drain failed")
+  onDrainFailure: (stage, error) => logger.warn({ err: error, stage }, "Graceful shutdown drain failed"),
 });
 
 function getOperationalRuntimeState(): OperationalRuntimeState {
@@ -68,7 +81,7 @@ async function main(): Promise<void> {
       host: config.opsHttpHost,
       port: config.opsHttpPort,
       getState: getOperationalRuntimeState,
-      checkDatabase: () => db.ping()
+      checkDatabase: () => db.ping(),
     });
     await operationalServer.start();
     logger.info({ host: config.opsHttpHost, port: config.opsHttpPort }, "Operational HTTP server started");
@@ -88,7 +101,7 @@ async function main(): Promise<void> {
             telegramId: administrator.user.id,
             username: administrator.user.username,
             firstName: administrator.user.first_name,
-            lastName: administrator.user.last_name
+            lastName: administrator.user.last_name,
           });
         }
       } catch (error) {
@@ -99,13 +112,18 @@ async function main(): Promise<void> {
     recoverArchives: () => archiveClosedTicketsPendingUpload(bot.api, db).then(() => undefined),
     recoverModeration: () => processModerationRecovery(bot.api, db),
     recoverBatch: () => bot.recoverPendingTicketBatchStaffOperations(),
-    sendLegacyStaffOnboarding: () => sendStaffOnboardingIfNeeded(bot.api, db, installationService)
+    sendLegacyStaffOnboarding: () => sendStaffOnboardingIfNeeded(bot.api, db, installationService),
   });
   await setBotCommands(bot, installationService);
   if (!installationService.getOwner()) {
-    logger.warn("No OWNER is paired. Run npm run owner:pair in an interactive terminal to create a one-use pairing link.");
+    logger.warn(
+      "No OWNER is paired. Run npm run owner:pair in an interactive terminal to create a one-use pairing link."
+    );
   }
-  if (backupScheduler) void backupScheduler.start().catch((error) => logger.warn({ err: error }, "Automatic SQLite backup scheduler failed to start"));
+  if (backupScheduler)
+    void backupScheduler
+      .start()
+      .catch((error) => logger.warn({ err: error }, "Automatic SQLite backup scheduler failed to start"));
 
   const shutdown = (signal: NodeJS.Signals) => {
     logger.info({ signal }, "Stopping bot");
@@ -120,7 +138,7 @@ async function main(): Promise<void> {
     onStart: (botInfo) => {
       operationalState = "READY";
       logger.info({ username: botInfo.username }, "Telegram support bot started");
-    }
+    },
   });
   await awaitApplicationCompletion(polling, lifecycle);
 }

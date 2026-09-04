@@ -9,12 +9,20 @@ describe("staff-only batch delivery coordination", () => {
     const delays: number[] = [];
     const coordinator = new StaffChatDeliveryCoordinator({
       minimumIntervalMs: 0,
-      sleep: async (milliseconds) => { delays.push(milliseconds); }
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
     });
 
     const result = await coordinator.run(-100900, async () => {
       attempts += 1;
-      if (attempts === 1) throw new GrammyError("Too Many Requests", { ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 1 } }, "sendMessage", {});
+      if (attempts === 1)
+        throw new GrammyError(
+          "Too Many Requests",
+          { ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 1 } },
+          "sendMessage",
+          {}
+        );
       return 42;
     });
 
@@ -26,7 +34,12 @@ describe("staff-only batch delivery coordination", () => {
   it("defers a long rate limit instead of blocking the update handler", async () => {
     const coordinator = new StaffChatDeliveryCoordinator({ minimumIntervalMs: 0, sleep: async () => undefined });
     const result = await coordinator.run(-100900, async () => {
-      throw new GrammyError("Too Many Requests", { ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 20 } }, "sendMessage", {});
+      throw new GrammyError(
+        "Too Many Requests",
+        { ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 20 } },
+        "sendMessage",
+        {}
+      );
     });
 
     assert.equal(result.value, undefined);
@@ -37,7 +50,12 @@ describe("staff-only batch delivery coordination", () => {
   it("coordinates later staff-only operations behind a long retry_after", async () => {
     const coordinator = new StaffChatDeliveryCoordinator({ minimumIntervalMs: 0, sleep: async () => undefined });
     await coordinator.run(-100900, async () => {
-      throw new GrammyError("Too Many Requests", { ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 20 } }, "sendMessage", {});
+      throw new GrammyError(
+        "Too Many Requests",
+        { ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 20 } },
+        "sendMessage",
+        {}
+      );
     });
     let called = false;
     const deferred = await coordinator.run(-100900, async () => {

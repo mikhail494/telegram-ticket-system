@@ -7,9 +7,7 @@ export interface SupportIngressLimiterOptions {
   now?: () => number;
 }
 
-export type SupportIngressDecision =
-  | { allowed: true }
-  | { allowed: false; shouldWarn: boolean; retryAfterMs: number };
+export type SupportIngressDecision = { allowed: true } | { allowed: false; shouldWarn: boolean; retryAfterMs: number };
 
 interface Entry {
   tokens: number;
@@ -23,7 +21,7 @@ export const DEFAULT_SUPPORT_INGRESS_LIMITER_OPTIONS = {
   refillPerSecond: 1,
   warningCooldownMs: 30_000,
   idleTtlMs: 30 * 60_000,
-  maxEntries: 10_000
+  maxEntries: 10_000,
 } as const;
 
 const PRUNE_EVERY_CHECKS = 128;
@@ -51,7 +49,13 @@ export class SupportIngressLimiter {
     this.maxEntries = options.maxEntries ?? DEFAULT_SUPPORT_INGRESS_LIMITER_OPTIONS.maxEntries;
     this.now = options.now ?? Date.now;
 
-    if (this.capacity <= 0 || this.refillPerMillisecond <= 0 || this.warningCooldownMs < 0 || this.idleTtlMs <= 0 || this.maxEntries <= 0) {
+    if (
+      this.capacity <= 0 ||
+      this.refillPerMillisecond <= 0 ||
+      this.warningCooldownMs < 0 ||
+      this.idleTtlMs <= 0 ||
+      this.maxEntries <= 0
+    ) {
       throw new Error("Support ingress limiter options must be positive.");
     }
   }
@@ -74,7 +78,7 @@ export class SupportIngressLimiter {
       entry = {
         tokens: this.capacity,
         lastRefillAt: now,
-        lastActivityAt: now
+        lastActivityAt: now,
       };
       this.entries.set(userId, entry);
     } else {
@@ -95,7 +99,7 @@ export class SupportIngressLimiter {
     return {
       allowed: false,
       shouldWarn,
-      retryAfterMs: Math.max(1, Math.ceil((1 - entry.tokens) / this.refillPerMillisecond))
+      retryAfterMs: Math.max(1, Math.ceil((1 - entry.tokens) / this.refillPerMillisecond)),
     };
   }
 

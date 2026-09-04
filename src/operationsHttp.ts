@@ -50,7 +50,7 @@ export class OperationalServer {
     if (!server) return;
     this.server = null;
     this.stopPromise = new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
+      server.close((error) => (error ? reject(error) : resolve()));
       server.closeIdleConnections();
     }).finally(() => {
       this.stopPromise = null;
@@ -72,7 +72,13 @@ export class OperationalServer {
     }
     if (pathname === "/readyz") {
       const ready = this.isReady();
-      this.respond(response, request.method, ready ? 200 : 503, "application/json; charset=utf-8", ready ? '{"status":"ready"}' : '{"status":"not_ready"}');
+      this.respond(
+        response,
+        request.method,
+        ready ? 200 : 503,
+        "application/json; charset=utf-8",
+        ready ? '{"status":"ready"}' : '{"status":"not_ready"}'
+      );
       return;
     }
     if (pathname === "/metrics") {
@@ -121,11 +127,17 @@ export class OperationalServer {
       "# HELP telegram_support_database_ready Whether the local SQLite probe succeeds.",
       "# TYPE telegram_support_database_ready gauge",
       `telegram_support_database_ready ${databaseReady ? 1 : 0}`,
-      ""
+      "",
     ].join("\n");
   }
 
-  private respond(response: ServerResponse, method: string | undefined, status: number, contentType: string, body: string): void {
+  private respond(
+    response: ServerResponse,
+    method: string | undefined,
+    status: number,
+    contentType: string,
+    body: string
+  ): void {
     response.writeHead(status, { "content-type": contentType, "content-length": Buffer.byteLength(body) });
     response.end(method === "HEAD" ? undefined : body);
   }

@@ -6,11 +6,7 @@ import type { ModerationCleanupScheduler } from "../../src/languageModeration.js
 import type { EntityNotificationProviderRegistry } from "../../src/entityNotifications.js";
 import type { InstallationService } from "../../src/installation.js";
 import type { SupportIngressLimiter } from "../../src/supportIngressLimiter.js";
-import type {
-  SupportDatabase as SupportDatabaseType,
-  TicketStatus,
-  TicketWithUser
-} from "../../src/db.js";
+import type { SupportDatabase as SupportDatabaseType, TicketStatus, TicketWithUser } from "../../src/db.js";
 
 process.env.NODE_ENV = "test";
 process.env.BOT_TOKEN = "123456:TEST_BOT_TOKEN";
@@ -18,11 +14,8 @@ process.env.STAFF_CHAT_ID = "-100900";
 process.env.DATABASE_URL = ":memory:";
 process.env.LOG_LEVEL = "silent";
 
-const [{ SupportDatabase }, { createPersistentQuickRepliesRegistry, loadQuickRepliesRegistry }, { createBot }] = await Promise.all([
-  import("../../src/db.js"),
-  import("../../src/quickReplies.js"),
-  import("../../src/bot.js")
-]);
+const [{ SupportDatabase }, { createPersistentQuickRepliesRegistry, loadQuickRepliesRegistry }, { createBot }] =
+  await Promise.all([import("../../src/db.js"), import("../../src/quickReplies.js"), import("../../src/bot.js")]);
 
 export const TEST_STAFF_CHAT_ID = -100900;
 export const TEST_USER_ID = 123;
@@ -40,7 +33,7 @@ export const TEST_BOT_IDENTITY: UserFromGetMe = {
   has_topics_enabled: false,
   allows_users_to_create_topics: false,
   can_manage_bots: false,
-  supports_join_request_queries: false
+  supports_join_request_queries: false,
 };
 
 export interface RecordedApiCall {
@@ -100,14 +93,7 @@ export interface StaffCallbackUpdateOptions extends StaffTopicUpdateOptions {
   callbackData?: string;
 }
 
-export type StaffMediaType =
-  | "photo"
-  | "document"
-  | "video"
-  | "animation"
-  | "audio"
-  | "voice"
-  | "video_note";
+export type StaffMediaType = "photo" | "document" | "video" | "animation" | "audio" | "voice" | "video_note";
 
 export interface StaffMediaUpdateOptions extends StaffTopicUpdateOptions {
   mediaType?: StaffMediaType;
@@ -158,9 +144,11 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
   let downloadResponse: { body: string | Uint8Array; status: number } = { body: "{}", status: 200 };
   const fileDownloads = new Map<string, { body: string | Uint8Array; status: number; filePath: string }>();
   const scheduledModerationCleanupJobIds: number[] = [];
-  const scheduleCleanup: ModerationCleanupScheduler = options.scheduleModerationCleanup ?? ((_api, _db, jobId) => {
-    scheduledModerationCleanupJobIds.push(jobId);
-  });
+  const scheduleCleanup: ModerationCleanupScheduler =
+    options.scheduleModerationCleanup ??
+    ((_api, _db, jobId) => {
+      scheduledModerationCleanupJobIds.push(jobId);
+    });
   const installationService = options.installationServiceFactory?.(db);
   const bot = createBot(db, registry, {
     fetch: async (input) => {
@@ -175,7 +163,7 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
         start(controller) {
           controller.enqueue(bytes);
           controller.close();
-        }
+        },
       });
       return new Response(body, { status: response.status });
     },
@@ -184,7 +172,7 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
     entityNotificationProviders: options.entityNotificationProviders,
     installationService,
     supportIngressLimiter: options.supportIngressLimiter,
-    staffChatDelivery: { minimumIntervalMs: 0, sleep: async () => undefined }
+    staffChatDelivery: { minimumIntervalMs: 0, sleep: async () => undefined },
   });
   const apiCalls: RecordedApiCall[] = [];
   const responseOverrides = new Map<string, ApiResponseOverride>();
@@ -198,7 +186,7 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
   const transformer: Transformer = async (_previous, method, payload) => {
     const call: RecordedApiCall = {
       method,
-      payload: toRecordedPayload(payload)
+      payload: toRecordedPayload(payload),
     };
     if (method === "sendDocument") {
       call.documentBytes = await inputFileBytes(call.payload.document);
@@ -270,12 +258,12 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
       fileDownloads.set(fileId, {
         body,
         status: options.status ?? 200,
-        filePath: options.filePath ?? `test/${fileId}`
+        filePath: options.filePath ?? `test/${fileId}`,
       });
     },
     failNextDownload: (status = 500) => {
       downloadResponse = { body: "", status };
-    }
+    },
   };
 }
 
@@ -294,16 +282,16 @@ export function buildStaffCallbackUpdate(options: StaffCallbackUpdateOptions = {
         date: message.date,
         chat: message.chat,
         message_thread_id: message.message_thread_id,
-        text: message.text
-      }
-    }
+        text: message.text,
+      },
+    },
   };
 }
 
 export function buildStaffTextMessageUpdate(options: StaffTopicUpdateOptions = {}): Update {
   return {
     update_id: options.updateId ?? 1,
-    message: buildStaffTopicMessage(options)
+    message: buildStaffTopicMessage(options),
   };
 }
 
@@ -319,8 +307,8 @@ export function buildStaffMediaMessageUpdate(options: StaffMediaUpdateOptions = 
       message: {
         ...message,
         caption,
-        photo: [{ file_id: fileId, file_unique_id: `${fileId}-unique`, width: 1, height: 1 }]
-      }
+        photo: [{ file_id: fileId, file_unique_id: `${fileId}-unique`, width: 1, height: 1 }],
+      },
     };
   }
 
@@ -333,9 +321,9 @@ export function buildStaffMediaMessageUpdate(options: StaffMediaUpdateOptions = 
         document: {
           file_id: fileId,
           file_unique_id: `${fileId}-unique`,
-          file_name: options.fileName ?? "test-document.txt"
-        }
-      }
+          file_name: options.fileName ?? "test-document.txt",
+        },
+      },
     };
   }
 
@@ -345,8 +333,8 @@ export function buildStaffMediaMessageUpdate(options: StaffMediaUpdateOptions = 
       message: {
         ...message,
         caption,
-        video: { file_id: fileId, file_unique_id: `${fileId}-unique`, width: 1, height: 1, duration: 1 }
-      }
+        video: { file_id: fileId, file_unique_id: `${fileId}-unique`, width: 1, height: 1, duration: 1 },
+      },
     };
   }
 
@@ -361,9 +349,9 @@ export function buildStaffMediaMessageUpdate(options: StaffMediaUpdateOptions = 
           file_unique_id: `${fileId}-unique`,
           width: 1,
           height: 1,
-          duration: 1
-        }
-      }
+          duration: 1,
+        },
+      },
     };
   }
 
@@ -373,8 +361,8 @@ export function buildStaffMediaMessageUpdate(options: StaffMediaUpdateOptions = 
       message: {
         ...message,
         caption,
-        audio: { file_id: fileId, file_unique_id: `${fileId}-unique`, duration: 1 }
-      }
+        audio: { file_id: fileId, file_unique_id: `${fileId}-unique`, duration: 1 },
+      },
     };
   }
 
@@ -384,8 +372,8 @@ export function buildStaffMediaMessageUpdate(options: StaffMediaUpdateOptions = 
       message: {
         ...message,
         caption,
-        voice: { file_id: fileId, file_unique_id: `${fileId}-unique`, duration: 1 }
-      }
+        voice: { file_id: fileId, file_unique_id: `${fileId}-unique`, duration: 1 },
+      },
     };
   }
 
@@ -393,8 +381,8 @@ export function buildStaffMediaMessageUpdate(options: StaffMediaUpdateOptions = 
     update_id: options.updateId ?? 1,
     message: {
       ...message,
-      video_note: { file_id: fileId, file_unique_id: `${fileId}-unique`, length: 1, duration: 1 }
-    }
+      video_note: { file_id: fileId, file_unique_id: `${fileId}-unique`, length: 1, duration: 1 },
+    },
   };
 }
 
@@ -409,12 +397,13 @@ export function buildStaffDocumentUpdate(options: StaffDocumentUpdateOptions = {
       file_id: options.fileId ?? "answer-package-file",
       file_unique_id: "answer-package-unique",
       file_name: options.fileName ?? "ticket-answers_export_test.json",
-      file_size: options.fileSize ?? 100
-    }
+      file_size: options.fileSize ?? 100,
+    },
   };
   return {
     update_id: options.updateId ?? 1,
-    message: options.messageThreadId === undefined ? message : { ...message, message_thread_id: options.messageThreadId }
+    message:
+      options.messageThreadId === undefined ? message : { ...message, message_thread_id: options.messageThreadId },
   };
 }
 
@@ -428,7 +417,7 @@ function seedTicket(db: SupportDatabaseType, options: SeedTicketOptions): Ticket
     telegramId: userTelegramId,
     username: user.username ?? "test_customer",
     firstName: user.firstName ?? "Test Customer",
-    lastName: user.lastName ?? null
+    lastName: user.lastName ?? null,
   });
 
   const ticket = db.createTicket(userTelegramId, staffChatId);
@@ -460,10 +449,10 @@ function buildStaffTopicMessage(options: StaffTopicUpdateOptions) {
     chat: {
       id: options.chatId ?? TEST_STAFF_CHAT_ID,
       type: "supergroup" as const,
-      title: "Test Staff Chat"
+      title: "Test Staff Chat",
     },
     message_thread_id: options.messageThreadId ?? 5000,
-    text: options.text ?? "Test staff reply"
+    text: options.text ?? "Test staff reply",
   };
 }
 
@@ -473,7 +462,7 @@ function toTelegramUser(fixture: TelegramUserFixture | undefined): User {
     is_bot: false,
     first_name: fixture?.firstName ?? "Test Staff",
     last_name: fixture?.lastName,
-    username: fixture?.username ?? "test_staff"
+    username: fixture?.username ?? "test_staff",
   };
 }
 
@@ -490,19 +479,70 @@ function createDefaultSuccessResponse(
 
   if (method === "getChat") {
     const chatId = payload.chat_id;
-    return { ok: true, result: { id: typeof chatId === "number" ? chatId : -100900, type: "supergroup", title: "Test Staff Chat", username: "test_staff_chat", is_forum: true } };
+    return {
+      ok: true,
+      result: {
+        id: typeof chatId === "number" ? chatId : -100900,
+        type: "supergroup",
+        title: "Test Staff Chat",
+        username: "test_staff_chat",
+        is_forum: true,
+      },
+    };
   }
 
   if (method === "getChatMember") {
     const userId = numericPayloadValue(payload, "user_id");
     const membership = getStaffMembership(userId);
-    return { ok: true, result: userId === TEST_BOT_IDENTITY.id
-      ? { status: "administrator", user: TEST_BOT_IDENTITY, can_be_edited: false, is_anonymous: false, can_manage_chat: true, can_delete_messages: true, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: false, can_change_info: false, can_invite_users: true, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_post_messages: false, can_edit_messages: false, can_pin_messages: true, can_manage_topics: true }
-      : membership === "administrator"
-        ? { status: "administrator", user: { id: userId, is_bot: false, first_name: "Test Staff" }, can_be_edited: true, is_anonymous: false, can_manage_chat: true, can_delete_messages: true, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: true, can_change_info: true, can_invite_users: true, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_post_messages: false, can_edit_messages: false, can_pin_messages: true, can_manage_topics: true }
-        : membership === "member"
-          ? { status: "member", user: { id: userId, is_bot: false, first_name: "Test Staff" } }
-          : { status: "left", user: { id: userId, is_bot: false, first_name: "Test User" } } };
+    return {
+      ok: true,
+      result:
+        userId === TEST_BOT_IDENTITY.id
+          ? {
+              status: "administrator",
+              user: TEST_BOT_IDENTITY,
+              can_be_edited: false,
+              is_anonymous: false,
+              can_manage_chat: true,
+              can_delete_messages: true,
+              can_manage_video_chats: false,
+              can_restrict_members: false,
+              can_promote_members: false,
+              can_change_info: false,
+              can_invite_users: true,
+              can_post_stories: false,
+              can_edit_stories: false,
+              can_delete_stories: false,
+              can_post_messages: false,
+              can_edit_messages: false,
+              can_pin_messages: true,
+              can_manage_topics: true,
+            }
+          : membership === "administrator"
+            ? {
+                status: "administrator",
+                user: { id: userId, is_bot: false, first_name: "Test Staff" },
+                can_be_edited: true,
+                is_anonymous: false,
+                can_manage_chat: true,
+                can_delete_messages: true,
+                can_manage_video_chats: false,
+                can_restrict_members: false,
+                can_promote_members: true,
+                can_change_info: true,
+                can_invite_users: true,
+                can_post_stories: false,
+                can_edit_stories: false,
+                can_delete_stories: false,
+                can_post_messages: false,
+                can_edit_messages: false,
+                can_pin_messages: true,
+                can_manage_topics: true,
+              }
+            : membership === "member"
+              ? { status: "member", user: { id: userId, is_bot: false, first_name: "Test Staff" } }
+              : { status: "left", user: { id: userId, is_bot: false, first_name: "Test User" } },
+    };
   }
 
   if (method === "sendMessage" || method === "sendDocument") {
@@ -513,8 +553,8 @@ function createDefaultSuccessResponse(
         message_id: messageId,
         date: 1,
         chat: { id: chatId, type: chatId < 0 ? "supergroup" : "private" },
-        text: stringPayloadValue(payload, "text")
-      }
+        text: stringPayloadValue(payload, "text"),
+      },
     };
   }
 
@@ -528,8 +568,8 @@ function createDefaultSuccessResponse(
       ok: true,
       result: {
         file_id: fileId,
-        file_path: fileDownloads.get(fileId)?.filePath ?? "test/answer.json"
-      }
+        file_path: fileDownloads.get(fileId)?.filePath ?? "test/answer.json",
+      },
     };
   }
 
@@ -539,8 +579,8 @@ function createDefaultSuccessResponse(
       result: {
         message_thread_id: messageId,
         name: stringPayloadValue(payload, "name") ?? "Test topic",
-        icon_color: 0x6fb9f0
-      }
+        icon_color: 0x6fb9f0,
+      },
     };
   }
 
@@ -548,7 +588,9 @@ function createDefaultSuccessResponse(
 }
 
 function usesGeneratedMessageId(method: string): boolean {
-  return method === "sendMessage" || method === "sendDocument" || method === "copyMessage" || method === "createForumTopic";
+  return (
+    method === "sendMessage" || method === "sendDocument" || method === "copyMessage" || method === "createForumTopic"
+  );
 }
 
 function toRecordedPayload(payload: unknown): Record<string, unknown> {
@@ -598,9 +640,7 @@ function isAsyncIterable(value: unknown): value is AsyncIterable<Uint8Array> {
   return typeof value === "object" && value !== null && Symbol.asyncIterator in value;
 }
 
-function toMockedTransformerResponse(
-  response: ApiMockResponse
-): Awaited<ReturnType<ApiCallFn>> {
+function toMockedTransformerResponse(response: ApiMockResponse): Awaited<ReturnType<ApiCallFn>> {
   // The mock deliberately supports only the API response shapes exercised by
   // tests. grammY's generic transformer result is therefore narrowed here,
   // at the boundary between the generic API client and the controlled mock.

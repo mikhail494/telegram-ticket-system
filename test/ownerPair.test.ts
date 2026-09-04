@@ -19,14 +19,22 @@ test("owner pairing creates a one-use link only after interactive confirmation",
       confirm: async () => "PAIR",
       getUsername: async () => "fake_bot",
       openDatabase: () => db,
-      write: (line) => output.push(line)
+      write: (line) => output.push(line),
     });
     assert.equal(db.listUnconsumedTokens().filter((token) => token.kind === "OWNER_PAIRING").length, 1);
     assert.match(output.join("\n"), /https:\/\/t\.me\/fake_bot\?start=setup_/);
-    assert.equal(db.listUnconsumedTokens().some((token) => output.join("\n").includes(token.token_hash)), false);
+    assert.equal(
+      db.listUnconsumedTokens().some((token) => output.join("\n").includes(token.token_hash)),
+      false
+    );
     const token = output.join("\n").match(/setup_([^\s]+)/)?.[1];
     assert.ok(token);
     new InstallationService(db).consumeOwnerPairingToken(token, { telegramId: 1 });
-    await assert.rejects(() => runOwnerPair({ interactive: true, confirm: async () => "PAIR", openDatabase: () => db }), /OWNER already exists|owner:recover/i);
-  } finally { db.close(); }
+    await assert.rejects(
+      () => runOwnerPair({ interactive: true, confirm: async () => "PAIR", openDatabase: () => db }),
+      /OWNER already exists|owner:recover/i
+    );
+  } finally {
+    db.close();
+  }
 });

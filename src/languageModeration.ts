@@ -1,10 +1,10 @@
-
 import { normalizeTelegramDeliveryError } from "./deliveryDiagnostics.js";
 import { logger } from "./logger.js";
 import type { BackgroundTaskTracker } from "./lifecycle.js";
 import { francAll } from "franc-min";
 
-export const DEFAULT_MODERATION_WARNING = "Please use English in the main chat. Further violations may be reviewed by an authorized moderator under the current community policy.";
+export const DEFAULT_MODERATION_WARNING =
+  "Please use English in the main chat. Further violations may be reviewed by an authorized moderator under the current community policy.";
 
 export interface LanguageModerationConfig {
   enabled: boolean;
@@ -47,7 +47,7 @@ const INDONESIAN_MALAY_CHAT_NORMALIZATIONS: Readonly<Record<string, readonly str
   emng: ["emang"],
   gabisa: ["tidak", "bisa"],
   gamasalah: ["tidak", "masalah"],
-  dh: ["sudah"]
+  dh: ["sudah"],
 };
 
 const INDONESIAN_MALAY_CHAT_SIGNAL_WEIGHTS: Readonly<Record<string, number>> = {
@@ -121,7 +121,7 @@ const INDONESIAN_MALAY_CHAT_SIGNAL_WEIGHTS: Readonly<Record<string, number>> = {
   tahu: 1,
   usah: 1,
   lu: 1,
-  gw: 1
+  gw: 1,
 };
 
 const scheduledCleanupJobs = new Set<number>();
@@ -145,7 +145,9 @@ export function classifyModerationLanguage(text: string, allowlist: readonly str
 
   const letters = normalized.match(/\p{L}/gu) ?? [];
   const cyrillic = normalized.match(/\p{Script=Cyrillic}/gu) ?? [];
-  const nonLatin = normalized.match(/[\p{Script=Arabic}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu) ?? [];
+  const nonLatin =
+    normalized.match(/[\p{Script=Arabic}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu) ??
+    [];
   if (letters.length < 5 || isKeyboardMash(normalized)) return "uncertain";
   if (cyrillic.length >= 5 && cyrillic.length / letters.length >= 0.55) return "non_english";
   if (nonLatin.length >= 5 && nonLatin.length / letters.length >= 0.55) return "non_english";
@@ -179,10 +181,15 @@ export function preprocessModerationText(text: string, allowlist: readonly strin
     if (!trimmed) continue;
     value = value.replace(new RegExp(escapeRegExp(trimmed), "gi"), " ");
   }
-  return value.replace(/[^\p{L}\s]/gu, " ").replace(/\s+/g, " ").trim();
+  return value
+    .replace(/[^\p{L}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-export function parseModerationConfig(settings: Readonly<Record<string, string | undefined>>): LanguageModerationConfig {
+export function parseModerationConfig(
+  settings: Readonly<Record<string, string | undefined>>
+): LanguageModerationConfig {
   const targetChatId = parseInteger(settings.target);
   return {
     enabled: settings.enabled === "true",
@@ -191,7 +198,7 @@ export function parseModerationConfig(settings: Readonly<Record<string, string |
     lookbackMinutes: parsePositiveInteger(settings.lookback_minutes, 5),
     warningCooldownMinutes: parsePositiveInteger(settings.warning_cooldown_minutes, 10),
     warningMessageThreshold: parsePositiveInteger(settings.warning_message_threshold, 15),
-    allowlist: parseAllowlist(settings.allowlist)
+    allowlist: parseAllowlist(settings.allowlist),
   };
 }
 
@@ -200,7 +207,14 @@ export function parseAllowlist(value: string | undefined): readonly string[] {
   try {
     const parsed: unknown = JSON.parse(value);
     if (!Array.isArray(parsed)) return [];
-    return [...new Set(parsed.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.trim().toLowerCase()).filter(Boolean))];
+    return [
+      ...new Set(
+        parsed
+          .filter((entry): entry is string => typeof entry === "string")
+          .map((entry) => entry.trim().toLowerCase())
+          .filter(Boolean)
+      ),
+    ];
   } catch {
     return [];
   }
@@ -217,21 +231,27 @@ export function scheduleModerationCleanup(
   if (scheduledCleanupJobs.has(jobId)) return;
   scheduledCleanupJobs.add(jobId);
   const timer = createTimer(() => {
-    const run = () => processModerationCleanupJob(api, db, jobId, new Date())
-      .catch(async (error) => {
-        const { logger } = await import("./logger.js");
-        logger.warn({ jobId, err: error }, "Moderation cleanup timer failed");
-      })
-      .finally(() => scheduledCleanupJobs.delete(jobId));
+    const run = () =>
+      processModerationCleanupJob(api, db, jobId, new Date())
+        .catch(async (error) => {
+          const { logger } = await import("./logger.js");
+          logger.warn({ jobId, err: error }, "Moderation cleanup timer failed");
+        })
+        .finally(() => scheduledCleanupJobs.delete(jobId));
     if (backgroundTasks) {
       const accepted = backgroundTasks.run(run);
-      if (!accepted) logger.debug({ operation: "moderation_cleanup", jobId }, "Background work was dropped during shutdown");
+      if (!accepted)
+        logger.debug({ operation: "moderation_cleanup", jobId }, "Background work was dropped during shutdown");
     } else void run();
   }, delayMs);
   timer.unref?.();
 }
 
-export async function processModerationRecovery(api: import("grammy").Context["api"], db: import("./db.js").SupportDatabase, currentTime = new Date()): Promise<void> {
+export async function processModerationRecovery(
+  api: import("grammy").Context["api"],
+  db: import("./db.js").SupportDatabase,
+  currentTime = new Date()
+): Promise<void> {
   const { config } = await import("./config.js");
   for (const job of db.listLanguageModerationRecoveryJobs(config.staffChatId, currentTime.toISOString())) {
     await processModerationCleanupJob(api, db, job.id, currentTime);
@@ -246,10 +266,19 @@ export async function processModerationCleanupJob(
 ): Promise<void> {
   const { config } = await import("./config.js");
   const job = db.getLanguageModerationCleanupJob(jobId);
-  if (!job || job.staff_chat_id !== config.staffChatId || job.state === "COMPLETED" || Date.parse(job.cleanup_due_at) > currentTime.getTime()) return;
+  if (
+    !job ||
+    job.staff_chat_id !== config.staffChatId ||
+    job.state === "COMPLETED" ||
+    Date.parse(job.cleanup_due_at) > currentTime.getTime()
+  )
+    return;
 
   if (!job.violation_cycle_id) {
-    logger.warn({ jobId: job.id, chatId: job.chat_id }, "Moderation cleanup job has no immutable violation cycle reference");
+    logger.warn(
+      { jobId: job.id, chatId: job.chat_id },
+      "Moderation cleanup job has no immutable violation cycle reference"
+    );
     return;
   }
 
@@ -257,19 +286,37 @@ export async function processModerationCleanupJob(
   const cycleId = job.violation_cycle_id;
 
   try {
-    if (state === "PENDING" || state === "CLEANING" || db.listPendingLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId).length > 0) {
+    if (
+      state === "PENDING" ||
+      state === "CLEANING" ||
+      db.listPendingLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId).length > 0
+    ) {
       db.updateLanguageModerationCleanupJob(job.id, "CLEANING");
       const summary = { attempted: 0, deleted: 0, alreadyAbsent: 0, retryableFailures: 0, terminalFailures: 0 };
-      for (const violation of db.listPendingLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId)) {
+      for (const violation of db.listPendingLanguageModerationCleanupCycleViolations(
+        job.chat_id,
+        job.user_telegram_id,
+        cycleId
+      )) {
         summary.attempted += 1;
         try {
           await api.deleteMessage(job.chat_id, violation.message_id);
-          db.recordLanguageModerationViolationCleanupResult({ chatId: job.chat_id, userId: job.user_telegram_id, messageId: violation.message_id, state: "DELETED" });
+          db.recordLanguageModerationViolationCleanupResult({
+            chatId: job.chat_id,
+            userId: job.user_telegram_id,
+            messageId: violation.message_id,
+            state: "DELETED",
+          });
           summary.deleted += 1;
         } catch (error) {
           const diagnostic = normalizeTelegramDeliveryError(error);
           if (isAlreadyAbsentModerationMessage(diagnostic)) {
-            db.recordLanguageModerationViolationCleanupResult({ chatId: job.chat_id, userId: job.user_telegram_id, messageId: violation.message_id, state: "ALREADY_ABSENT" });
+            db.recordLanguageModerationViolationCleanupResult({
+              chatId: job.chat_id,
+              userId: job.user_telegram_id,
+              messageId: violation.message_id,
+              state: "ALREADY_ABSENT",
+            });
             summary.alreadyAbsent += 1;
             continue;
           }
@@ -282,16 +329,38 @@ export async function processModerationCleanupJob(
             state: retryable ? "PENDING" : "TERMINAL_FAILED",
             errorCategory: diagnostic.category,
             errorCode: diagnostic.telegramErrorCode,
-            errorDescription: diagnostic.description
+            errorDescription: diagnostic.description,
           });
           if (retryable) summary.retryableFailures += 1;
           else summary.terminalFailures += 1;
-          logger.warn({ jobId: job.id, chatId: job.chat_id, messageId: violation.message_id, telegramErrorCode: diagnostic.telegramErrorCode, description: diagnostic.description, retryable }, "Could not delete moderation violation message");
+          logger.warn(
+            {
+              jobId: job.id,
+              chatId: job.chat_id,
+              messageId: violation.message_id,
+              telegramErrorCode: diagnostic.telegramErrorCode,
+              description: diagnostic.description,
+              retryable,
+            },
+            "Could not delete moderation violation message"
+          );
         }
       }
-      logger.info({ jobId: job.id, chatId: job.chat_id, attemptedCount: summary.attempted, deletedCount: summary.deleted, alreadyAbsentCount: summary.alreadyAbsent, retryableFailureCount: summary.retryableFailures, terminalFailureCount: summary.terminalFailures }, "Moderation cleanup deletion summary");
+      logger.info(
+        {
+          jobId: job.id,
+          chatId: job.chat_id,
+          attemptedCount: summary.attempted,
+          deletedCount: summary.deleted,
+          alreadyAbsentCount: summary.alreadyAbsent,
+          retryableFailureCount: summary.retryableFailures,
+          terminalFailureCount: summary.terminalFailures,
+        },
+        "Moderation cleanup deletion summary"
+      );
 
-      const unresolved = db.listLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId)
+      const unresolved = db
+        .listLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId)
         .some((violation) => violation.cleanup_state === "PENDING" || violation.cleanup_state === "TERMINAL_FAILED");
       if (unresolved) return;
       db.updateLanguageModerationCleanupJob(job.id, "LOG_PENDING");
@@ -301,9 +370,14 @@ export async function processModerationCleanupJob(
     if (state !== "LOG_PENDING") return;
     const { logModerationSanction } = await import("./archive.js");
     const managedChat = db.getManagedPublicChat(job.chat_id, true);
-    const messageThreadIds = [...new Set(db.listLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId)
-      .map((violation) => violation.message_thread_id)
-      .filter((threadId): threadId is number => threadId !== null))].sort((left, right) => left - right);
+    const messageThreadIds = [
+      ...new Set(
+        db
+          .listLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId)
+          .map((violation) => violation.message_thread_id)
+          .filter((threadId): threadId is number => threadId !== null)
+      ),
+    ].sort((left, right) => left - right);
     await logModerationSanction(api, db, {
       userTelegramId: job.user_telegram_id,
       username: job.username,
@@ -313,14 +387,23 @@ export async function processModerationCleanupJob(
       messageThreadIds,
       sanctionTier: job.sanction_tier,
       sanctionKind: job.sanction_kind,
-      timestamp: job.updated_at
+      timestamp: job.updated_at,
     });
     db.clearLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId);
     db.updateLanguageModerationCleanupJob(job.id, "COMPLETED");
   } catch (error) {
     db.updateLanguageModerationCleanupJob(jobId, state === "LOG_PENDING" ? "LOG_PENDING" : "CLEANING");
     const diagnostic = normalizeTelegramDeliveryError(error);
-    logger.warn({ jobId, chatId: job.chat_id, category: diagnostic.category, telegramErrorCode: diagnostic.telegramErrorCode, description: diagnostic.description }, "Moderation cleanup/log recovery pending");
+    logger.warn(
+      {
+        jobId,
+        chatId: job.chat_id,
+        category: diagnostic.category,
+        telegramErrorCode: diagnostic.telegramErrorCode,
+        description: diagnostic.description,
+      },
+      "Moderation cleanup/log recovery pending"
+    );
   }
 }
 
@@ -365,9 +448,7 @@ function hasIndonesianMalayChatSignals(tokens: readonly string[]): boolean {
 
   const score = [...matchedSignals.values()].reduce((total, weight) => total + weight, 0);
   // One distinctive chat word is sufficient; otherwise require corroborating whole-token signals.
-  return matchedSignals.size === 1
-    ? score >= DISTINCTIVE_CHAT_SIGNAL_SCORE
-    : score >= CORROBORATED_CHAT_SIGNAL_SCORE;
+  return matchedSignals.size === 1 ? score >= DISTINCTIVE_CHAT_SIGNAL_SCORE : score >= CORROBORATED_CHAT_SIGNAL_SCORE;
 }
 
 function escapeRegExp(value: string): string {

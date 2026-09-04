@@ -1,12 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { Update } from "grammy/types";
-import {
-  TEST_STAFF_CHAT_ID,
-  createBotHarness,
-  type BotHarness,
-  type RecordedApiCall
-} from "./helpers/botHarness.js";
+import { TEST_STAFF_CHAT_ID, createBotHarness, type BotHarness, type RecordedApiCall } from "./helpers/botHarness.js";
 
 const { archiveTicketIfPossible, getSupportLogsTopicInfo } = await import("../src/archive.js");
 const SUPPORT_LOGS_SETTING_KEY = `support_logs_message_thread_id:${TEST_STAFF_CHAT_ID}`;
@@ -38,17 +33,17 @@ function buildSetLogsCommand(messageThreadId: number): Update {
       chat: { id: TEST_STAFF_CHAT_ID, type: "supergroup", title: "Test Staff Chat" },
       message_thread_id: messageThreadId,
       text: "/setlogs",
-      entities: [{ offset: 0, length: 8, type: "bot_command" }]
-    }
+      entities: [{ offset: 0, length: 8, type: "bot_command" }],
+    },
   };
 }
 
 function staffTopicMessages(harness: BotHarness, messageThreadId: number): RecordedApiCall[] {
-  return harness.findApiCalls("sendMessage").filter(
-    (call) =>
-      call.payload.chat_id === TEST_STAFF_CHAT_ID &&
-      call.payload.message_thread_id === messageThreadId
-  );
+  return harness
+    .findApiCalls("sendMessage")
+    .filter(
+      (call) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_thread_id === messageThreadId
+    );
 }
 
 describe("Support Logs topic safety", () => {
@@ -96,9 +91,9 @@ describe("Support Logs topic safety", () => {
     assert.equal(harness.db.getSetting(SUPPORT_LOGS_SETTING_KEY), String(topic.threadId));
     assert.equal(harness.countApiCalls("createForumTopic"), 1);
     assert.equal(
-      harness.findApiCalls("sendChatAction").some(
-        (call) => call.payload.message_thread_id === ticket.message_thread_id
-      ),
+      harness
+        .findApiCalls("sendChatAction")
+        .some((call) => call.payload.message_thread_id === ticket.message_thread_id),
       false
     );
   });
@@ -113,19 +108,18 @@ describe("Support Logs topic safety", () => {
       text: "Please help with my account.",
       senderType: "USER",
       senderDisplayName: "@test_customer",
-      senderUsername: "test_customer"
+      senderUsername: "test_customer",
     });
     harness.db.closeTicketRecord(ticket.id, {
       type: "STAFF",
       displayName: "@test_staff",
-      username: "test_staff"
+      username: "test_staff",
     });
 
     const archived = await archiveTicketIfPossible(harness.bot.api, harness.db, ticket.id);
-    const archiveCalls = [
-      ...harness.findApiCalls("sendMessage"),
-      ...harness.findApiCalls("sendDocument")
-    ].filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID);
+    const archiveCalls = [...harness.findApiCalls("sendMessage"), ...harness.findApiCalls("sendDocument")].filter(
+      (call) => call.payload.chat_id === TEST_STAFF_CHAT_ID
+    );
 
     assert.equal(archived, true);
     assert.equal(archiveCalls.length, 2);

@@ -30,6 +30,9 @@ jobs:
       - name: Lint source and tests
         run: npm run lint
 
+      - name: Check formatting
+        run: npm run format:check
+
       - name: Check production TypeScript
         run: npm exec tsc -- -p tsconfig.json --noEmit
 

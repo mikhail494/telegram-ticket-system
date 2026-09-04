@@ -21,25 +21,29 @@ test("private control plane keeps one authoritative screen and rejects stale cal
         edits.push({ chatId, messageId, text });
       },
       async deleteMessage() {},
-      async editMessageReplyMarkup() {}
+      async editMessageReplyMarkup() {},
     },
     async reply() {
       return { chat: { id: 42 }, message_id: 100 };
-    }
+    },
   } as unknown as Context;
 
   try {
-    await controlPlane.renderScreen(context, "Owner dashboard", new InlineKeyboard().text("System status", "dashboard:status"));
+    await controlPlane.renderScreen(
+      context,
+      "Owner dashboard",
+      new InlineKeyboard().text("System status", "dashboard:status")
+    );
     await controlPlane.renderScreen(context, "System status", new InlineKeyboard().text("Back", "dashboard:home"));
 
     assert.deepEqual(edits, [{ chatId: 42, messageId: 100, text: "System status" }]);
     const staleCallback = {
       ...context,
-      callbackQuery: { message: { chat: { id: 42, type: "private" }, message_id: 99 } }
+      callbackQuery: { message: { chat: { id: 42, type: "private" }, message_id: 99 } },
     } as unknown as Context;
     const activeCallback = {
       ...context,
-      callbackQuery: { message: { chat: { id: 42, type: "private" }, message_id: 100 } }
+      callbackQuery: { message: { chat: { id: 42, type: "private" }, message_id: 100 } },
     } as unknown as Context;
     assert.equal(controlPlane.isObsoleteOperatorCallback(staleCallback, "dashboard"), true);
     assert.equal(controlPlane.isObsoleteOperatorCallback(activeCallback, "dashboard"), false);
@@ -59,13 +63,17 @@ test("private control plane owns dashboard callbacks and private editor input di
     from: { id: 42, is_bot: false, first_name: "Owner" },
     chat: { id: 42, type: "private" },
     api: {
-      async editMessageText(_chatId: number, _messageId: number, text: string) { edits.push(text); },
+      async editMessageText(_chatId: number, _messageId: number, text: string) {
+        edits.push(text);
+      },
       async deleteMessage() {},
-      async editMessageReplyMarkup() {}
+      async editMessageReplyMarkup() {},
     },
     callbackQuery: { message: { chat: { id: 42, type: "private" }, message_id: 100 } },
     async answerCallbackQuery() {},
-    async reply() { return { chat: { id: 42 }, message_id: 100 }; }
+    async reply() {
+      return { chat: { id: 42 }, message_id: 100 };
+    },
   } as unknown as Context;
 
   controlPlane.configureOperatorUi({
@@ -80,11 +88,15 @@ test("private control plane owns dashboard callbacks and private editor input di
     onShowBatch: async () => {},
     packageVersion: "1.3.0",
     botUsername: () => "bot",
-    botId: () => 1
+    botId: () => 1,
   });
 
   try {
-    await controlPlane.renderScreen(context, "Owner dashboard", new InlineKeyboard().text("Support settings", "dashboard:support"));
+    await controlPlane.renderScreen(
+      context,
+      "Owner dashboard",
+      new InlineKeyboard().text("Support settings", "dashboard:support")
+    );
     assert.equal(await controlPlane.handleCallback(context, "dashboard:support"), true);
     assert.match(edits.at(-1) ?? "", /Support settings/);
 
@@ -115,14 +127,21 @@ test("public callbacks require current staff workspace membership even for an ow
     from: { id: 42, is_bot: false, first_name: "Owner" },
     chat: { id: 42, type: "private" },
     api: {
-      async getChat() { telegramInspectionCalls += 1; },
+      async getChat() {
+        telegramInspectionCalls += 1;
+      },
       async editMessageText() {},
       async deleteMessage() {},
-      async editMessageReplyMarkup() {}
+      async editMessageReplyMarkup() {},
     },
     callbackQuery: { message: { chat: { id: 42, type: "private" }, message_id: 100 } },
-    async answerCallbackQuery(options?: { text?: string; show_alert?: boolean }) { alerts.push(options ?? {}); },
-    async reply() { screenReplies += 1; return { chat: { id: 42 }, message_id: 100 }; }
+    async answerCallbackQuery(options?: { text?: string; show_alert?: boolean }) {
+      alerts.push(options ?? {});
+    },
+    async reply() {
+      screenReplies += 1;
+      return { chat: { id: 42 }, message_id: 100 };
+    },
   } as unknown as Context;
   controlPlane.configureOperatorUi({
     db,
@@ -136,7 +155,7 @@ test("public callbacks require current staff workspace membership even for an ow
     onShowBatch: async () => {},
     packageVersion: "1.3.0",
     botUsername: () => "bot",
-    botId: () => 1
+    botId: () => 1,
   });
 
   try {
@@ -144,7 +163,7 @@ test("public callbacks require current staff workspace membership even for an ow
     assert.equal(await controlPlane.handleCallback(context, "public:list"), true);
     assert.deepEqual(alerts, [
       { text: "Staff workspace membership required.", show_alert: true },
-      { text: "Staff workspace membership required.", show_alert: true }
+      { text: "Staff workspace membership required.", show_alert: true },
     ]);
     assert.equal(db.getManagedPublicChat(-2001)?.moderation_enabled, 1);
     assert.equal(telegramInspectionCalls, 0);

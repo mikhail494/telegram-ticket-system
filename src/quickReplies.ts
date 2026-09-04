@@ -8,12 +8,7 @@ import type { SupportDatabase } from "./db.js";
 const SLUG_PATTERN = /^[a-z0-9_]+$/;
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 
-export const QUICK_REPLIES_CONFIG_PATH = resolve(
-  moduleDirectory,
-  "..",
-  "config",
-  "quick-replies.json"
-);
+export const QUICK_REPLIES_CONFIG_PATH = resolve(moduleDirectory, "..", "config", "quick-replies.json");
 
 const templateSchema = z.object({
   id: z
@@ -21,7 +16,7 @@ const templateSchema = z.object({
     .regex(SLUG_PATTERN, "Template id must use lowercase letters, numbers, and underscores only")
     .max(24, "Template id maximum length is 24 characters"),
   title: z.string().trim().min(1, "Template title must not be empty").max(32),
-  text: z.string().trim().min(1, "Template text must not be empty").max(3500)
+  text: z.string().trim().min(1, "Template text must not be empty").max(3500),
 });
 
 const quickRepliesConfigSchema = z
@@ -35,10 +30,10 @@ const quickRepliesConfigSchema = z
             .regex(SLUG_PATTERN, "Category id must use lowercase letters, numbers, and underscores only")
             .max(24, "Category id maximum length is 24 characters"),
           title: z.string().trim().min(1, "Category title must not be empty").max(32),
-          templates: z.array(templateSchema).min(1, "Each category must contain at least one template")
+          templates: z.array(templateSchema).min(1, "Each category must contain at least one template"),
         })
       )
-      .min(1, "At least one category is required")
+      .min(1, "At least one category is required"),
   })
   .superRefine((config, context) => {
     const categoryIds = new Set<string>();
@@ -49,7 +44,7 @@ const quickRepliesConfigSchema = z
         context.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["categories", categoryIndex, "id"],
-          message: `Category id "${category.id}" must be unique`
+          message: `Category id "${category.id}" must be unique`,
         });
       }
 
@@ -60,7 +55,7 @@ const quickRepliesConfigSchema = z
           context.addIssue({
             code: z.ZodIssueCode.custom,
             path: ["categories", categoryIndex, "templates", templateIndex, "id"],
-            message: `Template id "${template.id}" must be globally unique`
+            message: `Template id "${template.id}" must be globally unique`,
           });
         }
 
@@ -110,9 +105,7 @@ export class QuickRepliesConfigError extends Error {
 
 const EMPTY_TEMPLATES: readonly QuickReplyTemplate[] = Object.freeze([]);
 
-export function loadQuickRepliesRegistry(
-  configPath: string = QUICK_REPLIES_CONFIG_PATH
-): QuickRepliesRegistry {
+export function loadQuickRepliesRegistry(configPath: string = QUICK_REPLIES_CONFIG_PATH): QuickRepliesRegistry {
   const parsedConfig = parseConfigFile(configPath);
   const categories = Object.freeze(
     parsedConfig.categories.map((category) => {
@@ -121,7 +114,7 @@ export function loadQuickRepliesRegistry(
           Object.freeze({
             id: template.id,
             title: template.title,
-            text: template.text
+            text: template.text,
           })
         )
       );
@@ -129,23 +122,21 @@ export function loadQuickRepliesRegistry(
       return Object.freeze({
         id: category.id,
         title: category.title,
-        templates
+        templates,
       });
     })
   );
 
   const categoryById = new Map(categories.map((category) => [category.id, category]));
   const templateById = new Map(
-    categories.flatMap((category) =>
-      category.templates.map((template) => [template.id, template] as const)
-    )
+    categories.flatMap((category) => category.templates.map((template) => [template.id, template] as const))
   );
 
   return Object.freeze({
     listCategories: () => categories,
     findCategory: (categoryId: string) => categoryById.get(categoryId),
     listTemplates: (categoryId: string) => categoryById.get(categoryId)?.templates ?? EMPTY_TEMPLATES,
-    findTemplate: (templateId: string) => templateById.get(templateId)
+    findTemplate: (templateId: string) => templateById.get(templateId),
   });
 }
 
@@ -162,26 +153,25 @@ export function createPersistentQuickRepliesRegistry(
     findTemplate: manager.findTemplate,
     updateTemplate: manager.updateTemplate,
     createTemplate: manager.createTemplate,
-    deleteTemplate: manager.deleteTemplate
+    deleteTemplate: manager.deleteTemplate,
   });
 }
 
-export function createQuickRepliesManager(
-  db: SupportDatabase,
-  defaults: QuickRepliesRegistry
-): QuickRepliesManager {
+export function createQuickRepliesManager(db: SupportDatabase, defaults: QuickRepliesRegistry): QuickRepliesManager {
   db.seedQuickReplies(defaults.listCategories());
 
-  const listCategories = (): readonly QuickReplyCategory[] => Object.freeze(
-    db.listQuickReplyCategories().map((category) => Object.freeze({
-      id: category.id,
-      title: category.title,
-      templates: Object.freeze(db.listQuickReplyTemplates(category.id).map(toQuickReplyTemplate))
-    }))
-  );
-  const listTemplates = (categoryId: string): readonly QuickReplyTemplate[] => Object.freeze(
-    db.listQuickReplyTemplates(categoryId).map(toQuickReplyTemplate)
-  );
+  const listCategories = (): readonly QuickReplyCategory[] =>
+    Object.freeze(
+      db.listQuickReplyCategories().map((category) =>
+        Object.freeze({
+          id: category.id,
+          title: category.title,
+          templates: Object.freeze(db.listQuickReplyTemplates(category.id).map(toQuickReplyTemplate)),
+        })
+      )
+    );
+  const listTemplates = (categoryId: string): readonly QuickReplyTemplate[] =>
+    Object.freeze(db.listQuickReplyTemplates(categoryId).map(toQuickReplyTemplate));
   const findTemplate = (templateId: string): QuickReplyTemplate | undefined => {
     const template = db.getQuickReplyTemplate(templateId);
     return template ? toQuickReplyTemplate(template) : undefined;
@@ -197,11 +187,11 @@ export function createQuickRepliesManager(
       const validated = templateSchema.parse({
         id: existing.id,
         title: input.title ?? existing.title,
-        text: input.text ?? existing.text
+        text: input.text ?? existing.text,
       });
       const updated = db.updateQuickReplyTemplate(templateId, {
         title: validated.title,
-        text: validated.text
+        text: validated.text,
       });
       return updated ? toQuickReplyTemplate(updated) : undefined;
     },
@@ -209,16 +199,18 @@ export function createQuickRepliesManager(
       const validated = templateSchema.parse({
         id: `custom_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
         title: input.title,
-        text: input.text
+        text: input.text,
       });
-      return toQuickReplyTemplate(db.createQuickReplyTemplate({
-        id: validated.id,
-        categoryId: input.categoryId,
-        title: validated.title,
-        text: validated.text
-      }));
+      return toQuickReplyTemplate(
+        db.createQuickReplyTemplate({
+          id: validated.id,
+          categoryId: input.categoryId,
+          title: validated.title,
+          text: validated.text,
+        })
+      );
     },
-    deleteTemplate: (templateId: string) => db.deleteQuickReplyTemplate(templateId)
+    deleteTemplate: (templateId: string) => db.deleteQuickReplyTemplate(templateId),
   });
 }
 

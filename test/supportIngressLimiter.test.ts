@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { SupportIngressLimiter } from "../src/supportIngressLimiter.js";
 
-function createLimiter(now: () => number, overrides: Partial<ConstructorParameters<typeof SupportIngressLimiter>[0]> = {}) {
+function createLimiter(
+  now: () => number,
+  overrides: Partial<ConstructorParameters<typeof SupportIngressLimiter>[0]> = {}
+) {
   return new SupportIngressLimiter({
     now,
     capacity: 30,
@@ -10,7 +13,7 @@ function createLimiter(now: () => number, overrides: Partial<ConstructorParamete
     warningCooldownMs: 30_000,
     idleTtlMs: 30 * 60_000,
     maxEntries: 10_000,
-    ...overrides
+    ...overrides,
   });
 }
 

@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SupportDatabase } from "../src/db.js";
-import {
-  formatPublicChatPermissionChecklist,
-  validatePublicModerationChat
-} from "../src/publicChatModeration.js";
+import { formatPublicChatPermissionChecklist, validatePublicModerationChat } from "../src/publicChatModeration.js";
 import { createBotHarness, TEST_BOT_IDENTITY } from "./helpers/botHarness.js";
 
 const STAFF_CHAT_ID = -100500;
@@ -24,28 +21,28 @@ test("managed public chats keep independent moderation configuration", () => {
       workspaceId,
       title: "Community A",
       username: "community_a",
-      isForum: true
+      isForum: true,
     });
     db.upsertManagedPublicChat({
       chatId: CHAT_B,
       workspaceId,
       title: "Community B",
       username: "community_b",
-      isForum: false
+      isForum: false,
     });
     db.updateManagedPublicChatConfig(CHAT_A, {
       warningText: "Warning A",
       allowlist: ["alpha"],
       warningCooldownMinutes: 7,
       warningMessageThreshold: 11,
-      lookbackMinutes: 4
+      lookbackMinutes: 4,
     });
     db.updateManagedPublicChatConfig(CHAT_B, {
       warningText: "Warning B",
       allowlist: ["beta"],
       warningCooldownMinutes: 17,
       warningMessageThreshold: 21,
-      lookbackMinutes: 9
+      lookbackMinutes: 9,
     });
     db.setManagedPublicChatModerationEnabled(CHAT_A, true);
 
@@ -76,7 +73,7 @@ test("removing management deactivates a chat without deleting moderation history
       username: "synthetic_user",
       current_strikes: 2,
       sanction_tier: 1,
-      first_strike_at: "2026-08-09T00:00:00.000Z"
+      first_strike_at: "2026-08-09T00:00:00.000Z",
     });
 
     assert.equal(db.deactivateManagedPublicChat(CHAT_A), true);
@@ -94,12 +91,12 @@ test("warning state is independent per forum topic while strikes remain chat sco
     db.upsertLanguageModerationWarningState(CHAT_A, 101, {
       lastWarningMessageId: 501,
       lastWarningAt: "2026-08-09T00:00:00.000Z",
-      ordinaryMessagesSinceWarning: 3
+      ordinaryMessagesSinceWarning: 3,
     });
     db.upsertLanguageModerationWarningState(CHAT_A, 202, {
       lastWarningMessageId: 502,
       lastWarningAt: "2026-08-09T00:01:00.000Z",
-      ordinaryMessagesSinceWarning: 8
+      ordinaryMessagesSinceWarning: 8,
     });
     db.upsertLanguageModerationUserState({
       chat_id: CHAT_A,
@@ -107,7 +104,7 @@ test("warning state is independent per forum topic while strikes remain chat sco
       username: null,
       current_strikes: 1,
       sanction_tier: 0,
-      first_strike_at: "2026-08-09T00:00:00.000Z"
+      first_strike_at: "2026-08-09T00:00:00.000Z",
     });
 
     assert.equal(db.getLanguageModerationWarningState(CHAT_A, 101)?.last_warning_message_id, 501);
@@ -121,14 +118,17 @@ test("warning state is independent per forum topic while strikes remain chat sco
 test("violations persist their originating forum topic", () => {
   const db = new SupportDatabase(":memory:");
   try {
-    assert.equal(db.addLanguageModerationViolation({
-      chat_id: CHAT_A,
-      user_telegram_id: 55,
-      message_id: 800,
-      message_thread_id: 404,
-      username: null,
-      cycle_tier: 0
-    }), true);
+    assert.equal(
+      db.addLanguageModerationViolation({
+        chat_id: CHAT_A,
+        user_telegram_id: 55,
+        message_id: 800,
+        message_thread_id: 404,
+        username: null,
+        cycle_tier: 0,
+      }),
+      true
+    );
     assert.equal(db.listLanguageModerationViolations(CHAT_A, "1970-01-01T00:00:00.000Z")[0]?.message_thread_id, 404);
   } finally {
     db.close();
@@ -146,8 +146,8 @@ test("public moderation permission checks keep reactions advisory", async () => 
         title: "Synthetic forum",
         username: "synthetic_forum",
         is_forum: true,
-        available_reactions: []
-      }
+        available_reactions: [],
+      },
     }));
     harness.setApiResponseOverride("getChatMember", (call, success) => {
       if (call.payload.user_id !== TEST_BOT_IDENTITY.id) return success;
@@ -158,8 +158,8 @@ test("public moderation permission checks keep reactions advisory", async () => 
           user: TEST_BOT_IDENTITY,
           can_manage_chat: true,
           can_delete_messages: true,
-          can_restrict_members: true
-        }
+          can_restrict_members: true,
+        },
       };
     });
 
@@ -181,24 +181,23 @@ test("custom or paid reactions do not imply moderation emoji availability", asyn
         id: CHAT_A,
         type: "supergroup",
         title: "Synthetic forum",
-        available_reactions: [
-          { type: "custom_emoji", custom_emoji_id: "synthetic-custom-emoji" },
-          { type: "paid" }
-        ]
-      }
+        available_reactions: [{ type: "custom_emoji", custom_emoji_id: "synthetic-custom-emoji" }, { type: "paid" }],
+      },
     }));
-    harness.setApiResponseOverride("getChatMember", (call, success) => call.payload.user_id === TEST_BOT_IDENTITY.id
-      ? {
-          ...success,
-          result: {
-            status: "administrator",
-            user: TEST_BOT_IDENTITY,
-            can_manage_chat: true,
-            can_delete_messages: true,
-            can_restrict_members: true
+    harness.setApiResponseOverride("getChatMember", (call, success) =>
+      call.payload.user_id === TEST_BOT_IDENTITY.id
+        ? {
+            ...success,
+            result: {
+              status: "administrator",
+              user: TEST_BOT_IDENTITY,
+              can_manage_chat: true,
+              can_delete_messages: true,
+              can_restrict_members: true,
+            },
           }
-        }
-      : success);
+        : success
+    );
 
     const result = await validatePublicModerationChat(harness.bot.api, CHAT_A, TEST_BOT_IDENTITY.id);
     assert.equal(result.valid, true);
@@ -214,15 +213,35 @@ test("reaction advisory reports available only when both moderation emojis are a
     let availableReactions: Array<{ type: "emoji"; emoji: "👀" | "😡" }> = [{ type: "emoji", emoji: "👀" }];
     harness.setApiResponseOverride("getChat", (_call, success) => ({
       ...success,
-      result: { id: CHAT_A, type: "supergroup", title: "Synthetic forum", available_reactions: availableReactions }
+      result: { id: CHAT_A, type: "supergroup", title: "Synthetic forum", available_reactions: availableReactions },
     }));
-    harness.setApiResponseOverride("getChatMember", (call, success) => call.payload.user_id === TEST_BOT_IDENTITY.id
-      ? { ...success, result: { status: "administrator", user: TEST_BOT_IDENTITY, can_manage_chat: true, can_delete_messages: true, can_restrict_members: true } }
-      : success);
+    harness.setApiResponseOverride("getChatMember", (call, success) =>
+      call.payload.user_id === TEST_BOT_IDENTITY.id
+        ? {
+            ...success,
+            result: {
+              status: "administrator",
+              user: TEST_BOT_IDENTITY,
+              can_manage_chat: true,
+              can_delete_messages: true,
+              can_restrict_members: true,
+            },
+          }
+        : success
+    );
 
-    assert.equal((await validatePublicModerationChat(harness.bot.api, CHAT_A, TEST_BOT_IDENTITY.id)).reactionsAvailable, false);
-    availableReactions = [{ type: "emoji", emoji: "👀" }, { type: "emoji", emoji: "😡" }];
-    assert.equal((await validatePublicModerationChat(harness.bot.api, CHAT_A, TEST_BOT_IDENTITY.id)).reactionsAvailable, true);
+    assert.equal(
+      (await validatePublicModerationChat(harness.bot.api, CHAT_A, TEST_BOT_IDENTITY.id)).reactionsAvailable,
+      false
+    );
+    availableReactions = [
+      { type: "emoji", emoji: "👀" },
+      { type: "emoji", emoji: "😡" },
+    ];
+    assert.equal(
+      (await validatePublicModerationChat(harness.bot.api, CHAT_A, TEST_BOT_IDENTITY.id)).reactionsAvailable,
+      true
+    );
   } finally {
     harness.cleanup();
   }
@@ -233,7 +252,12 @@ test("dashboard counts disabled unhealthy managed chats", () => {
   try {
     const workspaceId = seedWorkspace(db);
     db.upsertManagedPublicChat({ chatId: CHAT_A, workspaceId, title: "Community A" });
-    db.recordManagedPublicChatPermissionHealth({ chatId: CHAT_A, healthy: false, reactionsAvailable: null, connected: true });
+    db.recordManagedPublicChatPermissionHealth({
+      chatId: CHAT_A,
+      healthy: false,
+      reactionsAvailable: null,
+      connected: true,
+    });
     assert.equal(db.getInstallationOperationalCounts().unhealthyModerationChats, 1);
   } finally {
     db.close();
@@ -252,7 +276,7 @@ test("permission refresh can clear stale optional Telegram metadata", () => {
       connected: true,
       title: "Community A",
       username: null,
-      isForum: false
+      isForum: false,
     });
     assert.equal(db.getManagedPublicChat(CHAT_A)?.username, null);
     assert.equal(db.getManagedPublicChat(CHAT_A)?.connection_status, "CONNECTED");
@@ -273,8 +297,8 @@ test("missing core enforcement rights make a public chat unhealthy", async () =>
           user: TEST_BOT_IDENTITY,
           can_manage_chat: true,
           can_delete_messages: true,
-          can_restrict_members: false
-        }
+          can_restrict_members: false,
+        },
       };
     });
 

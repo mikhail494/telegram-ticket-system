@@ -9,7 +9,10 @@ export interface WorkspaceStartupTasks {
   discoverStaffWorkspaceMembers?(): Promise<void>;
 }
 
-export async function runWorkspaceStartup(installation: InstallationService, tasks: WorkspaceStartupTasks): Promise<"SETUP_REQUIRED" | "READY"> {
+export async function runWorkspaceStartup(
+  installation: InstallationService,
+  tasks: WorkspaceStartupTasks
+): Promise<"SETUP_REQUIRED" | "READY"> {
   const setupState = installation.getState().setupState;
   const workspace = installation.getActiveWorkspace();
   if (setupState !== "READY" || !workspace) return "SETUP_REQUIRED";

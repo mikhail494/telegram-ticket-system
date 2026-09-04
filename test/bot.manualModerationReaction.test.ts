@@ -26,15 +26,15 @@ function createHarness(): { harness: BotHarness; installation: InstallationServi
     installationServiceFactory: (db) => {
       installation = new InstallationService(db);
       installation.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
-      installation.consumeOwnerPairingToken(
-        installation.createOwnerPairingToken(),
-        { telegramId: OWNER_ID, username: "synthetic_owner" }
-      );
+      installation.consumeOwnerPairingToken(installation.createOwnerPairingToken(), {
+        telegramId: OWNER_ID,
+        username: "synthetic_owner",
+      });
       installation.assignRole(OWNER_ID, 42, "ADMIN");
       installation.assignRole(OWNER_ID, 43, "SENIOR_AGENT");
       installation.assignRole(OWNER_ID, 44, "AGENT");
       return installation;
-    }
+    },
   });
   harnesses.push(harness);
   manage(harness, PUBLIC_CHAT_A, true);
@@ -48,39 +48,45 @@ function manage(harness: BotHarness, chatId: number, enabled: boolean): void {
   harness.db.setManagedPublicChatModerationEnabled(chatId, enabled);
 }
 
-function publicMessage(messageId: number, options: {
-  chatId?: number;
-  userId?: number;
-  username?: string;
-  text?: string;
-  threadId?: number;
-  isBot?: boolean;
-  contentType?: "text" | "photo" | "sticker" | "service";
-  caption?: string;
-  senderChat?: boolean;
-} = {}): Update {
+function publicMessage(
+  messageId: number,
+  options: {
+    chatId?: number;
+    userId?: number;
+    username?: string;
+    text?: string;
+    threadId?: number;
+    isBot?: boolean;
+    contentType?: "text" | "photo" | "sticker" | "service";
+    caption?: string;
+    senderChat?: boolean;
+  } = {}
+): Update {
   const chatId = options.chatId ?? PUBLIC_CHAT_A;
   const userId = options.userId ?? USER_ID;
-  const content = options.contentType === "photo"
-    ? {
-        photo: [{ file_id: `photo-${messageId}`, file_unique_id: `photo-unique-${messageId}`, width: 100, height: 100 }],
-        ...(options.caption === undefined ? {} : { caption: options.caption })
-      }
-    : options.contentType === "sticker"
+  const content =
+    options.contentType === "photo"
       ? {
-          sticker: {
-            file_id: `sticker-${messageId}`,
-            file_unique_id: `sticker-unique-${messageId}`,
-            type: "regular" as const,
-            width: 100,
-            height: 100,
-            is_animated: false,
-            is_video: false
-          }
+          photo: [
+            { file_id: `photo-${messageId}`, file_unique_id: `photo-unique-${messageId}`, width: 100, height: 100 },
+          ],
+          ...(options.caption === undefined ? {} : { caption: options.caption }),
         }
-      : options.contentType === "service"
-        ? { new_chat_title: "Renamed Community" }
-        : { text: options.text ?? "ordinary English chat message" };
+      : options.contentType === "sticker"
+        ? {
+            sticker: {
+              file_id: `sticker-${messageId}`,
+              file_unique_id: `sticker-unique-${messageId}`,
+              type: "regular" as const,
+              width: 100,
+              height: 100,
+              is_animated: false,
+              is_video: false,
+            },
+          }
+        : options.contentType === "service"
+          ? { new_chat_title: "Renamed Community" }
+          : { text: options.text ?? "ordinary English chat message" };
   return {
     update_id: messageId,
     message: {
@@ -90,36 +96,41 @@ function publicMessage(messageId: number, options: {
         id: userId,
         is_bot: options.isBot ?? false,
         first_name: "Synthetic User",
-        username: options.username ?? `synthetic_${userId}`
+        username: options.username ?? `synthetic_${userId}`,
       },
       chat: { id: chatId, type: "supergroup", title: "Synthetic Community" },
       ...(options.threadId === undefined ? {} : { message_thread_id: options.threadId }),
       ...(options.senderChat
         ? { sender_chat: { id: chatId, type: "supergroup" as const, title: "Anonymous Community" } }
         : {}),
-      ...content
-    }
+      ...content,
+    },
   };
 }
 
-function reactionUpdate(updateId: number, messageId: number, options: {
-  actorId?: number;
-  actorIsBot?: boolean;
-  actorChat?: boolean;
-  chatId?: number;
-  chatType?: "supergroup" | "private";
-  oldEyes?: boolean;
-  newEyes?: boolean;
-  extraEmoji?: boolean;
-} = {}): Update {
+function reactionUpdate(
+  updateId: number,
+  messageId: number,
+  options: {
+    actorId?: number;
+    actorIsBot?: boolean;
+    actorChat?: boolean;
+    chatId?: number;
+    chatType?: "supergroup" | "private";
+    oldEyes?: boolean;
+    newEyes?: boolean;
+    extraEmoji?: boolean;
+  } = {}
+): Update {
   const chatId = options.chatId ?? PUBLIC_CHAT_A;
-  const chat = options.chatType === "private"
-    ? { id: chatId, type: "private" as const, first_name: "Private" }
-    : { id: chatId, type: "supergroup" as const, title: "Synthetic Community" };
+  const chat =
+    options.chatType === "private"
+      ? { id: chatId, type: "private" as const, first_name: "Private" }
+      : { id: chatId, type: "supergroup" as const, title: "Synthetic Community" };
   const oldReaction = options.oldEyes ? [{ type: "emoji" as const, emoji: "👀" as const }] : [];
   const newReaction = [
     ...(options.newEyes === false ? [] : [{ type: "emoji" as const, emoji: "👀" as const }]),
-    ...(options.extraEmoji ? [{ type: "emoji" as const, emoji: "🔥" as const }] : [])
+    ...(options.extraEmoji ? [{ type: "emoji" as const, emoji: "🔥" as const }] : []),
   ];
   return {
     update_id: updateId,
@@ -131,8 +142,8 @@ function reactionUpdate(updateId: number, messageId: number, options: {
       new_reaction: newReaction,
       ...(options.actorChat
         ? { actor_chat: { id: -100999, type: "supergroup" as const, title: "Anonymous Admin" } }
-        : { user: { id: options.actorId ?? OWNER_ID, is_bot: options.actorIsBot ?? false, first_name: "Reactor" } })
-    }
+        : { user: { id: options.actorId ?? OWNER_ID, is_bot: options.actorIsBot ?? false, first_name: "Reactor" } }),
+    },
   };
 }
 
@@ -149,7 +160,7 @@ describe("OWNER manual moderation reaction", () => {
         user_telegram_id: USER_ID,
         username: "original_user",
         message_thread_id: 7,
-        created_at: undefined
+        created_at: undefined,
       }
     );
 
@@ -178,7 +189,7 @@ describe("OWNER manual moderation reaction", () => {
         "message_id",
         "message_thread_id",
         "user_telegram_id",
-        "username"
+        "username",
       ]);
     }
   });
@@ -247,7 +258,10 @@ describe("OWNER manual moderation reaction", () => {
     assert.equal(state?.current_strikes, 0);
     assert.equal(state?.sanction_tier, 1);
     assert.equal(harness.countApiCalls("restrictChatMember"), 1);
-    assert.equal(harness.findApiCalls("restrictChatMember")[0]?.payload.until_date, Math.floor(FIXED_NOW.getTime() / 1000) + 86_400);
+    assert.equal(
+      harness.findApiCalls("restrictChatMember")[0]?.payload.until_date,
+      Math.floor(FIXED_NOW.getTime() / 1000) + 86_400
+    );
     assert.equal(harness.countApiCalls("banChatMember"), 0);
     assert.equal(harness.countApiCalls("setMessageReaction"), 1);
     assert.equal(harness.scheduledModerationCleanupJobIds.length, 1);
@@ -265,11 +279,14 @@ describe("OWNER manual moderation reaction", () => {
       username: "synthetic_user",
       current_strikes: 2,
       sanction_tier: 1,
-      first_strike_at: FIXED_NOW.toISOString()
+      first_strike_at: FIXED_NOW.toISOString(),
     });
     await week.bot.handleUpdate(publicMessage(133));
     await week.bot.handleUpdate(reactionUpdate(9333, 133));
-    assert.equal(week.findApiCalls("restrictChatMember")[0]?.payload.until_date, Math.floor(FIXED_NOW.getTime() / 1000) + 604_800);
+    assert.equal(
+      week.findApiCalls("restrictChatMember")[0]?.payload.until_date,
+      Math.floor(FIXED_NOW.getTime() / 1000) + 604_800
+    );
     assert.equal(week.db.getLanguageModerationUserState(PUBLIC_CHAT_A, USER_ID)?.sanction_tier, 2);
 
     const permanent = createHarness().harness;
@@ -279,7 +296,7 @@ describe("OWNER manual moderation reaction", () => {
       username: "synthetic_user",
       current_strikes: 2,
       sanction_tier: 2,
-      first_strike_at: FIXED_NOW.toISOString()
+      first_strike_at: FIXED_NOW.toISOString(),
     });
     await permanent.bot.handleUpdate(publicMessage(134));
     await permanent.bot.handleUpdate(reactionUpdate(9334, 134));
@@ -295,7 +312,7 @@ describe("OWNER manual moderation reaction", () => {
       username: "synthetic_user",
       current_strikes: 2,
       sanction_tier: 0,
-      first_strike_at: FIXED_NOW.toISOString()
+      first_strike_at: FIXED_NOW.toISOString(),
     });
     await harness.bot.handleUpdate(publicMessage(135));
     harness.failNextApiCall("restrictChatMember");
@@ -333,7 +350,7 @@ describe("OWNER manual moderation reaction", () => {
       lastWarningAt: warning.last_warning_at,
       ordinaryMessagesSinceWarning: warning.ordinary_messages_since_warning,
       pendingWarningDueAt: new Date(0).toISOString(),
-      pendingWarningStartedAt: warning.pending_warning_started_at
+      pendingWarningStartedAt: warning.pending_warning_started_at,
     });
     const { processPendingWarning } = await import("../src/bot.js");
     await processPendingWarning(harness.bot.api, harness.db, PUBLIC_CHAT_A);
@@ -347,7 +364,7 @@ describe("OWNER manual moderation reaction", () => {
     const { harness } = createHarness();
     harness.db.upsertLanguageModerationWarningState(PUBLIC_CHAT_A, null, {
       lastWarningAt: FIXED_NOW.toISOString(),
-      ordinaryMessagesSinceWarning: 0
+      ordinaryMessagesSinceWarning: 0,
     });
     await harness.bot.handleUpdate(publicMessage(142, { text: "привет как твои дела сегодня" }));
     assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_A, USER_ID)?.current_strikes, 1);
@@ -361,13 +378,16 @@ describe("OWNER manual moderation reaction", () => {
   it("does not reuse a historical violation from a completed sanction cycle", async () => {
     const { harness } = createHarness();
     await harness.bot.handleUpdate(publicMessage(143));
-    assert.equal(harness.db.addLanguageModerationViolation({
-      chat_id: PUBLIC_CHAT_A,
-      user_telegram_id: USER_ID,
-      message_id: 143,
-      username: "synthetic_user",
-      cycle_tier: 0
-    }), true);
+    assert.equal(
+      harness.db.addLanguageModerationViolation({
+        chat_id: PUBLIC_CHAT_A,
+        user_telegram_id: USER_ID,
+        message_id: 143,
+        username: "synthetic_user",
+        cycle_tier: 0,
+      }),
+      true
+    );
     assert.equal(harness.db.assignLanguageModerationViolationCycle(PUBLIC_CHAT_A, USER_ID, 0, "completed-cycle"), 1);
     harness.db.upsertLanguageModerationUserState({
       chat_id: PUBLIC_CHAT_A,
@@ -375,7 +395,7 @@ describe("OWNER manual moderation reaction", () => {
       username: "synthetic_user",
       current_strikes: 0,
       sanction_tier: 0,
-      first_strike_at: null
+      first_strike_at: null,
     });
 
     await harness.bot.handleUpdate(reactionUpdate(9145, 143));

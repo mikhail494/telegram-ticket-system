@@ -1,10 +1,4 @@
-import type {
-  BannedUserRecord,
-  TicketMessageRecord,
-  TicketRecord,
-  TicketStatus,
-  TicketWithUser
-} from "./db.js";
+import type { BannedUserRecord, TicketMessageRecord, TicketRecord, TicketStatus, TicketWithUser } from "./db.js";
 import { displayTelegramUser } from "./telegram.js";
 
 export const START_TEXT =
@@ -18,7 +12,7 @@ export const DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE = [
   "",
   `Expected response time: ${SUPPORT_RESPONSE_TIME_PLACEHOLDER}.`,
   "",
-  "You can continue sending messages in this chat until your ticket is closed."
+  "You can continue sending messages in this chat until your ticket is closed.",
 ].join("\n");
 
 export function formatTicketReceived(template: string, expectedResponseTime: string): string {
@@ -35,8 +29,7 @@ export function validateRenderedSupportAcknowledgement(
     : { rendered, error: "the rendered message must fit within Telegram's 4096-character limit." };
 }
 
-export const CLOSED_TEXT =
-  "Your ticket has been closed. If you still need help, send a new message.";
+export const CLOSED_TEXT = "Your ticket has been closed. If you still need help, send a new message.";
 
 const NO_TEXT = "No text. Attachment only.";
 
@@ -58,7 +51,7 @@ export function formatTicketPost(ticket: TicketWithUser, initialMessage?: string
     `Status: ${ticket.status}`,
     `Message: ${message}`,
     "",
-    "Write in this topic to answer the user."
+    "Write in this topic to answer the user.",
   ].join("\n");
 }
 
@@ -76,7 +69,7 @@ export function formatPinnedTicketSummary(ticket: TicketWithUser): string {
     formatDate(ticket.created_at),
     "",
     "Status:",
-    ticket.status
+    ticket.status,
   ];
   if (ticket.follow_up_state !== "NONE") {
     lines.push("", "Follow-up:", formatFollowUpState(ticket.follow_up_state));
@@ -91,11 +84,28 @@ export function formatPinnedTicketSummary(ticket: TicketWithUser): string {
 }
 
 export function formatFollowUpState(value: TicketWithUser["follow_up_state"]): string {
-  return ({ NONE: "None", WAITING_USER: "Waiting for user", WAITING_DEVS: "Waiting for developers", WAITING_QUEST_OWNER: "Waiting for quest owner", MONITORING: "Monitoring" } as const)[value];
+  return (
+    {
+      NONE: "None",
+      WAITING_USER: "Waiting for user",
+      WAITING_DEVS: "Waiting for developers",
+      WAITING_QUEST_OWNER: "Waiting for quest owner",
+      MONITORING: "Monitoring",
+    } as const
+  )[value];
 }
 
 export function formatEscalationTarget(value: TicketWithUser["escalation_target"]): string {
-  return ({ NONE: "None", DEVS: "Development", PAYMENTS: "Payments", SECURITY: "Security", QUEST_OWNER: "Quest owner", SUPPORT: "Support" } as const)[value];
+  return (
+    {
+      NONE: "None",
+      DEVS: "Development",
+      PAYMENTS: "Payments",
+      SECURITY: "Security",
+      QUEST_OWNER: "Quest owner",
+      SUPPORT: "Support",
+    } as const
+  )[value];
 }
 
 export function formatTicketUpdate(
@@ -140,7 +150,7 @@ export function formatTicketDetails(ticket: TicketWithUser, messages: TicketMess
     `User ID: ${ticket.user_telegram_id}`,
     `Status: ${ticket.status}`,
     `Created: ${formatDate(ticket.created_at)}`,
-    `Updated: ${formatDate(ticket.updated_at)}`
+    `Updated: ${formatDate(ticket.updated_at)}`,
   ];
 
   if (ticket.closed_at) {
@@ -166,7 +176,7 @@ export function formatWhois(ticket: TicketWithUser, ban?: BannedUserRecord): str
     `Telegram ID: ${ticket.user_telegram_id}`,
     `Status: ${ticket.status}`,
     `Created: ${formatDate(ticket.created_at)}`,
-    `Ban status: ${ban ? "BANNED" : "not banned"}`
+    `Ban status: ${ban ? "BANNED" : "not banned"}`,
   ];
 
   if (ban) {
@@ -183,7 +193,7 @@ export function formatUserTicketList(tickets: TicketRecord[]): string {
 
   return [
     "Your latest tickets:",
-    ...tickets.map((ticket) => `#${ticket.id} - ${ticket.status} - ${formatDate(ticket.created_at)}`)
+    ...tickets.map((ticket) => `#${ticket.id} - ${ticket.status} - ${formatDate(ticket.created_at)}`),
   ].join("\n");
 }
 
@@ -197,5 +207,8 @@ export function formatDate(value: string): string {
     return value;
   }
 
-  return date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+  return date
+    .toISOString()
+    .replace("T", " ")
+    .replace(/\.\d{3}Z$/, " UTC");
 }

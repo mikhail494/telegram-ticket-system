@@ -37,14 +37,31 @@ describe("manual moderation persistence", () => {
     const inspected = new Database(filename, { readonly: true });
     try {
       assert.deepEqual(
-        (inspected.prepare("SELECT id FROM schema_migrations ORDER BY id").all() as Array<{ id: number }>).map((row) => row.id),
+        (inspected.prepare("SELECT id FROM schema_migrations ORDER BY id").all() as Array<{ id: number }>).map(
+          (row) => row.id
+        ),
         Array.from({ length: 23 }, (_, index) => index + 1)
       );
-      assert.equal((inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 23").get() as { count: number }).count, 1);
-      assert.equal((inspected.prepare("SELECT value FROM sentinel WHERE id = 1").get() as { value: string }).value, "preserved");
-      const columns = inspected.prepare("PRAGMA table_info(language_moderation_message_authors)").all() as Array<{ name: string }>;
-      assert.deepEqual(columns.map((column) => column.name), ["chat_id", "message_id", "user_telegram_id", "username", "message_thread_id", "created_at"]);
-      assert.equal(columns.some((column) => column.name.includes("text") || column.name.includes("body")), false);
+      assert.equal(
+        (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 23").get() as { count: number })
+          .count,
+        1
+      );
+      assert.equal(
+        (inspected.prepare("SELECT value FROM sentinel WHERE id = 1").get() as { value: string }).value,
+        "preserved"
+      );
+      const columns = inspected.prepare("PRAGMA table_info(language_moderation_message_authors)").all() as Array<{
+        name: string;
+      }>;
+      assert.deepEqual(
+        columns.map((column) => column.name),
+        ["chat_id", "message_id", "user_telegram_id", "username", "message_thread_id", "created_at"]
+      );
+      assert.equal(
+        columns.some((column) => column.name.includes("text") || column.name.includes("body")),
+        false
+      );
     } finally {
       inspected.close();
     }
@@ -58,14 +75,14 @@ describe("manual moderation persistence", () => {
       messageId: 81,
       userTelegramId: 501,
       username: "original_user",
-      messageThreadId: 7
+      messageThreadId: 7,
     });
     first.addLanguageModerationMessageAuthor({
       chatId: -100701,
       messageId: 81,
       userTelegramId: 999,
       username: "replacement_user",
-      messageThreadId: 8
+      messageThreadId: 8,
     });
     first.close();
 
@@ -73,14 +90,17 @@ describe("manual moderation persistence", () => {
     try {
       const author = reopened.getLanguageModerationMessageAuthor(-100701, 81);
       assert.ok(author);
-      assert.deepEqual({ ...author, created_at: undefined }, {
-        chat_id: -100701,
-        message_id: 81,
-        user_telegram_id: 501,
-        username: "original_user",
-        message_thread_id: 7,
-        created_at: undefined
-      });
+      assert.deepEqual(
+        { ...author, created_at: undefined },
+        {
+          chat_id: -100701,
+          message_id: 81,
+          user_telegram_id: 501,
+          username: "original_user",
+          message_thread_id: 7,
+          created_at: undefined,
+        }
+      );
       assert.equal(Number.isNaN(Date.parse(author.created_at)), false);
       assert.equal(reopened.getLanguageModerationMessageAuthor(-100702, 81), undefined);
     } finally {

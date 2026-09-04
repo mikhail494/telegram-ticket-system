@@ -16,10 +16,6 @@ function findTests(directory) {
 const files = findTests("test");
 if (files.length === 0) throw new Error("No TypeScript test files found under test/.");
 
-const args = [
-  require.resolve("tsx/cli"),
-  "--test",
-  ...files
-];
+const args = [require.resolve("tsx/cli"), "--test", ...files];
 const result = spawnSync(process.execPath, args, { stdio: "inherit" });
 process.exit(result.status ?? 1);

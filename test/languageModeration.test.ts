@@ -7,7 +7,8 @@ process.env.STAFF_CHAT_ID = "-100900";
 process.env.DATABASE_URL = ":memory:";
 process.env.LOG_LEVEL = "silent";
 
-const { classifyEnglishOnlyMessage, classifyModerationLanguage, preprocessModerationText } = await import("../src/languageModeration.js");
+const { classifyEnglishOnlyMessage, classifyModerationLanguage, preprocessModerationText } =
+  await import("../src/languageModeration.js");
 
 const REAL_NON_ENGLISH_CHAT_CORPUS = [
   "Misi yg mana",
@@ -30,7 +31,7 @@ const REAL_NON_ENGLISH_CHAT_CORPUS = [
   "Emng edah end co",
   "Wd toco aja gk land yang gak tau work berapa dolar nya\u{1F974}",
   "Kok toco gw udah 2 hari WD ga land. Skarang malah gini",
-  "yauda gausah ribut disini pake bhs kita, udh ke ban masih aja ribut, mlah bkin makin ancur aja"
+  "yauda gausah ribut disini pake bhs kita, udh ke ban masih aja ribut, mlah bkin makin ancur aja",
 ] as const;
 
 const REAL_ALLOWED_LATIN_CHAT_CORPUS = [
@@ -53,7 +54,7 @@ const REAL_ALLOWED_LATIN_CHAT_CORPUS = [
   "wallet fluxa",
   "withdrawal pending",
   "agent status approve task",
-  "The support agent will review the wallet status and send another update tomorrow."
+  "The support agent will review the wallet status and send another update tomorrow.",
 ] as const;
 
 const PRODUCTION_INDONESIAN_MALAY_REGRESSIONS = [
@@ -74,15 +75,25 @@ const PRODUCTION_INDONESIAN_MALAY_REGRESSIONS = [
   "Hahah sikat bang ,tolol emang dia mah",
   "5-10$ gamasalah anjing gw nyangkut 300$ mau buat give away ,keburu rebrand jd gw mau wd tolol",
   "marahin bang",
-  "Gass tolol-tololin"
+  "Gass tolol-tololin",
 ] as const;
 
 describe("language moderation classifier", () => {
   it("ignores technical and non-linguistic input", () => {
     for (const value of [
-      "https://example.com/test", "/start", "@support_bot #quest $TOKEN", "0x1234567890abcdef1234567890abcdef12345678",
-      "a".repeat(64), "`привет мир`", "```\nпривет мир\n```", "12345", "😀😀😀", "> привет мир", "dslkfgnsdfgsdlfgna"
-    ]) assert.equal(classifyEnglishOnlyMessage(value), "ignored", value);
+      "https://example.com/test",
+      "/start",
+      "@support_bot #quest $TOKEN",
+      "0x1234567890abcdef1234567890abcdef12345678",
+      "a".repeat(64),
+      "`привет мир`",
+      "```\nпривет мир\n```",
+      "12345",
+      "😀😀😀",
+      "> привет мир",
+      "dslkfgnsdfgsdlfgna",
+    ])
+      assert.equal(classifyEnglishOnlyMessage(value), "ignored", value);
   });
 
   it("removes allowlisted deployment terms without mutating the input", () => {
@@ -99,14 +110,19 @@ describe("language moderation classifier", () => {
   });
 
   it("identifies confident English and common non-English Latin languages offline", () => {
-    assert.equal(classifyModerationLanguage("This is a complete English support message explaining the account issue and the requested next steps."), "english");
+    assert.equal(
+      classifyModerationLanguage(
+        "This is a complete English support message explaining the account issue and the requested next steps."
+      ),
+      "english"
+    );
     for (const value of [
       "Saya ingin mengetahui status permintaan saya karena belum ada balasan dari tim dukungan.",
       "Saya mahu mengetahui status permintaan saya kerana belum ada balasan daripada pasukan sokongan.",
       "Necesito ayuda con mi solicitud porque todavia no he recibido una respuesta del equipo.",
       "Preciso de ajuda com minha solicitacao porque ainda nao recebi uma resposta da equipe.",
       "Je voudrais obtenir de aide concernant ma demande car je ai pas encore recu de reponse.",
-      "Ich benoetige Hilfe mit meiner Anfrage, da ich noch keine Antwort vom Support erhalten habe."
+      "Ich benoetige Hilfe mit meiner Anfrage, da ich noch keine Antwort vom Support erhalten habe.",
     ]) {
       assert.equal(classifyModerationLanguage(value), "non_english", value);
       assert.equal(classifyEnglishOnlyMessage(value), "violation", value);
@@ -114,12 +130,38 @@ describe("language moderation classifier", () => {
   });
 
   it("keeps low-signal and mixed English text uncertain or English", () => {
-    for (const value of ["ok", "gm", "hi", "lol", "BTC", "USDT", "ga", "di", "lu", "jd", "bg", "wd", "123456", "https://example.com", "@support_bot", "😀😀", "Alex"]) {
+    for (const value of [
+      "ok",
+      "gm",
+      "hi",
+      "lol",
+      "BTC",
+      "USDT",
+      "ga",
+      "di",
+      "lu",
+      "jd",
+      "bg",
+      "wd",
+      "123456",
+      "https://example.com",
+      "@support_bot",
+      "😀😀",
+      "Alex",
+    ]) {
       assert.equal(classifyModerationLanguage(value), "uncertain", value);
       assert.equal(classifyEnglishOnlyMessage(value), "ignored", value);
     }
-    assert.equal(classifyModerationLanguage("The support agent will review the update from Jakarta and send the next response tomorrow."), "english");
-    assert.equal(classifyEnglishOnlyMessage("Saya membutuhkan bantuan dengan product update dan status tiket saya."), "violation");
+    assert.equal(
+      classifyModerationLanguage(
+        "The support agent will review the update from Jakarta and send the next response tomorrow."
+      ),
+      "english"
+    );
+    assert.equal(
+      classifyEnglishOnlyMessage("Saya membutuhkan bantuan dengan product update dan status tiket saya."),
+      "violation"
+    );
   });
 
   it("detects real Indonesian and Malay Telegram chat slang", () => {
@@ -135,7 +177,7 @@ describe("language moderation classifier", () => {
       "JD from the team will check the wallet status.",
       "The beta is still in testing and the agent will reply later.",
       "Please check the task status in the web agent.",
-      "We can use the Indonesian word setuju as an example in this documentation."
+      "We can use the Indonesian word setuju as an example in this documentation.",
     ];
     for (const value of [...REAL_ALLOWED_LATIN_CHAT_CORPUS, ...adversarialEnglish]) {
       assert.equal(classifyEnglishOnlyMessage(value), "ignored", value);
@@ -164,7 +206,7 @@ describe("language moderation classifier", () => {
       "The admin is not here",
       "The bot is not responding",
       "The giveaway is 300 dollars",
-      "Support users in Indonesia can use English here"
+      "Support users in Indonesia can use English here",
     ];
     for (const value of brokenEnglish) {
       assert.notEqual(classifyModerationLanguage(value), "non_english", value);
@@ -181,7 +223,7 @@ describe("language moderation classifier", () => {
       "udah belum",
       "kok belum masuk",
       "maksudnya gimana",
-      "soalnya belum nyampe"
+      "soalnya belum nyampe",
     ]) {
       assert.equal(classifyModerationLanguage(value), "non_english", value);
       assert.equal(classifyEnglishOnlyMessage(value), "violation", value);

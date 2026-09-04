@@ -62,17 +62,23 @@ test("migrations 21 through 23 adopt legacy moderation data without changing his
     setting.run("language_moderation:warning_cooldown_minutes", "12", timestamp);
     setting.run("language_moderation:warning_message_threshold", "19", timestamp);
     setting.run("language_moderation:lookback_minutes", "8", timestamp);
-    legacy.prepare("INSERT INTO managed_public_chats VALUES (?, ?, ?, ?, 1, 1, ?, ?)")
+    legacy
+      .prepare("INSERT INTO managed_public_chats VALUES (?, ?, ?, ?, 1, 1, ?, ?)")
       .run(-100801, 1, "Legacy community", "legacy_community", timestamp, timestamp);
-    legacy.prepare("INSERT INTO language_moderation_chat_state VALUES (?, ?, ?, ?, ?, ?, ?)")
+    legacy
+      .prepare("INSERT INTO language_moderation_chat_state VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(-100801, 700, timestamp, 4, null, null, timestamp);
-    legacy.prepare("INSERT INTO language_moderation_user_state VALUES (?, ?, ?, ?, ?, ?, ?)")
+    legacy
+      .prepare("INSERT INTO language_moderation_user_state VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(-100801, 91, "synthetic_user", 2, 1, timestamp, timestamp);
-    legacy.prepare("INSERT INTO language_moderation_violations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    legacy
+      .prepare("INSERT INTO language_moderation_violations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run(-100801, 91, 701, "synthetic_user", timestamp, 1, "synthetic-cycle", "PENDING", 0, null, null, null, null);
-    legacy.prepare("INSERT INTO ticket_batch_answer_packages VALUES (?, ?, ?)")
+    legacy
+      .prepare("INSERT INTO ticket_batch_answer_packages VALUES (?, ?, ?)")
       .run("synthetic-package", "PARTIAL", "FAILED");
-    legacy.prepare("INSERT INTO ticket_batch_answer_items VALUES (?, ?, ?, ?)")
+    legacy
+      .prepare("INSERT INTO ticket_batch_answer_items VALUES (?, ?, ?, ?)")
       .run("synthetic-package", 42, "STAFF_SYNC_PENDING", 9001);
   } finally {
     legacy.close();
@@ -89,25 +95,53 @@ test("migrations 21 through 23 adopt legacy moderation data without changing his
     assert.equal(chat?.lookback_minutes, 8);
     assert.equal(upgraded.getLanguageModerationWarningState(-100801, null)?.last_warning_message_id, 700);
     assert.equal(upgraded.getLanguageModerationUserState(-100801, 91)?.sanction_tier, 1);
-    assert.equal(upgraded.listLanguageModerationViolations(-100801, "1970-01-01T00:00:00.000Z")[0]?.moderation_cycle_id, "synthetic-cycle");
+    assert.equal(
+      upgraded.listLanguageModerationViolations(-100801, "1970-01-01T00:00:00.000Z")[0]?.moderation_cycle_id,
+      "synthetic-cycle"
+    );
     upgraded.close();
 
     const reopened = new SupportDatabase(databasePath);
     reopened.close();
     const inspected = new Database(databasePath, { readonly: true });
     try {
-      const migrations = inspected.prepare("SELECT id FROM schema_migrations ORDER BY id").all() as Array<{ id: number }>;
-      assert.deepEqual(migrations.map((row) => row.id), Array.from({ length: 23 }, (_, index) => index + 1));
-      assert.equal((inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 21").get() as { count: number }).count, 1);
-      assert.equal((inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 22").get() as { count: number }).count, 1);
-      assert.equal((inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 23").get() as { count: number }).count, 1);
-      const violationColumns = inspected.prepare("PRAGMA table_info(language_moderation_violations)").all() as Array<{ name: string }>;
+      const migrations = inspected.prepare("SELECT id FROM schema_migrations ORDER BY id").all() as Array<{
+        id: number;
+      }>;
+      assert.deepEqual(
+        migrations.map((row) => row.id),
+        Array.from({ length: 23 }, (_, index) => index + 1)
+      );
+      assert.equal(
+        (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 21").get() as { count: number })
+          .count,
+        1
+      );
+      assert.equal(
+        (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 22").get() as { count: number })
+          .count,
+        1
+      );
+      assert.equal(
+        (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 23").get() as { count: number })
+          .count,
+        1
+      );
+      const violationColumns = inspected.prepare("PRAGMA table_info(language_moderation_violations)").all() as Array<{
+        name: string;
+      }>;
       assert.ok(violationColumns.some((column) => column.name === "message_thread_id"));
-      const publicChatColumns = inspected.prepare("PRAGMA table_info(managed_public_chats)").all() as Array<{ name: string }>;
+      const publicChatColumns = inspected.prepare("PRAGMA table_info(managed_public_chats)").all() as Array<{
+        name: string;
+      }>;
       assert.ok(publicChatColumns.some((column) => column.name === "connection_status"));
-      const batchPackage = inspected.prepare("SELECT status, final_summary_state FROM ticket_batch_answer_packages WHERE answer_package_id = ?")
+      const batchPackage = inspected
+        .prepare("SELECT status, final_summary_state FROM ticket_batch_answer_packages WHERE answer_package_id = ?")
         .get("synthetic-package") as { status: string; final_summary_state: string };
-      const batchItem = inspected.prepare("SELECT state, delivery_message_id FROM ticket_batch_answer_items WHERE answer_package_id = ? AND ticket_id = 42")
+      const batchItem = inspected
+        .prepare(
+          "SELECT state, delivery_message_id FROM ticket_batch_answer_items WHERE answer_package_id = ? AND ticket_id = 42"
+        )
         .get("synthetic-package") as { state: string; delivery_message_id: number };
       assert.deepEqual(batchPackage, { status: "PARTIAL", final_summary_state: "FAILED" });
       assert.deepEqual(batchItem, { state: "STAFF_SYNC_PENDING", delivery_message_id: 9001 });

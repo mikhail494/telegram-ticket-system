@@ -1,6 +1,20 @@
 import Database from "better-sqlite3";
 import { now, senderTypeForDirection, ticketStatuses } from "./helpers.js";
-import type { AddMessageInput, BannedUserRecord, BanUserInput, CloseTicketInput, TicketEscalationTarget, TicketFollowUpHistoryRecord, TicketFollowUpState, TicketRecord, TicketStatus, TicketWithUser, TicketMessageRecord, UserInput, UserRecord } from "./types.js";
+import type {
+  AddMessageInput,
+  BannedUserRecord,
+  BanUserInput,
+  CloseTicketInput,
+  TicketEscalationTarget,
+  TicketFollowUpHistoryRecord,
+  TicketFollowUpState,
+  TicketRecord,
+  TicketStatus,
+  TicketWithUser,
+  TicketMessageRecord,
+  UserInput,
+  UserRecord,
+} from "./types.js";
 export class TicketRepository {
   constructor(private readonly db: Database.Database) {}
   upsertUser(user: UserInput): void {
@@ -23,14 +37,12 @@ export class TicketRepository {
         firstName: user.firstName ?? null,
         lastName: user.lastName ?? null,
         createdAt: timestamp,
-        updatedAt: timestamp
+        updatedAt: timestamp,
       });
   }
 
   getUser(telegramId: number): UserRecord | undefined {
-    return this.db
-      .prepare("SELECT * FROM users WHERE telegram_id = ?")
-      .get(telegramId) as UserRecord | undefined;
+    return this.db.prepare("SELECT * FROM users WHERE telegram_id = ?").get(telegramId) as UserRecord | undefined;
   }
 
   createTicket(userTelegramId: number, staffChatId: number): TicketRecord {
@@ -48,9 +60,7 @@ export class TicketRepository {
   }
 
   getTicket(ticketId: number): TicketRecord | undefined {
-    return this.db.prepare("SELECT * FROM tickets WHERE id = ?").get(ticketId) as
-      | TicketRecord
-      | undefined;
+    return this.db.prepare("SELECT * FROM tickets WHERE id = ?").get(ticketId) as TicketRecord | undefined;
   }
 
   getTicketWithUser(ticketId: number): TicketWithUser | undefined {
@@ -130,11 +140,7 @@ export class TicketRepository {
       .get(staffChatId, messageThreadId) as TicketWithUser | undefined;
   }
 
-  closeOtherActiveTicketsForUserInStaffChat(
-    userTelegramId: number,
-    staffChatId: number,
-    keepTicketId: number
-  ): number {
+  closeOtherActiveTicketsForUserInStaffChat(userTelegramId: number, staffChatId: number, keepTicketId: number): number {
     const timestamp = now();
     const result = this.db
       .prepare(
@@ -262,24 +268,12 @@ export class TicketRepository {
         WHERE id = ?
       `
       )
-      .run(
-        timestamp,
-        timestamp,
-        input.type,
-        input.displayName,
-        input.username ?? null,
-        timestamp,
-        ticketId
-      );
+      .run(timestamp, timestamp, input.type, input.displayName, input.username ?? null, timestamp, ticketId);
 
     return this.getTicket(ticketId);
   }
 
-  markTicketArchivedAndDeleteMessages(
-    ticketId: number,
-    logsMessageId: number,
-    transcriptMessageId: number
-  ): void {
+  markTicketArchivedAndDeleteMessages(ticketId: number, logsMessageId: number, transcriptMessageId: number): void {
     const tx = this.db.transaction(() => {
       const timestamp = now();
       this.db
@@ -360,12 +354,10 @@ export class TicketRepository {
           mediaType: message.mediaType ?? null,
           filename: message.filename ?? null,
           fileId: message.fileId ?? null,
-          createdAt: now()
+          createdAt: now(),
         });
 
-      this.db
-        .prepare("UPDATE tickets SET updated_at = ? WHERE id = ?")
-        .run(now(), message.ticketId);
+      this.db.prepare("UPDATE tickets SET updated_at = ? WHERE id = ?").run(now(), message.ticketId);
 
       return Number(result.lastInsertRowid);
     });
@@ -427,13 +419,42 @@ export class TicketRepository {
       .all(staffChatId, limit) as TicketWithUser[];
   }
 
-  setTicketFollowUpContext(ticketId: number, input: { followUpState: TicketFollowUpState; internalNote: string | null; escalationTarget: TicketEscalationTarget; sourceAnswerPackageId?: string | null }): TicketRecord | undefined {
+  setTicketFollowUpContext(
+    ticketId: number,
+    input: {
+      followUpState: TicketFollowUpState;
+      internalNote: string | null;
+      escalationTarget: TicketEscalationTarget;
+      sourceAnswerPackageId?: string | null;
+    }
+  ): TicketRecord | undefined {
     const timestamp = now();
     const tx = this.db.transaction(() => {
-      this.db.prepare(`UPDATE tickets SET follow_up_state = ?, internal_note = ?, escalation_target = ?, follow_up_updated_at = ?, follow_up_source_answer_package_id = ?, updated_at = ? WHERE id = ?`)
-        .run(input.followUpState, input.internalNote, input.escalationTarget, timestamp, input.sourceAnswerPackageId ?? null, timestamp, ticketId);
-      this.db.prepare(`INSERT INTO ticket_follow_up_history (ticket_id, follow_up_state, internal_note, escalation_target, source_answer_package_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-        .run(ticketId, input.followUpState, input.internalNote, input.escalationTarget, input.sourceAnswerPackageId ?? null, timestamp);
+      this.db
+        .prepare(
+          `UPDATE tickets SET follow_up_state = ?, internal_note = ?, escalation_target = ?, follow_up_updated_at = ?, follow_up_source_answer_package_id = ?, updated_at = ? WHERE id = ?`
+        )
+        .run(
+          input.followUpState,
+          input.internalNote,
+          input.escalationTarget,
+          timestamp,
+          input.sourceAnswerPackageId ?? null,
+          timestamp,
+          ticketId
+        );
+      this.db
+        .prepare(
+          `INSERT INTO ticket_follow_up_history (ticket_id, follow_up_state, internal_note, escalation_target, source_answer_package_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          ticketId,
+          input.followUpState,
+          input.internalNote,
+          input.escalationTarget,
+          input.sourceAnswerPackageId ?? null,
+          timestamp
+        );
     });
     tx();
     return this.getTicket(ticketId);
@@ -442,17 +463,23 @@ export class TicketRepository {
   clearWaitingUserFollowUp(ticketId: number): TicketRecord | undefined {
     const ticket = this.getTicket(ticketId);
     if (!ticket || ticket.follow_up_state !== "WAITING_USER") return ticket;
-    return this.setTicketFollowUpContext(ticketId, { followUpState: "NONE", internalNote: null, escalationTarget: "NONE", sourceAnswerPackageId: ticket.follow_up_source_answer_package_id });
+    return this.setTicketFollowUpContext(ticketId, {
+      followUpState: "NONE",
+      internalNote: null,
+      escalationTarget: "NONE",
+      sourceAnswerPackageId: ticket.follow_up_source_answer_package_id,
+    });
   }
 
   listTicketFollowUpHistory(ticketId: number): TicketFollowUpHistoryRecord[] {
-    return this.db.prepare("SELECT * FROM ticket_follow_up_history WHERE ticket_id = ? ORDER BY id ASC").all(ticketId) as TicketFollowUpHistoryRecord[];
+    return this.db
+      .prepare("SELECT * FROM ticket_follow_up_history WHERE ticket_id = ? ORDER BY id ASC")
+      .all(ticketId) as TicketFollowUpHistoryRecord[];
   }
 
   getBannedUser(userTelegramId: number): BannedUserRecord | undefined {
-    return this.db
-      .prepare("SELECT * FROM banned_users WHERE user_telegram_id = ?")
-      .get(userTelegramId) as BannedUserRecord | undefined;
+    return this.db.prepare("SELECT * FROM banned_users WHERE user_telegram_id = ?").get(userTelegramId) as
+      BannedUserRecord | undefined;
   }
 
   banUser(input: BanUserInput): void {
@@ -473,14 +500,12 @@ export class TicketRepository {
         username: input.username ?? null,
         reason: input.reason,
         bannedBy: input.bannedBy ?? null,
-        createdAt: now()
+        createdAt: now(),
       });
   }
 
   unbanUser(userTelegramId: number): boolean {
-    const result = this.db
-      .prepare("DELETE FROM banned_users WHERE user_telegram_id = ?")
-      .run(userTelegramId);
+    const result = this.db.prepare("DELETE FROM banned_users WHERE user_telegram_id = ?").run(userTelegramId);
 
     return result.changes > 0;
   }
@@ -496,6 +521,4 @@ export class TicketRepository {
       )
       .all(limit) as BannedUserRecord[];
   }
-
-
 }

@@ -45,7 +45,7 @@ export function getMessageContent(message: Message): MessageContent {
     mediaType: media?.type ?? null,
     filename: media?.filename ?? null,
     fileId: media?.fileId ?? null,
-    shouldCopyOriginal: Boolean(media) || (text?.length ?? 0) > 2500
+    shouldCopyOriginal: Boolean(media) || (text?.length ?? 0) > 2500,
   };
 }
 
@@ -70,9 +70,7 @@ function getMediaInfo(message: Message): { type: string; fileId: string; filenam
 
   if ("document" in message) {
     const document = message.document ?? null;
-    return document
-      ? { type: "document", fileId: document.file_id, filename: document.file_name ?? null }
-      : null;
+    return document ? { type: "document", fileId: document.file_id, filename: document.file_name ?? null } : null;
   }
 
   if ("video" in message) {

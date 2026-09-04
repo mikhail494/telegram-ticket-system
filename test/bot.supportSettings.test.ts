@@ -7,7 +7,7 @@ import type { Update } from "grammy/types";
 import {
   DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME,
   DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE,
-  validateRenderedSupportAcknowledgement
+  validateRenderedSupportAcknowledgement,
 } from "../src/format.js";
 import { InstallationService } from "../src/installation.js";
 import { createBotHarness, TEST_STAFF_CHAT_ID, type BotHarness } from "./helpers/botHarness.js";
@@ -19,26 +19,37 @@ afterEach(() => {
   harnesses.length = 0;
 });
 
-function createReadyHarness(options: { role?: "OWNER" | "ADMIN" | "SENIOR_AGENT" | "AGENT"; rbac?: boolean; databasePath?: string } = {}) {
+function createReadyHarness(
+  options: { role?: "OWNER" | "ADMIN" | "SENIOR_AGENT" | "AGENT"; rbac?: boolean; databasePath?: string } = {}
+) {
   let installation!: InstallationService;
-  const harness = createBotHarness({ databasePath: options.databasePath, installationServiceFactory: (db) => {
-    installation = new InstallationService(db);
-    installation.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
-    installation.consumeOwnerPairingToken(installation.createOwnerPairingToken(), { telegramId: 1, username: "owner" });
-    if (options.role && options.role !== "OWNER") installation.assignRole(1, 2, options.role);
-    if (options.rbac) {
-      const preview = installation.previewRoleBasedAccessActivation();
-      installation.activateRoleBasedAccess(1, preview.confirmationToken);
-    }
-    return installation;
-  } });
+  const harness = createBotHarness({
+    databasePath: options.databasePath,
+    installationServiceFactory: (db) => {
+      installation = new InstallationService(db);
+      installation.adoptLegacyInstallation(TEST_STAFF_CHAT_ID);
+      installation.consumeOwnerPairingToken(installation.createOwnerPairingToken(), {
+        telegramId: 1,
+        username: "owner",
+      });
+      if (options.role && options.role !== "OWNER") installation.assignRole(1, 2, options.role);
+      if (options.rbac) {
+        const preview = installation.previewRoleBasedAccessActivation();
+        installation.activateRoleBasedAccess(1, preview.confirmationToken);
+      }
+      return installation;
+    },
+  });
   harnesses.push(harness);
   return { harness, installation };
 }
 
 function createRestartedHarness(databasePath: string) {
   let installation!: InstallationService;
-  const harness = createBotHarness({ databasePath, installationServiceFactory: (db) => (installation = new InstallationService(db)) });
+  const harness = createBotHarness({
+    databasePath,
+    installationServiceFactory: (db) => (installation = new InstallationService(db)),
+  });
   harnesses.push(harness);
   return { harness, installation };
 }
@@ -51,8 +62,8 @@ function privateMessage(userId: number, text: string, messageId = 1): Update {
       date: 1,
       from: { id: userId, is_bot: false, first_name: `User ${userId}`, username: `user_${userId}` },
       chat: { id: userId, type: "private", first_name: `User ${userId}` },
-      text
-    }
+      text,
+    },
   };
 }
 
@@ -64,18 +75,27 @@ function privateCallback(userId: number, data: string, messageId = 10): Update {
       from: { id: userId, is_bot: false, first_name: `User ${userId}`, username: `user_${userId}` },
       chat_instance: "private",
       data,
-      message: { message_id: messageId, date: 1, chat: { id: userId, type: "private", first_name: `User ${userId}` }, text: "Dashboard" }
-    }
+      message: {
+        message_id: messageId,
+        date: 1,
+        chat: { id: userId, type: "private", first_name: `User ${userId}` },
+        text: "Dashboard",
+      },
+    },
   };
 }
 
 function acknowledgementText(harness: BotHarness, userId: number): string {
-  const call = harness.findApiCalls("sendMessage").find((entry) => entry.payload.chat_id === userId && String(entry.payload.text).startsWith("Thanks, your request"));
+  const call = harness
+    .findApiCalls("sendMessage")
+    .find((entry) => entry.payload.chat_id === userId && String(entry.payload.text).startsWith("Thanks, your request"));
   return String(call?.payload.text);
 }
 
 function ticketAcknowledgementText(harness: BotHarness, userId: number): string {
-  const call = harness.findApiCalls("sendMessage").find((entry) => entry.payload.chat_id === userId && entry.payload.reply_markup !== undefined);
+  const call = harness
+    .findApiCalls("sendMessage")
+    .find((entry) => entry.payload.chat_id === userId && entry.payload.reply_markup !== undefined);
   return String(call?.payload.text);
 }
 
@@ -85,12 +105,18 @@ test("new ticket acknowledgement uses the default or configured expected respons
   harness.setStaffMembership(userId, "left");
 
   await harness.bot.handleUpdate(privateMessage(userId, "Need help", 1));
-  assert.equal(acknowledgementText(harness, userId), DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE.replaceAll("{{response_time}}", DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME));
+  assert.equal(
+    acknowledgementText(harness, userId),
+    DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE.replaceAll("{{response_time}}", DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME)
+  );
   assert.doesNotMatch(acknowledgementText(harness, userId), /get back to you soon/i);
 
   harness.clearApiCalls();
   await harness.bot.handleUpdate(privateMessage(userId, "A follow-up", 2));
-  assert.equal(harness.findApiCalls("sendMessage").some((entry) => String(entry.payload.text).includes("Expected response time:")), false);
+  assert.equal(
+    harness.findApiCalls("sendMessage").some((entry) => String(entry.payload.text).includes("Expected response time:")),
+    false
+  );
 
   harness.db.setSetting("support_expected_response_time", "1-3 business days");
   await harness.bot.handleUpdate(privateMessage(502, "Another request", 3));
@@ -107,7 +133,10 @@ test("OWNER and ADMIN can manage support settings while junior roles cannot", as
       assert.match(text, /Support settings/);
       assert.match(text, /Expected response time:\n1-7 business days/);
       assert.match(text, /New-ticket acknowledgement preview/);
-      assert.match(JSON.stringify(harness.findApiCalls("editMessageText").at(-1)?.payload.reply_markup), /Edit acknowledgement/);
+      assert.match(
+        JSON.stringify(harness.findApiCalls("editMessageText").at(-1)?.payload.reply_markup),
+        /Edit acknowledgement/
+      );
     } else {
       assert.doesNotMatch(text, /Support settings/);
       assert.equal(harness.db.getSetting("support_expected_response_time"), undefined);
@@ -121,12 +150,19 @@ test("support acknowledgement editor rejects unsafe, oversized, and Telegram-ove
   await harness.bot.handleUpdate(privateCallback(1, "dashboard:support", 10));
   await harness.bot.handleUpdate(privateCallback(1, "support:edit-acknowledgement", 10));
 
-  for (const [value, error] of [["contains\u0000nul", /unsafe control/], ["x".repeat(3501), /3500 characters/], ["{{response_time}}".repeat(52), /4096-character/]] as const) {
+  for (const [value, error] of [
+    ["contains\u0000nul", /unsafe control/],
+    ["x".repeat(3501), /3500 characters/],
+    ["{{response_time}}".repeat(52), /4096-character/],
+  ] as const) {
     harness.clearApiCalls();
     await harness.bot.handleUpdate(privateMessage(1, value, 20));
     assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), error);
     assert.equal(harness.db.getSetting("support_ticket_received_template"), undefined);
-    assert.equal(harness.findApiCalls("deleteMessage").some((entry) => entry.payload.message_id === 20), true);
+    assert.equal(
+      harness.findApiCalls("deleteMessage").some((entry) => entry.payload.message_id === 20),
+      true
+    );
   }
 });
 
@@ -139,7 +175,11 @@ test("support response time editor validates input, persists through restart, an
     await harness.bot.handleUpdate(privateCallback(1, "dashboard:support", 10));
     await harness.bot.handleUpdate(privateCallback(1, "support:edit", 10));
 
-    for (const [value, error] of [["   ", /empty/], ["one\ntwo", /one line/], ["x".repeat(81), /80 characters/]] as const) {
+    for (const [value, error] of [
+      ["   ", /empty/],
+      ["one\ntwo", /one line/],
+      ["x".repeat(81), /80 characters/],
+    ] as const) {
       harness.clearApiCalls();
       await harness.bot.handleUpdate(privateMessage(1, value, 20));
       assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), error);
@@ -178,8 +218,14 @@ test("support response time editor rejects a value that would make the current a
   await harness.bot.handleUpdate(privateMessage(1, longResponseTime, 20));
 
   assert.equal(harness.db.getSetting("support_expected_response_time"), shortResponseTime);
-  assert.equal(harness.findApiCalls("deleteMessage").some((entry) => entry.payload.message_id === 20), true);
-  assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /current acknowledgement too long/i);
+  assert.equal(
+    harness.findApiCalls("deleteMessage").some((entry) => entry.payload.message_id === 20),
+    true
+  );
+  assert.match(
+    String(harness.findApiCalls("editMessageText").at(-1)?.payload.text),
+    /current acknowledgement too long/i
+  );
 
   harness.clearApiCalls();
   await harness.bot.handleUpdate(privateMessage(1, "within 24 hours", 21));
@@ -193,7 +239,10 @@ test("support response time reset preserves a short override when the current ac
   harness.db.setSetting("support_expected_response_time", shortResponseTime);
   harness.db.setSetting("support_ticket_received_template", template);
   assert.equal(validateRenderedSupportAcknowledgement(template, shortResponseTime).error, undefined);
-  assert.notEqual(validateRenderedSupportAcknowledgement(template, DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME).error, undefined);
+  assert.notEqual(
+    validateRenderedSupportAcknowledgement(template, DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME).error,
+    undefined
+  );
 
   await harness.bot.handleUpdate(privateCallback(1, "dashboard:support", 10));
   await harness.bot.handleUpdate(privateCallback(1, "support:reset-response-time", 10));
@@ -216,7 +265,10 @@ test("support response time reset succeeds when the current acknowledgement rema
     validateRenderedSupportAcknowledgement("Reply in {{response_time}}.", DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME).error,
     undefined
   );
-  assert.match(String(harness.findApiCalls("editMessageText").at(-1)?.payload.text), /Expected response time reset to default/);
+  assert.match(
+    String(harness.findApiCalls("editMessageText").at(-1)?.payload.text),
+    /Expected response time reset to default/
+  );
 });
 
 test("support acknowledgement reset remains valid with the longest supported response time", async () => {
@@ -259,7 +311,9 @@ test("invalid persisted acknowledgement settings do not create a ticket", async 
 
   assert.equal(harness.db.listTicketsForUser(userId, TEST_STAFF_CHAT_ID).length, 0);
   assert.equal(
-    harness.findApiCalls("sendMessage").some((entry) => entry.payload.chat_id === userId && /settings need attention/i.test(String(entry.payload.text))),
+    harness
+      .findApiCalls("sendMessage")
+      .some((entry) => entry.payload.chat_id === userId && /settings need attention/i.test(String(entry.payload.text))),
     true
   );
 });
@@ -271,7 +325,10 @@ test("support acknowledgement templates render every response-time placeholder a
   await harness.bot.handleUpdate(privateCallback(1, "support:edit-acknowledgement", 10));
   await harness.bot.handleUpdate(privateMessage(1, "Reply in {{response_time}}.\nAgain: {{response_time}}.", 20));
 
-  assert.equal(harness.db.getSetting("support_ticket_received_template"), "Reply in {{response_time}}.\nAgain: {{response_time}}.");
+  assert.equal(
+    harness.db.getSetting("support_ticket_received_template"),
+    "Reply in {{response_time}}.\nAgain: {{response_time}}."
+  );
   harness.setStaffMembership(501, "left");
   await harness.bot.handleUpdate(privateMessage(501, "Need help", 21));
   assert.equal(ticketAcknowledgementText(harness, 501), "Reply in up to 5 working days.\nAgain: up to 5 working days.");
@@ -287,11 +344,18 @@ test("a normal customer close keeps the customer flow and does not render an ope
   harness.setStaffMembership(userId, "left");
   await harness.bot.handleUpdate(privateMessage(userId, "Need help", 1));
   const ticket = harness.db.findActiveTicketForUser(userId, TEST_STAFF_CHAT_ID)!;
-  const acknowledgement = harness.findApiCalls("sendMessage").find((call) => call.payload.chat_id === userId && call.payload.reply_markup !== undefined)!;
+  const acknowledgement = harness
+    .findApiCalls("sendMessage")
+    .find((call) => call.payload.chat_id === userId && call.payload.reply_markup !== undefined)!;
 
   harness.clearApiCalls();
   await harness.bot.handleUpdate(privateCallback(userId, `user:close:${ticket.id}`, acknowledgement.responseMessageId));
-  assert.equal(harness.findApiCalls("sendMessage").some((call) => /Owner dashboard|Admin dashboard/.test(String(call.payload.text))), false);
+  assert.equal(
+    harness
+      .findApiCalls("sendMessage")
+      .some((call) => /Owner dashboard|Admin dashboard/.test(String(call.payload.text))),
+    false
+  );
 });
 
 test("support acknowledgement editor permits a template without a response-time placeholder and deletes consumed input", async () => {
@@ -302,7 +366,10 @@ test("support acknowledgement editor permits a template without a response-time 
   await harness.bot.handleUpdate(privateMessage(1, "We received your request.", 20));
 
   assert.equal(harness.db.getSetting("support_ticket_received_template"), "We received your request.");
-  assert.equal(harness.findApiCalls("deleteMessage").some((entry) => entry.payload.message_id === 20), true);
+  assert.equal(
+    harness.findApiCalls("deleteMessage").some((entry) => entry.payload.message_id === 20),
+    true
+  );
   harness.setStaffMembership(502, "left");
   await harness.bot.handleUpdate(privateMessage(502, "Need help", 21));
   assert.equal(ticketAcknowledgementText(harness, 502), "We received your request.");
@@ -314,7 +381,10 @@ test("invalid support settings input is deleted without consuming ordinary custo
   await harness.bot.handleUpdate(privateCallback(1, "support:edit", 10));
   harness.clearApiCalls();
   await harness.bot.handleUpdate(privateMessage(1, "one\ntwo", 20));
-  assert.equal(harness.findApiCalls("deleteMessage").some((entry) => entry.payload.message_id === 20), true);
+  assert.equal(
+    harness.findApiCalls("deleteMessage").some((entry) => entry.payload.message_id === 20),
+    true
+  );
 
   harness.clearApiCalls();
   harness.setStaffMembership(503, "left");
@@ -344,7 +414,7 @@ test("support settings disarm test-ticket mode and accept editor text while a ba
     createdAt: "2026-08-14T00:00:00.000Z",
     selectionMode: "all_active",
     ticketCount: 0,
-    items: []
+    items: [],
   });
   harness.db.setSetting("private_batch_export:1", "export_support_settings");
 

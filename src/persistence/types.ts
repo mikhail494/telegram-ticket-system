@@ -15,8 +15,14 @@ export interface InstallationStateRecord {
 }
 
 export interface WorkspaceRecord {
-  id: number; telegram_chat_id: number; title: string | null; username: string | null;
-  active: number; imported_from_legacy: number; created_at: string; updated_at: string;
+  id: number;
+  telegram_chat_id: number;
+  title: string | null;
+  username: string | null;
+  active: number;
+  imported_from_legacy: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export type ManagedPublicChatPermissionStatus = "UNKNOWN" | "HEALTHY" | "UNHEALTHY";
@@ -47,19 +53,36 @@ export interface ManagedPublicChatRecord {
 }
 
 export interface TeamMemberRecord {
-  user_telegram_id: number; username: string | null; display_name: string | null;
-  role: TeamRole; active: number; added_by: number | null; created_at: string; updated_at: string;
+  user_telegram_id: number;
+  username: string | null;
+  display_name: string | null;
+  role: TeamRole;
+  active: number;
+  added_by: number | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface SecureTokenRecord {
-  id: number; token_hash: string; kind: "OWNER_PAIRING" | "OWNER_RECOVERY" | "TEAM_INVITE";
-  role: TeamRole | null; created_by: number | null; claimed_by: number | null;
-  expires_at: string; consumed_at: string | null; created_at: string;
+  id: number;
+  token_hash: string;
+  kind: "OWNER_PAIRING" | "OWNER_RECOVERY" | "TEAM_INVITE";
+  role: TeamRole | null;
+  created_by: number | null;
+  claimed_by: number | null;
+  expires_at: string;
+  consumed_at: string | null;
+  created_at: string;
 }
 
 export interface OnboardingSessionRecord {
-  user_telegram_id: number; stage: string; state: string; candidate_chat_id: number | null;
-  primary_message_chat_id: number | null; primary_message_id: number | null; updated_at: string;
+  user_telegram_id: number;
+  stage: string;
+  state: string;
+  candidate_chat_id: number | null;
+  primary_message_chat_id: number | null;
+  primary_message_id: number | null;
+  updated_at: string;
 }
 
 export interface UserRecord {
@@ -227,41 +250,93 @@ export interface CreateTicketBatchExportInput {
 }
 
 export type TicketBatchAnswerPackageStatus = "PENDING" | "APPLYING" | "COMPLETED" | "PARTIAL" | "CANCELLED";
-export type TicketBatchAnswerItemState = "PENDING" | "APPLYING" | "REPLY_SENT" | "STAFF_SYNC_PENDING" | "COMPLETED" | "NO_ACTION" | "STALE" | "INACTIVE" | "FAILED" | "UNKNOWN_DELIVERY";
+export type TicketBatchAnswerItemState =
+  | "PENDING"
+  | "APPLYING"
+  | "REPLY_SENT"
+  | "STAFF_SYNC_PENDING"
+  | "COMPLETED"
+  | "NO_ACTION"
+  | "STALE"
+  | "INACTIVE"
+  | "FAILED"
+  | "UNKNOWN_DELIVERY";
 export type TicketBatchTopicEchoState = "NOT_REQUIRED" | "PENDING" | "SENT" | "FAILED" | "TERMINAL_FAILED";
 export type TicketBatchFailureEventState = "NOT_REQUIRED" | "PENDING" | "SENT" | "FAILED";
 export type TicketBatchSummaryDeliveryState = "NOT_ATTEMPTED" | "SENT" | "FAILED";
 export type TicketBatchFinalSummaryState = "NOT_PENDING" | "PENDING" | "SENT" | "FAILED" | "UNKNOWN_DELIVERY";
 
 export interface TicketBatchAnswerPackageRecord {
-  answer_package_id: string; export_id: string; staff_chat_id: number; package_hash: string;
-  source_chat_id: number | null; source_message_id: number | null; package_created_at: string;
-  imported_at: string; status: TicketBatchAnswerPackageStatus; started_at: string | null;
-  completed_at: string | null; updated_at: string;
-  preview_token: string | null; preview_chat_id: number | null; preview_message_id: number | null; preview_page: number | null;
-  summary_delivery_state: TicketBatchSummaryDeliveryState; summary_delivery_error: string | null; summary_delivery_attempted_at: string | null;
-  final_summary_state: TicketBatchFinalSummaryState; final_summary_text: string | null;
-  final_summary_chat_id: number | null; final_summary_origin_chat_id: number | null; final_summary_origin_message_id: number | null;
-  final_summary_message_id: number | null; final_summary_attempt_count: number; final_summary_next_retry_at: string | null;
-  final_summary_last_error: string | null; final_summary_delivered_at: string | null;
+  answer_package_id: string;
+  export_id: string;
+  staff_chat_id: number;
+  package_hash: string;
+  source_chat_id: number | null;
+  source_message_id: number | null;
+  package_created_at: string;
+  imported_at: string;
+  status: TicketBatchAnswerPackageStatus;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+  preview_token: string | null;
+  preview_chat_id: number | null;
+  preview_message_id: number | null;
+  preview_page: number | null;
+  summary_delivery_state: TicketBatchSummaryDeliveryState;
+  summary_delivery_error: string | null;
+  summary_delivery_attempted_at: string | null;
+  final_summary_state: TicketBatchFinalSummaryState;
+  final_summary_text: string | null;
+  final_summary_chat_id: number | null;
+  final_summary_origin_chat_id: number | null;
+  final_summary_origin_message_id: number | null;
+  final_summary_message_id: number | null;
+  final_summary_attempt_count: number;
+  final_summary_next_retry_at: string | null;
+  final_summary_last_error: string | null;
+  final_summary_delivered_at: string | null;
 }
 
 export interface TicketBatchAnswerItemRecord {
-  answer_package_id: string; ticket_id: number; snapshot_token: string; action: "reply_keep_open" | "reply_and_close" | "no_action";
-  reply_text: string | null; state: TicketBatchAnswerItemState; delivery_message_id: number | null;
-  applied_at: string | null; last_error: string | null; updated_at: string;
-  follow_up_state: TicketFollowUpState; internal_note: string | null; escalation_target: TicketEscalationTarget;
-  topic_echo_chat_id: number | null; topic_echo_thread_id: number | null; topic_echo_message_id: number | null;
-  topic_echo_state: TicketBatchTopicEchoState; topic_echo_last_error: string | null;
-  topic_echo_attempt_count: number; topic_echo_next_retry_at: string | null;
-  topic_echo_error_category: DeliveryErrorCategory | null; topic_echo_error_code: number | null;
-  topic_echo_http_status: number | null; topic_echo_error_method: string | null;
-  topic_echo_error_description: string | null; topic_echo_terminal_at: string | null;
-  delivery_error_category: DeliveryErrorCategory | null; delivery_error_permanence: DeliveryErrorPermanence | null;
-  delivery_error_code: number | null; delivery_http_status: number | null; delivery_error_method: string | null;
-  delivery_retry_after_seconds: number | null; delivery_error_description: string | null; delivery_failed_at: string | null;
-  delivery_attempt_count: number; delivery_failure_event_state: TicketBatchFailureEventState;
-  delivery_failure_event_message_id: number | null; delivery_failure_event_attempt_count: number;
+  answer_package_id: string;
+  ticket_id: number;
+  snapshot_token: string;
+  action: "reply_keep_open" | "reply_and_close" | "no_action";
+  reply_text: string | null;
+  state: TicketBatchAnswerItemState;
+  delivery_message_id: number | null;
+  applied_at: string | null;
+  last_error: string | null;
+  updated_at: string;
+  follow_up_state: TicketFollowUpState;
+  internal_note: string | null;
+  escalation_target: TicketEscalationTarget;
+  topic_echo_chat_id: number | null;
+  topic_echo_thread_id: number | null;
+  topic_echo_message_id: number | null;
+  topic_echo_state: TicketBatchTopicEchoState;
+  topic_echo_last_error: string | null;
+  topic_echo_attempt_count: number;
+  topic_echo_next_retry_at: string | null;
+  topic_echo_error_category: DeliveryErrorCategory | null;
+  topic_echo_error_code: number | null;
+  topic_echo_http_status: number | null;
+  topic_echo_error_method: string | null;
+  topic_echo_error_description: string | null;
+  topic_echo_terminal_at: string | null;
+  delivery_error_category: DeliveryErrorCategory | null;
+  delivery_error_permanence: DeliveryErrorPermanence | null;
+  delivery_error_code: number | null;
+  delivery_http_status: number | null;
+  delivery_error_method: string | null;
+  delivery_retry_after_seconds: number | null;
+  delivery_error_description: string | null;
+  delivery_failed_at: string | null;
+  delivery_attempt_count: number;
+  delivery_failure_event_state: TicketBatchFailureEventState;
+  delivery_failure_event_message_id: number | null;
+  delivery_failure_event_attempt_count: number;
   delivery_failure_event_next_retry_at: string | null;
 }
 
@@ -276,14 +351,27 @@ export interface TicketBatchRecoveryAudit {
 }
 
 export interface CreateTicketBatchAnswerPackageInput {
-  answerPackageId: string; exportId: string; staffChatId: number; packageHash: string;
-  sourceChatId?: number | null; sourceMessageId?: number | null; packageCreatedAt: string;
-  items: Array<Pick<TicketBatchAnswerItemRecord, "ticket_id" | "snapshot_token" | "action" | "reply_text"> & Partial<Pick<TicketBatchAnswerItemRecord, "follow_up_state" | "internal_note" | "escalation_target">>>;
+  answerPackageId: string;
+  exportId: string;
+  staffChatId: number;
+  packageHash: string;
+  sourceChatId?: number | null;
+  sourceMessageId?: number | null;
+  packageCreatedAt: string;
+  items: Array<
+    Pick<TicketBatchAnswerItemRecord, "ticket_id" | "snapshot_token" | "action" | "reply_text"> &
+      Partial<Pick<TicketBatchAnswerItemRecord, "follow_up_state" | "internal_note" | "escalation_target">>
+  >;
 }
 
 export interface LanguageModerationUserState {
-  chat_id: number; user_telegram_id: number; username: string | null; current_strikes: number;
-  sanction_tier: number; first_strike_at: string | null; updated_at: string;
+  chat_id: number;
+  user_telegram_id: number;
+  username: string | null;
+  current_strikes: number;
+  sanction_tier: number;
+  first_strike_at: string | null;
+  updated_at: string;
 }
 
 export interface LanguageModerationMessageAuthor {
@@ -296,11 +384,20 @@ export interface LanguageModerationMessageAuthor {
 }
 
 export interface LanguageModerationViolation {
-  chat_id: number; user_telegram_id: number; message_id: number; username: string | null;
+  chat_id: number;
+  user_telegram_id: number;
+  message_id: number;
+  username: string | null;
   message_thread_id: number | null;
-  detected_at: string; cycle_tier: number; moderation_cycle_id: string | null; cleanup_state: LanguageModerationViolationCleanupState;
-  cleanup_attempt_count: number; cleanup_last_error_category: string | null; cleanup_last_error_code: number | null;
-  cleanup_last_error_description: string | null; cleanup_completed_at: string | null;
+  detected_at: string;
+  cycle_tier: number;
+  moderation_cycle_id: string | null;
+  cleanup_state: LanguageModerationViolationCleanupState;
+  cleanup_attempt_count: number;
+  cleanup_last_error_category: string | null;
+  cleanup_last_error_code: number | null;
+  cleanup_last_error_description: string | null;
+  cleanup_completed_at: string | null;
 }
 
 export interface LanguageModerationWarningState {
@@ -317,9 +414,19 @@ export interface LanguageModerationWarningState {
 export type LanguageModerationViolationCleanupState = "PENDING" | "DELETED" | "ALREADY_ABSENT" | "TERMINAL_FAILED";
 
 export interface LanguageModerationCleanupJob {
-  id: number; staff_chat_id: number | null; chat_id: number; user_telegram_id: number; username: string | null; chat_title: string | null;
-  sanction_tier: number; sanction_kind: string; violation_cycle_id: string | null; cleanup_due_at: string; state: "PENDING" | "CLEANING" | "LOG_PENDING" | "COMPLETED";
-  created_at: string; updated_at: string;
+  id: number;
+  staff_chat_id: number | null;
+  chat_id: number;
+  user_telegram_id: number;
+  username: string | null;
+  chat_title: string | null;
+  sanction_tier: number;
+  sanction_kind: string;
+  violation_cycle_id: string | null;
+  cleanup_due_at: string;
+  state: "PENDING" | "CLEANING" | "LOG_PENDING" | "COMPLETED";
+  created_at: string;
+  updated_at: string;
 }
 
 export type EntityNotificationPublicationState = "CLAIMED" | "PUBLISHED" | "FAILED" | "UNKNOWN_DELIVERY";
