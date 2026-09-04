@@ -12,7 +12,7 @@ import {
   type SupportLogsTopicInfo,
   type ArchiveActor,
 } from "./archive.js";
-import { config, hostConfig, setRuntimeStaffChatId } from "./config.js";
+import { config, hostConfig } from "./config.js";
 import {
   SupportDatabase,
   type TicketBatchAnswerItemRecord,
@@ -64,7 +64,7 @@ import {
   classifyEnglishOnlyMessage,
   extractAdaptiveModerationFeatures,
   parseModerationConfig,
-  scheduleModerationCleanup,
+  createModerationCleanupScheduler,
   type ModerationCleanupScheduler,
 } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
@@ -127,9 +127,6 @@ const ORDINARY_MODERATION_MESSAGE_FIELDS = [
 type ModerationReactionEmoji = "\u{1F440}" | "\u{1F621}";
 const MODERATION_STRIKE_REACTION: ModerationReactionEmoji = "\u{1F440}";
 const MODERATION_SANCTION_REACTION: ModerationReactionEmoji = "\u{1F621}";
-const installationServicesByApi = new WeakMap<object, InstallationService>();
-const installationServicesByContext = new WeakMap<Context, InstallationService>();
-
 const USER_HELP_TEXT = [
   "Support help",
   "",
@@ -249,6 +246,7 @@ interface BotRuntimeDependencies {
   installationService?: InstallationService;
   backgroundTasks?: BackgroundTaskTracker;
   supportIngressLimiter?: SupportIngressLimiter;
+  pendingWarningScheduler?: PendingWarningScheduler;
 }
 
 export type SupportBot = Bot<Context> & {
@@ -266,12 +264,9 @@ export function createBot(
   if (!runtime.installationService && !installation.getActiveWorkspace()) {
     if (hostConfig.staffChatId !== null) {
       installation.adoptLegacyInstallation(hostConfig.staffChatId);
-      setRuntimeStaffChatId(hostConfig.staffChatId);
     }
   }
-  installationServicesByApi.set(bot.api, installation);
   bot.use(async (ctx, next) => {
-    installationServicesByContext.set(ctx, installation);
     if (
       ctx.from &&
       !ctx.from.is_bot &&
@@ -293,8 +288,7 @@ export function createBot(
   const supportIngressLimiter = runtime.supportIngressLimiter ?? new SupportIngressLimiter();
   const moderationCleanupScheduler =
     runtime.scheduleModerationCleanup ??
-    ((api, moderationDb, jobId, delayMs) =>
-      scheduleModerationCleanup(api, moderationDb, jobId, delayMs, undefined, backgroundTasks));
+    createModerationCleanupScheduler(() => installation.getStaffChatId(), { backgroundTasks });
   const entityNotificationProviders = runtime.entityNotificationProviders ?? new Map();
   const runningTicketBatchExports = new Set<number>();
   const staffChatDelivery = new StaffChatDeliveryCoordinator(runtime.staffChatDelivery);
@@ -303,6 +297,25 @@ export function createBot(
   let ticketBatchRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   let ticketBatchRecoveryTimerAt: number | undefined;
   let ticketBatchRecoveryQueue: Promise<void> = Promise.resolve();
+  const pendingWarnings = runtime.pendingWarningScheduler ?? new PendingWarningScheduler(backgroundTasks);
+
+  const requireStaffChatId = (): number => installation.requireStaffChatId();
+  const isConfiguredStaffWorkspace = (ctx: Context): boolean => ctx.chat?.id === installation.getStaffChatId();
+  const isStaffChat = (ctx: Context): boolean => {
+    const staffChatId = installation.getStaffChatId();
+    return Boolean(
+      staffChatId !== null &&
+      ctx.chat?.id === staffChatId &&
+      ctx.from &&
+      installation.isStaffAuthorized(ctx.from.id, staffChatId)
+    );
+  };
+  const hasApplicationPermission = (ctx: Context, permission: Permission): boolean =>
+    Boolean(
+      ctx.from &&
+      (installation.getState().authorizationMode === "LEGACY_TRUSTED_GROUP" ||
+        installation.can(ctx.from.id, permission))
+    );
 
   const requirePermission = async (ctx: Context, permission: Permission): Promise<boolean> => {
     if (!isStaffChat(ctx) || !ctx.from) return false;
@@ -411,7 +424,7 @@ export function createBot(
     }
   }
 
-  async function runStaffChatOperation<T>(operation: () => Promise<T>, chatId = config.staffChatId): Promise<T> {
+  async function runStaffChatOperation<T>(operation: () => Promise<T>, chatId = requireStaffChatId()): Promise<T> {
     const outcome = await staffChatDelivery.run(chatId, operation);
     if (outcome.value !== undefined) return outcome.value;
     throw new StaffOnlyDeliveryError(
@@ -431,7 +444,7 @@ export function createBot(
     db.addMessage({
       ticketId: ticket.id,
       direction: "STAFF_TO_USER",
-      sourceChatId: source?.chatId ?? ticket.staff_chat_id ?? config.staffChatId,
+      sourceChatId: source?.chatId ?? ticket.staff_chat_id ?? requireStaffChatId(),
       sourceMessageId: source?.messageId ?? null,
       deliveryChatId: ticket.user_telegram_id,
       deliveryMessageId: sent.message_id,
@@ -458,7 +471,7 @@ export function createBot(
       item.topic_echo_state === "TERMINAL_FAILED"
     )
       return;
-    if (ticket.staff_chat_id !== config.staffChatId || ticket.message_thread_id === null) {
+    if (ticket.staff_chat_id !== requireStaffChatId() || ticket.message_thread_id === null) {
       throw new Error("Ticket topic is unavailable for batch echo.");
     }
     const threadId = ticket.message_thread_id;
@@ -514,7 +527,7 @@ export function createBot(
       db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
       return;
     }
-    if (ticket.staff_chat_id !== config.staffChatId || ticket.message_thread_id === null) {
+    if (ticket.staff_chat_id !== requireStaffChatId() || ticket.message_thread_id === null) {
       throw new Error("Ticket topic is unavailable for batch delivery failure event.");
     }
     const threadId = ticket.message_thread_id;
@@ -651,7 +664,7 @@ export function createBot(
     }
 
     const ticket = db.getTicketWithUser(ticketId);
-    if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+    if (!ticket || ticket.staff_chat_id !== requireStaffChatId()) {
       await ctx.answerCallbackQuery({ text: "Ticket not found in this staff chat." });
       return null;
     }
@@ -743,7 +756,7 @@ export function createBot(
 
     if (action === "open") {
       await runQuickRepliesCallbackOperation(ctx, "Quick replies opened.", async () => {
-        await ctx.api.sendMessage(config.staffChatId, "Quick replies\nChoose a category:", {
+        await ctx.api.sendMessage(requireStaffChatId(), "Quick replies\nChoose a category:", {
           message_thread_id: target.messageThreadId,
           reply_markup: quickRepliesCategoryKeyboard(target.ticket.id),
         });
@@ -782,6 +795,7 @@ export function createBot(
         logger.error({ err: error, ticketId: target.ticket.id }, "Could not deliver Quick Reply to user");
         await sendStaffTopicNotice(
           ctx.api,
+          requireStaffChatId(),
           target.ticket,
           `Could not send quick reply for ticket #${target.ticket.id} to user ${target.ticket.user_telegram_id}: ${describeError(error)}`
         );
@@ -795,7 +809,7 @@ export function createBot(
       if (target.ticket.status === "OPEN") {
         try {
           db.updateTicketStatus(target.ticket.id, "IN_PROGRESS");
-          await refreshStaffTicketMessage(db, ctx.api, target.ticket.id);
+          await refreshStaffTicketMessage(db, ctx.api, installation, target.ticket.id);
         } catch (error) {
           logger.warn({ err: error, ticketId: target.ticket.id }, "Could not refresh ticket after Quick Reply");
         }
@@ -879,7 +893,9 @@ export function createBot(
   function getPendingPrivateBatchExport(userId: number): string | undefined {
     const exportId = db.getSetting(privateBatchWorkflowSettingKey(userId))?.trim();
     if (!exportId) return undefined;
-    return db.getTicketBatchExport(exportId, config.staffChatId)?.delivery_state === "DELIVERED" ? exportId : undefined;
+    return db.getTicketBatchExport(exportId, requireStaffChatId())?.delivery_state === "DELIVERED"
+      ? exportId
+      : undefined;
   }
 
   function setPendingPrivateBatchExport(userId: number, exportId: string | undefined): void {
@@ -1080,15 +1096,14 @@ export function createBot(
       title: result.title ?? fallback?.title,
       username: result.username ?? fallback?.username,
     });
-    setRuntimeStaffChatId(result.chatId);
     if (mode === "RECONFIGURE") {
       if (!db.getSetting(`support_logs_message_thread_id:${result.chatId}`))
-        await initializeSupportLogsTopic(ctx.api, db);
+        await initializeSupportLogsTopic(ctx.api, db, result.chatId);
       await showStaffWorkspaceSettings(ctx, `Workspace validated:\n${formatWorkspaceChecklist(result)}`, true);
       return;
     }
     installation.saveOnboardingStage(ctx.from.id, "WORKSPACE_PERMISSIONS");
-    await initializeSupportLogsTopic(ctx.api, db);
+    await initializeSupportLogsTopic(ctx.api, db, result.chatId);
     await renderPrivateScreen(
       ctx,
       `Staff workspace validated:\n${formatWorkspaceChecklist(result)}`,
@@ -1461,7 +1476,14 @@ export function createBot(
 
   bot.command("start", async (ctx) => {
     if (!isPrivateChat(ctx)) {
-      await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler, backgroundTasks);
+      await handlePublicLanguageModeration(
+        db,
+        ctx,
+        installation,
+        moderationNow,
+        moderationCleanupScheduler,
+        pendingWarnings
+      );
       return;
     }
 
@@ -1599,14 +1621,14 @@ export function createBot(
       return;
     }
 
-    if (db.findTicketByStaffThread(config.staffChatId, messageThreadId)) {
+    if (db.findTicketByStaffThread(requireStaffChatId(), messageThreadId)) {
       await ctx.reply("This topic belongs to a support ticket and cannot be used as Support Logs.", {
         message_thread_id: messageThreadId,
       });
       return;
     }
 
-    setSupportLogsTopicOverride(db, messageThreadId);
+    setSupportLogsTopicOverride(db, requireStaffChatId(), messageThreadId);
     await ctx.reply("This topic is now used as Support Logs.", {
       message_thread_id: messageThreadId,
     });
@@ -1621,29 +1643,29 @@ export function createBot(
     }
 
     if (!(await requirePermission(ctx, "SUPPORT_LOGS"))) return;
-    const topic = await getSupportLogsTopicInfo(ctx.api, db);
-    await ctx.reply(formatSupportLogsTopicInfo(topic), {
+    const topic = await getSupportLogsTopicInfo(ctx.api, db, requireStaffChatId());
+    await ctx.reply(formatSupportLogsTopicInfo(topic, requireStaffChatId()), {
       message_thread_id: ctx.message?.message_thread_id,
     });
   });
 
   async function exportActiveTickets(ctx: Context, destinationChatId: number): Promise<string | undefined> {
-    if (runningTicketBatchExports.has(config.staffChatId)) {
+    if (runningTicketBatchExports.has(requireStaffChatId())) {
       await ctx.reply("An export is already running for this staff chat.");
       return undefined;
     }
 
-    runningTicketBatchExports.add(config.staffChatId);
+    runningTicketBatchExports.add(requireStaffChatId());
     let zip: Awaited<ReturnType<typeof createTicketBatchZip>> | undefined;
     let exportId: string | undefined;
     let deliveryAttempted = false;
     try {
-      const tickets = db.listActiveTicketsForStaffChat(config.staffChatId).map((ticket) => ({
+      const tickets = db.listActiveTicketsForStaffChat(requireStaffChatId()).map((ticket) => ({
         ticket,
         messages: db.listMessagesChronological(ticket.id),
         followUpHistory: db.listTicketFollowUpHistory(ticket.id),
-        deliveryFailure: db.getLatestTicketBatchDeliveryFailure(ticket.id, config.staffChatId),
-        staffSync: db.getLatestTicketBatchStaffSyncContext(ticket.id, config.staffChatId),
+        deliveryFailure: db.getLatestTicketBatchDeliveryFailure(ticket.id, requireStaffChatId()),
+        staffSync: db.getLatestTicketBatchStaffSyncContext(ticket.id, requireStaffChatId()),
       }));
       if (!tickets.length) {
         await ctx.reply("There are no active tickets to export.");
@@ -1655,7 +1677,7 @@ export function createBot(
       const snapshot = buildTicketBatchExportSnapshot({
         exportId,
         createdAt,
-        staffChatId: config.staffChatId,
+        staffChatId: requireStaffChatId(),
         tickets,
       });
       zip = await createTicketBatchZip(snapshot, async (attachment): Promise<TicketBatchAttachmentDownloadResult> => {
@@ -1692,7 +1714,7 @@ export function createBot(
       });
       db.createTicketBatchExport({
         exportId,
-        staffChatId: config.staffChatId,
+        staffChatId: requireStaffChatId(),
         createdAt,
         selectionMode: "all_active",
         ticketCount: snapshot.records.length,
@@ -1704,7 +1726,7 @@ export function createBot(
         caption: formatTicketBatchExportCaption(exportId, zip),
       });
       try {
-        db.markTicketBatchExportDelivered(exportId, config.staffChatId, delivered.message_id);
+        db.markTicketBatchExportDelivered(exportId, requireStaffChatId(), delivered.message_id);
       } catch (error) {
         logger.error({ err: error, exportId }, "Ticket batch export delivery could not be persisted");
         await ctx.reply("Export delivery could not be confirmed. Do not upload an answer package for it.");
@@ -1718,11 +1740,11 @@ export function createBot(
           if (deliveryAttempted && error instanceof HttpError) {
             db.markTicketBatchExportUnknownDelivery(
               exportId,
-              config.staffChatId,
+              requireStaffChatId(),
               "Export delivery outcome could not be confirmed."
             );
           } else {
-            db.markTicketBatchExportFailed(exportId, config.staffChatId, "Export failed before confirmed delivery.");
+            db.markTicketBatchExportFailed(exportId, requireStaffChatId(), "Export failed before confirmed delivery.");
           }
         } catch (persistenceError) {
           logger.warn({ err: persistenceError, exportId }, "Could not persist failed ticket batch export state");
@@ -1738,7 +1760,7 @@ export function createBot(
           logger.warn({ err: error, exportId }, "Could not clean up ticket batch export files");
         }
       }
-      runningTicketBatchExports.delete(config.staffChatId);
+      runningTicketBatchExports.delete(requireStaffChatId());
     }
   }
 
@@ -1759,7 +1781,7 @@ export function createBot(
       await ctx.reply("Please run /exporttickets outside ticket topics.");
       return;
     }
-    await exportActiveTickets(ctx, config.staffChatId);
+    await exportActiveTickets(ctx, requireStaffChatId());
   });
 
   bot.command("moderation", async (ctx) => {
@@ -1771,7 +1793,7 @@ export function createBot(
     const [, action = "status", ...args] = (ctx.message?.text ?? "").trim().split(/\s+/);
     const current = moderationConfig(db);
     if (action === "status") {
-      await ctx.reply(await formatModerationStatus(db, current, ctx.api, bot.botInfo?.id));
+      await ctx.reply(await formatModerationStatus(db, current, ctx.api, bot.botInfo?.id, requireStaffChatId()));
       return;
     }
     if (action === "target") {
@@ -2001,7 +2023,7 @@ export function createBot(
       return;
     }
 
-    const ticket = db.getLatestTicketForUser(ctx.from.id, config.staffChatId);
+    const ticket = db.getLatestTicketForUser(ctx.from.id, requireStaffChatId());
     if (!ticket) {
       await ctx.reply("You do not have any tickets yet. Send a message here to create one.");
       return;
@@ -2024,7 +2046,7 @@ export function createBot(
       return;
     }
 
-    await ctx.reply(formatUserTicketList(db.listTicketsForUser(ctx.from.id, config.staffChatId)));
+    await ctx.reply(formatUserTicketList(db.listTicketsForUser(ctx.from.id, requireStaffChatId())));
   });
 
   bot.command("ticket", async (ctx) => {
@@ -2044,7 +2066,7 @@ export function createBot(
     }
 
     const ticket = db.getTicketWithUser(ticketId);
-    if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+    if (!ticket || ticket.staff_chat_id !== requireStaffChatId()) {
       await ctx.reply(`Ticket #${ticketId} was not found in this staff chat.`);
       return;
     }
@@ -2070,12 +2092,12 @@ export function createBot(
       return;
     }
 
-    const result = await closeTicket(db, ctx.api, ticketId, {
+    const result = await closeTicket(db, ctx.api, installation, ticketId, {
       notifyUser: true,
       staffNotice: "Ticket closed by staff.",
       closedBy: staffActor(ctx.from),
     });
-    await notifyStaff(ctx.api, result);
+    await notifyStaff(ctx.api, requireStaffChatId(), result);
   });
 
   bot.command("ban", async (ctx) => {
@@ -2093,8 +2115,8 @@ export function createBot(
       return;
     }
 
-    await banUserById(db, ctx.api, command.userId, command.reason, staffActor(ctx.from));
-    await notifyStaff(ctx.api, `User ${command.userId} has been banned.`);
+    await banUserById(db, ctx.api, installation, command.userId, command.reason, staffActor(ctx.from));
+    await notifyStaff(ctx.api, requireStaffChatId(), `User ${command.userId} has been banned.`);
   });
 
   bot.command("unban", async (ctx) => {
@@ -2116,7 +2138,7 @@ export function createBot(
     const removed = db.unbanUser(userId);
     if (removed) {
       const user = db.getUser(userId);
-      await logBanEvent(ctx.api, db, {
+      await logBanEvent(ctx.api, db, requireStaffChatId(), {
         action: "UNBANNED",
         userTelegramId: userId,
         username: ban?.username ?? user?.username ?? null,
@@ -2169,7 +2191,7 @@ export function createBot(
       return;
     }
 
-    const ticket = db.findTicketByStaffThread(config.staffChatId, messageThreadId);
+    const ticket = db.findTicketByStaffThread(requireStaffChatId(), messageThreadId);
     if (!ticket) {
       await ctx.reply("This topic is not linked to a ticket.");
       return;
@@ -2278,8 +2300,7 @@ export function createBot(
         try {
           const chatId = installation.getStaffChatId();
           if (chatId === null) throw new Error("A validated staff workspace is required before activation.");
-          setRuntimeStaffChatId(chatId);
-          await initializeSupportLogsTopic(ctx.api, db);
+          await initializeSupportLogsTopic(ctx.api, db, chatId);
           installation.markReady();
           installation.saveOnboardingStage(ctx.from.id, "ACTIVATE_SUPPORT", "COMPLETED");
           await showDashboard(ctx);
@@ -2380,7 +2401,7 @@ export function createBot(
     }
 
     if (namespace === "user") {
-      await handleUserCallback(db, ctx, data, async (ticketId) => {
+      await handleUserCallback(db, ctx, installation, data, async (ticketId) => {
         if (!ctx.from || staffTestTicketId(ctx.from.id) !== ticketId) return;
         setStaffTestTicketId(ctx.from.id, undefined);
         await showDashboardAfterStaffTestTicketClose(ctx);
@@ -2389,7 +2410,7 @@ export function createBot(
     }
 
     if (namespace === "ticket") {
-      await handleStaffCallback(db, ctx, data);
+      await handleStaffCallback(db, ctx, installation, data);
       return;
     }
 
@@ -2495,7 +2516,7 @@ export function createBot(
       managed.active !== 1 ||
       managed.moderation_enabled !== 1 ||
       managed.manual_strikes_enabled !== 1 ||
-      reaction.chat.id === config.staffChatId ||
+      reaction.chat.id === requireStaffChatId() ||
       !triggerReaction ||
       hasEmojiReaction(reaction.old_reaction, triggerReaction) ||
       !hasEmojiReaction(reaction.new_reaction, triggerReaction)
@@ -2573,6 +2594,7 @@ export function createBot(
       state,
       now: moderationNow,
       cleanupScheduler: moderationCleanupScheduler,
+      staffChatId: requireStaffChatId(),
       setStrikeReaction: false,
     });
     if (outcome) {
@@ -2609,12 +2631,19 @@ export function createBot(
         await handleTicketAnswerPackageUpload(ctx);
         return;
       }
-      await handleStaffGroupMessage(db, ctx, deliverAndRecordStaffTextReply);
+      await handleStaffGroupMessage(db, ctx, installation, deliverAndRecordStaffTextReply);
       return;
     }
 
     if (!isPrivateChat(ctx)) {
-      await handlePublicLanguageModeration(db, ctx, moderationNow, moderationCleanupScheduler, backgroundTasks);
+      await handlePublicLanguageModeration(
+        db,
+        ctx,
+        installation,
+        moderationNow,
+        moderationCleanupScheduler,
+        pendingWarnings
+      );
       return;
     }
 
@@ -2718,9 +2747,9 @@ export function createBot(
     }
 
     if (staffTestTicketMode) await retireTrackedPrivateScreens(ctx);
-    await handlePrivateUserMessage(db, ctx);
+    await handlePrivateUserMessage(db, ctx, installation);
     if (staffTestTicketMode && ctx.from) {
-      const activeTicket = db.findActiveTicketForUser(ctx.from.id, config.staffChatId);
+      const activeTicket = db.findActiveTicketForUser(ctx.from.id, requireStaffChatId());
       if (activeTicket) {
         setStaffTestTicketId(ctx.from.id, activeTicket.id);
       } else {
@@ -2768,7 +2797,7 @@ export function createBot(
         throw new TicketBatchValidationError("Ticket answer packages must be 5 MiB or smaller.");
       }
       const raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      const exportRecord = db.getTicketBatchExport(exportId, config.staffChatId);
+      const exportRecord = db.getTicketBatchExport(exportId, requireStaffChatId());
       if (!exportRecord) {
         throw new TicketBatchValidationError("This answer package references an unknown export for this staff chat.");
       }
@@ -2784,8 +2813,8 @@ export function createBot(
       const answerPackage = parseAndValidateAnswerPackage(raw, exportId, exportItems);
       const pages = buildTicketBatchPreviewPagesForAnswerPackage(answerPackage, exportItems);
       const packageHash = getAnswerPackageHash(answerPackage);
-      const existingById = db.getTicketBatchAnswerPackage(answerPackage.answer_package_id, config.staffChatId);
-      const existingByHash = db.getTicketBatchAnswerPackageByHash(packageHash, config.staffChatId);
+      const existingById = db.getTicketBatchAnswerPackage(answerPackage.answer_package_id, requireStaffChatId());
+      const existingByHash = db.getTicketBatchAnswerPackageByHash(packageHash, requireStaffChatId());
       let persistedPackage = existingById;
       if (existingById && existingById.package_hash !== packageHash) {
         throw new TicketBatchValidationError("This answer_package_id was already imported with different content.");
@@ -2802,7 +2831,7 @@ export function createBot(
         persistedPackage = db.createTicketBatchAnswerPackage({
           answerPackageId: answerPackage.answer_package_id,
           exportId,
-          staffChatId: config.staffChatId,
+          staffChatId: requireStaffChatId(),
           packageHash,
           sourceChatId: ctx.chat.id,
           sourceMessageId: ctx.message?.message_id ?? null,
@@ -2820,7 +2849,7 @@ export function createBot(
         });
         db.updateTicketBatchAnswerPackagePreviewPage(
           persistedPackage.answer_package_id,
-          config.staffChatId,
+          requireStaffChatId(),
           previewPage
         );
         if (isPrivateChat(ctx) && ctx.from) {
@@ -2833,7 +2862,7 @@ export function createBot(
           ? await refreshPrivateScreen(ctx, text, keyboard)
           : await ctx.reply(text, { reply_markup: keyboard });
       if (
-        !db.setTicketBatchAnswerPackagePreview(persistedPackage.answer_package_id, config.staffChatId, {
+        !db.setTicketBatchAnswerPackagePreview(persistedPackage.answer_package_id, requireStaffChatId(), {
           token: previewToken,
           chatId: ctx.chat.id,
           messageId: previewMessage.message_id,
@@ -2878,7 +2907,7 @@ export function createBot(
       await ctx.answerCallbackQuery({ text: "Use ticket batch controls outside ticket topics." });
       return;
     }
-    const packageRecord = db.getTicketBatchAnswerPackageByPreviewToken(token, config.staffChatId);
+    const packageRecord = db.getTicketBatchAnswerPackageByPreviewToken(token, requireStaffChatId());
     if (
       !packageRecord ||
       packageRecord.preview_chat_id !== message.chat.id ||
@@ -2901,18 +2930,18 @@ export function createBot(
       await ctx.api.editMessageText(message.chat.id, message.message_id, formatTicketBatchPreviewPage(pages, page), {
         reply_markup: ticketBatchPreviewKeyboard(token, page, pages.length),
       });
-      db.updateTicketBatchAnswerPackagePreviewPage(packageRecord.answer_package_id, config.staffChatId, page);
+      db.updateTicketBatchAnswerPackagePreviewPage(packageRecord.answer_package_id, requireStaffChatId(), page);
       await ctx.answerCallbackQuery();
       return;
     }
     if (action === "cancel") {
-      const cancelled = db.cancelTicketBatchAnswerPackage(packageRecord.answer_package_id, config.staffChatId);
+      const cancelled = db.cancelTicketBatchAnswerPackage(packageRecord.answer_package_id, requireStaffChatId());
       if (!cancelled) {
         await ctx.answerCallbackQuery({ text: "This package can no longer be cancelled." });
         return;
       }
       await ctx.answerCallbackQuery({ text: "Ticket batch preview cancelled." });
-      db.clearTicketBatchAnswerPackagePreview(packageRecord.answer_package_id, config.staffChatId);
+      db.clearTicketBatchAnswerPackagePreview(packageRecord.answer_package_id, requireStaffChatId());
       await cleanupTicketBatchPreview(packageRecord, "Package cancelled.");
       if (isPrivateChat(ctx) && ctx.from) {
         setPendingPrivateBatchExport(ctx.from.id, packageRecord.export_id);
@@ -2926,7 +2955,7 @@ export function createBot(
       return;
     }
 
-    const beforeClaim = db.getTicketBatchAnswerPackage(packageRecord.answer_package_id, config.staffChatId);
+    const beforeClaim = db.getTicketBatchAnswerPackage(packageRecord.answer_package_id, requireStaffChatId());
     if (beforeClaim?.status === "APPLYING") {
       await ctx.answerCallbackQuery({ text: "Answer package is already being applied." });
       return;
@@ -2935,7 +2964,7 @@ export function createBot(
       await ctx.answerCallbackQuery({ text: "Answer package is already completed." });
       return;
     }
-    const claimed = db.claimTicketBatchAnswerPackage(packageRecord.answer_package_id, config.staffChatId);
+    const claimed = db.claimTicketBatchAnswerPackage(packageRecord.answer_package_id, requireStaffChatId());
     if (!claimed) {
       await ctx.answerCallbackQuery({ text: "Answer package not found." });
       return;
@@ -2946,13 +2975,13 @@ export function createBot(
     }
 
     // Clear the active callback token immediately, but retain the message coordinates in final-summary state.
-    db.clearTicketBatchAnswerPackagePreview(claimed.answer_package_id, config.staffChatId);
+    db.clearTicketBatchAnswerPackagePreview(claimed.answer_package_id, requireStaffChatId());
     await ctx.answerCallbackQuery({ text: "Applying answer package..." });
     await neutralizeTicketBatchPreview(claimed, "Applying...");
     const summary = await applyTicketBatchAnswerPackage(claimed.answer_package_id, ctx.from);
-    db.queueTicketBatchFinalSummary(claimed.answer_package_id, config.staffChatId, {
+    db.queueTicketBatchFinalSummary(claimed.answer_package_id, requireStaffChatId(), {
       text: summary,
-      chatId: ctx.chat?.id ?? config.staffChatId,
+      chatId: ctx.chat?.id ?? requireStaffChatId(),
       originChatId: claimed.preview_chat_id,
       originMessageId: claimed.preview_message_id,
     });
@@ -2993,7 +3022,7 @@ export function createBot(
   ): string[] {
     const preview = buildAnswerPackagePreview(answerPackage, exportItems, (ticketId) => {
       const ticket = db.getTicketWithUser(ticketId);
-      if (!ticket || ticket.staff_chat_id !== config.staffChatId) return null;
+      if (!ticket || ticket.staff_chat_id !== requireStaffChatId()) return null;
       return {
         status: ticket.status,
         snapshotToken: getTicketSnapshotToken(ticket, db.listMessagesChronological(ticket.id)),
@@ -3056,7 +3085,7 @@ export function createBot(
   }
 
   async function applyTicketBatchAnswerPackage(answerPackageId: string, staffUser: User | undefined): Promise<string> {
-    const packageRecord = db.getTicketBatchAnswerPackage(answerPackageId, config.staffChatId);
+    const packageRecord = db.getTicketBatchAnswerPackage(answerPackageId, requireStaffChatId());
     if (!packageRecord) return "Answer package not found.";
     const exportItems = db.listTicketBatchExportItems(packageRecord.export_id);
     const exportTokens = new Map(exportItems.map((item) => [item.ticket_id, item.snapshot_token]));
@@ -3089,7 +3118,7 @@ export function createBot(
       }
       const ticket = db.getTicketWithUser(item.ticket_id);
       if (item.state === "STAFF_SYNC_PENDING") {
-        if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+        if (!ticket || ticket.staff_chat_id !== requireStaffChatId()) {
           db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true });
           totals.inactive += 1;
           continue;
@@ -3111,7 +3140,7 @@ export function createBot(
         }
         try {
           await sendTicketBatchTopicEcho(ticket, item);
-          await refreshStaffTicketMessage(db, bot.api, ticket.id);
+          await refreshStaffTicketMessage(db, bot.api, installation, ticket.id);
           if (item.action === "no_action") {
             db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "NO_ACTION", { applied: true });
             totals.noAction += 1;
@@ -3131,7 +3160,7 @@ export function createBot(
         continue;
       }
       if (item.state === "REPLY_SENT" && item.action === "reply_and_close") {
-        if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+        if (!ticket || ticket.staff_chat_id !== requireStaffChatId()) {
           db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true });
           totals.inactive += 1;
           continue;
@@ -3158,7 +3187,7 @@ export function createBot(
         continue;
       }
       const expectedToken = exportTokens.get(item.ticket_id);
-      if (!ticket || ticket.staff_chat_id !== config.staffChatId || ticket.status === "CLOSED") {
+      if (!ticket || ticket.staff_chat_id !== requireStaffChatId() || ticket.status === "CLOSED") {
         db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true });
         totals.inactive += 1;
         continue;
@@ -3180,7 +3209,7 @@ export function createBot(
         try {
           if (hasBatchFollowUpContext(item)) persistBatchFollowUp(ticket, item);
           await sendTicketBatchTopicEcho(ticket, item);
-          await refreshStaffTicketMessage(db, bot.api, ticket.id);
+          await refreshStaffTicketMessage(db, bot.api, installation, ticket.id);
           db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "NO_ACTION", { applied: true });
           totals.noAction += 1;
         } catch (error) {
@@ -3263,7 +3292,7 @@ export function createBot(
             deliveryMessageId,
             applied: true,
           });
-          await refreshStaffTicketMessage(db, bot.api, ticket.id);
+          await refreshStaffTicketMessage(db, bot.api, installation, ticket.id);
           totals.keep += 1;
           continue;
         }
@@ -3293,7 +3322,7 @@ export function createBot(
         totals.replySent += 1;
       }
     }
-    db.finalizeTicketBatchAnswerPackage(answerPackageId, config.staffChatId);
+    db.finalizeTicketBatchAnswerPackage(answerPackageId, requireStaffChatId());
     return buildPersistedTicketBatchSummary(answerPackageId);
   }
 
@@ -3313,7 +3342,7 @@ export function createBot(
       return "PENDING";
     }
     const ticket = db.getTicketWithUser(item.ticket_id);
-    if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+    if (!ticket || ticket.staff_chat_id !== requireStaffChatId()) {
       db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "INACTIVE", { applied: true });
       return "INACTIVE";
     }
@@ -3324,7 +3353,7 @@ export function createBot(
 
     let archiveFailure: NormalizedDeliveryError | undefined;
     try {
-      await closeTicket(db, bot.api, ticket.id, {
+      await closeTicket(db, bot.api, installation, ticket.id, {
         notifyUser: true,
         staffNotice: "Ticket closed by batch answer.",
         closedBy: staffActor(staffUser),
@@ -3537,7 +3566,7 @@ export function createBot(
     const packagesToFinalize = new Set<string>();
     const packagesToRefresh = new Set<string>();
     const invalidSuccessEchoes = db
-      .listInvalidTicketBatchSuccessEchoes(config.staffChatId, 20)
+      .listInvalidTicketBatchSuccessEchoes(requireStaffChatId(), 20)
       .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
     for (const item of invalidSuccessEchoes) {
       db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED", {
@@ -3549,7 +3578,7 @@ export function createBot(
       );
     }
     const closedPendingEchoes = db
-      .listClosedTicketBatchReplyAndClosePendingEchoes(config.staffChatId, 20)
+      .listClosedTicketBatchReplyAndClosePendingEchoes(requireStaffChatId(), 20)
       .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
     for (const item of closedPendingEchoes) {
       db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED", {
@@ -3558,11 +3587,11 @@ export function createBot(
       packagesToFinalize.add(item.answer_package_id);
     }
     const failureEvents = db
-      .listPendingTicketBatchFailureEvents(config.staffChatId, at, 20)
+      .listPendingTicketBatchFailureEvents(requireStaffChatId(), at, 20)
       .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
     for (const item of failureEvents) {
       const ticket = db.getTicketWithUser(item.ticket_id);
-      if (!ticket || ticket.staff_chat_id !== config.staffChatId || ticket.status === "CLOSED") {
+      if (!ticket || ticket.staff_chat_id !== requireStaffChatId() || ticket.status === "CLOSED") {
         if (ticket?.status === "CLOSED") {
           db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
         }
@@ -3586,11 +3615,11 @@ export function createBot(
       }
     }
     const echoes = db
-      .listPendingTicketBatchTopicEchoes(config.staffChatId, at, 20)
+      .listPendingTicketBatchTopicEchoes(requireStaffChatId(), at, 20)
       .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
     for (const item of echoes) {
       const ticket = db.getTicketWithUser(item.ticket_id);
-      if (!ticket || ticket.staff_chat_id !== config.staffChatId || ticket.status === "CLOSED") continue;
+      if (!ticket || ticket.staff_chat_id !== requireStaffChatId() || ticket.status === "CLOSED") continue;
       try {
         await sendTicketBatchTopicEcho(ticket, item);
         if (item.action === "no_action")
@@ -3605,7 +3634,7 @@ export function createBot(
     }
 
     const continuations = db
-      .listPendingTicketBatchReplyAndCloseContinuations(config.staffChatId, at, 20)
+      .listPendingTicketBatchReplyAndCloseContinuations(requireStaffChatId(), at, 20)
       .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
     for (const item of continuations) {
       const result = await resumeReplyAndClosePostDelivery(item, undefined);
@@ -3613,12 +3642,12 @@ export function createBot(
       if (result !== "PENDING") packagesToRefresh.add(item.answer_package_id);
     }
     for (const packageId of packagesToFinalize) {
-      db.finalizeTicketBatchAnswerPackage(packageId, config.staffChatId);
+      db.finalizeTicketBatchAnswerPackage(packageId, requireStaffChatId());
     }
     for (const packageId of packagesToRefresh) {
       db.queueTicketBatchFinalSummaryRefresh(
         packageId,
-        config.staffChatId,
+        requireStaffChatId(),
         buildPersistedTicketBatchSummary(packageId)
       );
     }
@@ -3628,17 +3657,17 @@ export function createBot(
 
     const summaryAt = new Date().toISOString();
     const summaries = db
-      .listPendingTicketBatchFinalSummaries(config.staffChatId, summaryAt, 20)
+      .listPendingTicketBatchFinalSummaries(requireStaffChatId(), summaryAt, 20)
       .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
     for (const item of summaries) {
       const text = buildPersistedTicketBatchSummary(item.answer_package_id);
-      db.queueTicketBatchFinalSummary(item.answer_package_id, config.staffChatId, {
+      db.queueTicketBatchFinalSummary(item.answer_package_id, requireStaffChatId(), {
         text,
-        chatId: item.final_summary_chat_id ?? config.staffChatId,
+        chatId: item.final_summary_chat_id ?? requireStaffChatId(),
         originChatId: item.final_summary_origin_chat_id,
         originMessageId: item.final_summary_origin_message_id,
       });
-      db.recordTicketBatchFinalSummaryAttempt(item.answer_package_id, config.staffChatId);
+      db.recordTicketBatchFinalSummaryAttempt(item.answer_package_id, requireStaffChatId());
       try {
         if (item.final_summary_origin_chat_id !== null && item.final_summary_origin_message_id !== null) {
           const originChatId = item.final_summary_origin_chat_id;
@@ -3651,9 +3680,9 @@ export function createBot(
               }),
             originChatId
           );
-          db.recordTicketBatchFinalSummarySent(item.answer_package_id, config.staffChatId, originMessageId);
+          db.recordTicketBatchFinalSummarySent(item.answer_package_id, requireStaffChatId(), originMessageId);
         } else {
-          const destinationChatId = item.final_summary_chat_id ?? config.staffChatId;
+          const destinationChatId = item.final_summary_chat_id ?? requireStaffChatId();
           const sent = await runStaffChatOperation(
             () =>
               bot.api.sendMessage(destinationChatId, text, {
@@ -3662,14 +3691,14 @@ export function createBot(
               }),
             destinationChatId
           );
-          db.recordTicketBatchFinalSummarySent(item.answer_package_id, config.staffChatId, sent.message_id);
+          db.recordTicketBatchFinalSummarySent(item.answer_package_id, requireStaffChatId(), sent.message_id);
         }
       } catch (error) {
         const failure = batchStaffFailure(error);
         if (failure.retryAt !== null) {
           db.recordTicketBatchFinalSummaryFailure(
             item.answer_package_id,
-            config.staffChatId,
+            requireStaffChatId(),
             "FAILED",
             failure.category,
             failure.retryAt
@@ -3677,14 +3706,14 @@ export function createBot(
           scheduleTicketBatchStaffRecovery(failure.retryAt);
         } else if (item.final_summary_origin_message_id !== null) {
           // The preview cannot be replaced, so a single persisted fallback send can be attempted later.
-          db.queueTicketBatchFinalSummary(item.answer_package_id, config.staffChatId, {
+          db.queueTicketBatchFinalSummary(item.answer_package_id, requireStaffChatId(), {
             text,
-            chatId: item.final_summary_chat_id ?? config.staffChatId,
+            chatId: item.final_summary_chat_id ?? requireStaffChatId(),
           });
           const fallbackAt = new Date().toISOString();
           db.recordTicketBatchFinalSummaryFailure(
             item.answer_package_id,
-            config.staffChatId,
+            requireStaffChatId(),
             "FAILED",
             failure.category,
             fallbackAt
@@ -3693,7 +3722,7 @@ export function createBot(
         } else {
           db.recordTicketBatchFinalSummaryFailure(
             item.answer_package_id,
-            config.staffChatId,
+            requireStaffChatId(),
             "UNKNOWN_DELIVERY",
             failure.category,
             null
@@ -3705,7 +3734,7 @@ export function createBot(
         );
       }
     }
-    scheduleTicketBatchStaffRecovery(db.getNextTicketBatchStaffRetryAt(config.staffChatId) ?? null);
+    scheduleTicketBatchStaffRecovery(db.getNextTicketBatchStaffRetryAt(requireStaffChatId()) ?? null);
   }
 
   function scheduleTicketBatchStaffRecovery(nextRetryAt: string | null): void {
@@ -3740,10 +3769,11 @@ export function createBot(
     const ctx = error.ctx;
     logger.error({ err: error.error, updateId: ctx.update.update_id }, "Bot failed while processing an update");
 
-    const staffChatId = installationServicesByApi.get(ctx.api)?.getStaffChatId();
-    if (staffChatId !== null && staffChatId !== undefined && ctx.chat?.id === staffChatId) {
+    const staffChatId = installation.getStaffChatId();
+    if (staffChatId !== null && ctx.chat?.id === staffChatId) {
       await notifyStaff(
         ctx.api,
+        staffChatId,
         `Bot error while processing update ${ctx.update.update_id}: ${describeError(error.error)}`,
         ctx.msg?.message_thread_id
       );
@@ -3756,12 +3786,12 @@ export function createBot(
     if (ticketBatchRecoveryTimer) clearTimeout(ticketBatchRecoveryTimer);
     ticketBatchRecoveryTimer = undefined;
     ticketBatchRecoveryTimerAt = undefined;
-    stopPendingWarnings();
+    pendingWarnings.stop();
   };
   return supportBot;
 }
 
-export async function setBotCommands(bot: Bot<Context>, installation?: InstallationService): Promise<void> {
+export async function setBotCommands(bot: Bot<Context>, installation: InstallationService): Promise<void> {
   await bot.api.setMyCommands([
     { command: "start", description: "Start support" },
     { command: "status", description: "Show your latest ticket status" },
@@ -3769,8 +3799,8 @@ export async function setBotCommands(bot: Bot<Context>, installation?: Installat
     { command: "help", description: "Show help" },
   ]);
 
-  const staffChatId = installation?.getStaffChatId() ?? installationServicesByApi.get(bot.api)?.getStaffChatId();
-  if (staffChatId === null || staffChatId === undefined) return;
+  const staffChatId = installation.getStaffChatId();
+  if (staffChatId === null) return;
   await bot.api.setMyCommands(
     [
       { command: "help", description: "Show staff help" },
@@ -3794,11 +3824,11 @@ export async function setBotCommands(bot: Bot<Context>, installation?: Installat
 export async function sendStaffOnboardingIfNeeded(
   api: BotApi,
   db: SupportDatabase,
-  installation?: InstallationService
+  installation: InstallationService
 ): Promise<void> {
-  const staffChatId = installation?.getStaffChatId() ?? installationServicesByApi.get(api)?.getStaffChatId();
-  if (staffChatId === null || staffChatId === undefined) return;
-  const settingKey = staffHelpSentSettingKey();
+  const staffChatId = installation.getStaffChatId();
+  if (staffChatId === null) return;
+  const settingKey = staffHelpSentSettingKey(staffChatId);
   if (db.getSetting(settingKey) === "true") {
     return;
   }
@@ -3811,7 +3841,11 @@ export async function sendStaffOnboardingIfNeeded(
   }
 }
 
-async function handlePrivateUserMessage(db: SupportDatabase, ctx: Context): Promise<void> {
+async function handlePrivateUserMessage(
+  db: SupportDatabase,
+  ctx: Context,
+  installation: InstallationService
+): Promise<void> {
   if (!ctx.from || !ctx.chat || !ctx.message) {
     return;
   }
@@ -3823,16 +3857,20 @@ async function handlePrivateUserMessage(db: SupportDatabase, ctx: Context): Prom
 
   persistUserFromContext(db, ctx);
 
-  const activeTicket = db.findActiveTicketForUser(ctx.from.id, config.staffChatId);
+  const activeTicket = db.findActiveTicketForUser(ctx.from.id, installation.requireStaffChatId());
   if (activeTicket) {
-    await appendToExistingTicket(db, ctx, activeTicket);
+    await appendToExistingTicket(db, ctx, installation, activeTicket);
     return;
   }
 
-  await createFreshTicketFromUserMessage(db, ctx);
+  await createFreshTicketFromUserMessage(db, ctx, installation);
 }
 
-async function createFreshTicketFromUserMessage(db: SupportDatabase, ctx: Context): Promise<void> {
+async function createFreshTicketFromUserMessage(
+  db: SupportDatabase,
+  ctx: Context,
+  installation: InstallationService
+): Promise<void> {
   if (!ctx.from || !ctx.chat || !ctx.message) {
     return;
   }
@@ -3849,12 +3887,12 @@ async function createFreshTicketFromUserMessage(db: SupportDatabase, ctx: Contex
 
   let ticket: TicketRecord;
   try {
-    ticket = db.createTicket(ctx.from.id, config.staffChatId);
+    ticket = db.createTicket(ctx.from.id, installation.requireStaffChatId());
   } catch (error) {
     if (isSqliteConstraint(error)) {
-      const activeTicket = db.findActiveTicketForUser(ctx.from.id, config.staffChatId);
+      const activeTicket = db.findActiveTicketForUser(ctx.from.id, installation.requireStaffChatId());
       if (activeTicket) {
-        await appendToExistingTicket(db, ctx, activeTicket);
+        await appendToExistingTicket(db, ctx, installation, activeTicket);
         return;
       }
     }
@@ -3882,9 +3920,9 @@ async function createFreshTicketFromUserMessage(db: SupportDatabase, ctx: Contex
 
   let messageThreadId: number;
   try {
-    const topic = await ctx.api.createForumTopic(config.staffChatId, topicName(ticket.id, ctx.from));
+    const topic = await ctx.api.createForumTopic(installation.requireStaffChatId(), topicName(ticket.id, ctx.from));
     messageThreadId = topic.message_thread_id;
-    db.updateTicketForumTopic(ticket.id, config.staffChatId, messageThreadId);
+    db.updateTicketForumTopic(ticket.id, installation.requireStaffChatId(), messageThreadId);
   } catch (error) {
     logger.error({ err: error, ticketId: ticket.id }, "Could not create staff forum topic");
     db.updateTicketStatus(ticket.id, "CLOSED");
@@ -3902,14 +3940,18 @@ async function createFreshTicketFromUserMessage(db: SupportDatabase, ctx: Contex
   }
 
   try {
-    const summary = await ctx.api.sendMessage(config.staffChatId, formatPinnedTicketSummary(ticketWithTopic), {
-      message_thread_id: messageThreadId,
-      reply_markup: staffTicketKeyboard(ticket.id),
-    });
+    const summary = await ctx.api.sendMessage(
+      installation.requireStaffChatId(),
+      formatPinnedTicketSummary(ticketWithTopic),
+      {
+        message_thread_id: messageThreadId,
+        reply_markup: staffTicketKeyboard(ticket.id),
+      }
+    );
     db.updateTicketStaffMessage(ticket.id, summary.chat.id, summary.message_id);
     await pinMessageSafely(ctx.api, summary.chat.id, summary.message_id, ticket.id);
 
-    await ctx.api.sendMessage(config.staffChatId, formatTicketPost(ticketWithTopic, content.text), {
+    await ctx.api.sendMessage(installation.requireStaffChatId(), formatTicketPost(ticketWithTopic, content.text), {
       message_thread_id: messageThreadId,
     });
   } catch (error) {
@@ -3921,31 +3963,36 @@ async function createFreshTicketFromUserMessage(db: SupportDatabase, ctx: Contex
     return;
   }
 
-  db.closeOtherActiveTicketsForUserInStaffChat(ctx.from.id, config.staffChatId, ticket.id);
-  await maybeCopyOriginalMessageToStaff(db, ctx, ticketWithTopic, content.shouldCopyOriginal);
+  db.closeOtherActiveTicketsForUserInStaffChat(ctx.from.id, installation.requireStaffChatId(), ticket.id);
+  await maybeCopyOriginalMessageToStaff(db, ctx, installation, ticketWithTopic, content.shouldCopyOriginal);
   await ctx.reply(acknowledgement.rendered, {
     reply_markup: userTicketKeyboard(ticket.id),
   });
 }
 
-async function appendToExistingTicket(db: SupportDatabase, ctx: Context, activeTicket: TicketRecord): Promise<void> {
+async function appendToExistingTicket(
+  db: SupportDatabase,
+  ctx: Context,
+  installation: InstallationService,
+  activeTicket: TicketRecord
+): Promise<void> {
   if (!ctx.from || !ctx.chat || !ctx.message) {
     return;
   }
 
-  if (activeTicket.staff_chat_id !== config.staffChatId || activeTicket.message_thread_id === null) {
+  if (activeTicket.staff_chat_id !== installation.requireStaffChatId() || activeTicket.message_thread_id === null) {
     const readyTicket = await waitForTicketTopic(db, activeTicket.id);
     if (readyTicket && readyTicket.status !== "CLOSED") {
-      await appendToExistingTicket(db, ctx, readyTicket);
+      await appendToExistingTicket(db, ctx, installation, readyTicket);
       return;
     }
 
     logger.warn({ ticketId: activeTicket.id }, "Active ticket topic was not created in time");
     if (readyTicket?.status !== "CLOSED") {
       db.closeTicketRecord(activeTicket.id, systemActor());
-      await archiveTicketIfPossible(ctx.api, db, activeTicket.id);
+      await archiveTicketIfPossible(ctx.api, db, installation.requireStaffChatId(), activeTicket.id);
     }
-    await createFreshTicketFromUserMessage(db, ctx);
+    await createFreshTicketFromUserMessage(db, ctx, installation);
     return;
   }
 
@@ -3953,7 +4000,7 @@ async function appendToExistingTicket(db: SupportDatabase, ctx: Context, activeT
 
   try {
     await ctx.api.sendMessage(
-      config.staffChatId,
+      installation.requireStaffChatId(),
       formatTicketUpdate(ctx.from, content.text, content.mediaType, content.filename),
       {
         message_thread_id: activeTicket.message_thread_id,
@@ -3983,11 +4030,11 @@ async function appendToExistingTicket(db: SupportDatabase, ctx: Context, activeT
 
     const ticketWithUser = db.getTicketWithUser(activeTicket.id);
     if (ticketWithUser) {
-      await maybeCopyOriginalMessageToStaff(db, ctx, ticketWithUser, content.shouldCopyOriginal);
-      await refreshStaffTicketMessage(db, ctx.api, activeTicket.id);
+      await maybeCopyOriginalMessageToStaff(db, ctx, installation, ticketWithUser, content.shouldCopyOriginal);
+      await refreshStaffTicketMessage(db, ctx.api, installation, activeTicket.id);
     }
 
-    db.closeOtherActiveTicketsForUserInStaffChat(ctx.from.id, config.staffChatId, activeTicket.id);
+    db.closeOtherActiveTicketsForUserInStaffChat(ctx.from.id, installation.requireStaffChatId(), activeTicket.id);
   } catch (error) {
     if (isForumTopicUnavailable(error)) {
       logger.warn(
@@ -3995,8 +4042,8 @@ async function appendToExistingTicket(db: SupportDatabase, ctx: Context, activeT
         "Staff forum topic is unavailable; creating a fresh ticket"
       );
       db.closeTicketRecord(activeTicket.id, systemActor());
-      await archiveTicketIfPossible(ctx.api, db, activeTicket.id);
-      await createFreshTicketFromUserMessage(db, ctx);
+      await archiveTicketIfPossible(ctx.api, db, installation.requireStaffChatId(), activeTicket.id);
+      await createFreshTicketFromUserMessage(db, ctx, installation);
       return;
     }
 
@@ -4009,6 +4056,7 @@ async function appendToExistingTicket(db: SupportDatabase, ctx: Context, activeT
 async function handleStaffGroupMessage(
   db: SupportDatabase,
   ctx: Context,
+  installation: InstallationService,
   deliverAndRecordStaffTextReply: DeliverAndRecordStaffTextReply
 ): Promise<void> {
   if (!ctx.message || !ctx.chat) {
@@ -4029,7 +4077,7 @@ async function handleStaffGroupMessage(
     return;
   }
 
-  if (!hasApplicationPermission(ctx, "REPLY_TO_TICKETS")) {
+  if (!hasApplicationPermission(ctx, installation, "REPLY_TO_TICKETS")) {
     await ctx.reply("Your application role does not allow ticket replies.", { message_thread_id: messageThreadId });
     return;
   }
@@ -4039,7 +4087,12 @@ async function handleStaffGroupMessage(
   }
 
   if (ticket.status === "CLOSED") {
-    await sendStaffTopicNotice(ctx.api, ticket, `Ticket #${ticket.id} is closed. The reply was not sent to the user.`);
+    await sendStaffTopicNotice(
+      ctx.api,
+      installation.requireStaffChatId(),
+      ticket,
+      `Ticket #${ticket.id} is closed. The reply was not sent to the user.`
+    );
     return;
   }
 
@@ -4047,7 +4100,12 @@ async function handleStaffGroupMessage(
 
   try {
     if (content.mediaType) {
-      const delivered = await deliverStaffMediaReplyToUser(ctx.api, ticket, ctx.message.message_id);
+      const delivered = await deliverStaffMediaReplyToUser(
+        ctx.api,
+        installation.requireStaffChatId(),
+        ticket,
+        ctx.message.message_id
+      );
 
       db.addMessage({
         ticketId: ticket.id,
@@ -4075,12 +4133,13 @@ async function handleStaffGroupMessage(
 
     if (ticket.status === "OPEN") {
       db.updateTicketStatus(ticket.id, "IN_PROGRESS");
-      await refreshStaffTicketMessage(db, ctx.api, ticket.id);
+      await refreshStaffTicketMessage(db, ctx.api, installation, ticket.id);
     }
   } catch (error) {
     logger.error({ err: error, ticketId: ticket.id }, "Could not deliver staff reply to user");
     await sendStaffTopicNotice(
       ctx.api,
+      installation.requireStaffChatId(),
       ticket,
       `Could not deliver staff reply for ticket #${ticket.id} to user ${ticket.user_telegram_id}: ${describeError(error)}`
     );
@@ -4090,6 +4149,7 @@ async function handleStaffGroupMessage(
 async function handleUserCallback(
   db: SupportDatabase,
   ctx: Context,
+  installation: InstallationService,
   data: string,
   onStaffTestTicketClosed?: (ticketId: number) => Promise<void>
 ): Promise<void> {
@@ -4114,7 +4174,11 @@ async function handleUserCallback(
   }
 
   const ticket = db.getTicketWithUser(ticketId);
-  if (!ticket || ticket.user_telegram_id !== ctx.from.id || ticket.staff_chat_id !== config.staffChatId) {
+  if (
+    !ticket ||
+    ticket.user_telegram_id !== ctx.from.id ||
+    ticket.staff_chat_id !== installation.requireStaffChatId()
+  ) {
     await ctx.answerCallbackQuery({
       text: "Ticket not found.",
       show_alert: true,
@@ -4127,7 +4191,7 @@ async function handleUserCallback(
     return;
   }
 
-  await closeTicket(db, ctx.api, ticket.id, {
+  await closeTicket(db, ctx.api, installation, ticket.id, {
     notifyUser: false,
     staffNotice: "User closed this ticket.",
     closedBy: userActor(ctx.from),
@@ -4164,8 +4228,13 @@ async function warnThrottledCustomerIngress(
   }
 }
 
-async function handleStaffCallback(db: SupportDatabase, ctx: Context, data: string): Promise<void> {
-  if (!isStaffChat(ctx)) {
+async function handleStaffCallback(
+  db: SupportDatabase,
+  ctx: Context,
+  installation: InstallationService,
+  data: string
+): Promise<void> {
+  if (!isStaffChat(ctx, installation)) {
     await ctx.answerCallbackQuery({
       text: "Staff only.",
       show_alert: true,
@@ -4181,17 +4250,17 @@ async function handleStaffCallback(db: SupportDatabase, ctx: Context, data: stri
   }
 
   const ticket = db.getTicketWithUser(ticketId);
-  if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+  if (!ticket || ticket.staff_chat_id !== installation.requireStaffChatId()) {
     await ctx.answerCallbackQuery({ text: "Ticket not found in this staff chat." });
     return;
   }
 
   if (action === "close") {
-    if (!hasApplicationPermission(ctx, "CLOSE_TICKETS")) {
+    if (!hasApplicationPermission(ctx, installation, "CLOSE_TICKETS")) {
       await ctx.answerCallbackQuery({ text: "Your application role cannot close tickets.", show_alert: true });
       return;
     }
-    const result = await closeTicket(db, ctx.api, ticket.id, {
+    const result = await closeTicket(db, ctx.api, installation, ticket.id, {
       notifyUser: true,
       staffNotice: "Ticket closed by staff.",
       closedBy: staffActor(ctx.from),
@@ -4201,7 +4270,7 @@ async function handleStaffCallback(db: SupportDatabase, ctx: Context, data: stri
   }
 
   if (action === "status" && isTicketStatus(rawStatus)) {
-    if (!hasApplicationPermission(ctx, "CLOSE_TICKETS")) {
+    if (!hasApplicationPermission(ctx, installation, "CLOSE_TICKETS")) {
       await ctx.answerCallbackQuery({ text: "Your application role cannot update tickets.", show_alert: true });
       return;
     }
@@ -4211,18 +4280,23 @@ async function handleStaffCallback(db: SupportDatabase, ctx: Context, data: stri
     }
 
     db.updateTicketStatus(ticket.id, rawStatus);
-    await refreshStaffTicketMessage(db, ctx.api, ticket.id);
-    await sendStaffTopicNotice(ctx.api, ticket, `Ticket marked ${formatStatus(rawStatus)}.`);
+    await refreshStaffTicketMessage(db, ctx.api, installation, ticket.id);
+    await sendStaffTopicNotice(
+      ctx.api,
+      installation.requireStaffChatId(),
+      ticket,
+      `Ticket marked ${formatStatus(rawStatus)}.`
+    );
     await ctx.answerCallbackQuery({ text: `Marked ${formatStatus(rawStatus)}.` });
     return;
   }
 
   if (action === "ban") {
-    if (!ctx.from || !hasApplicationPermission(ctx, "BAN_USERS")) {
+    if (!ctx.from || !hasApplicationPermission(ctx, installation, "BAN_USERS")) {
       await ctx.answerCallbackQuery({ text: "Your role cannot ban users.", show_alert: true });
       return;
     }
-    await banUserForTicket(db, ctx.api, ticket, staffActor(ctx.from), `Banned from ticket #${ticket.id}`);
+    await banUserForTicket(db, ctx.api, installation, ticket, staffActor(ctx.from), `Banned from ticket #${ticket.id}`);
     await ctx.answerCallbackQuery({ text: `User ${ticket.user_telegram_id} banned.` });
     return;
   }
@@ -4233,6 +4307,7 @@ async function handleStaffCallback(db: SupportDatabase, ctx: Context, data: stri
 async function banUserById(
   db: SupportDatabase,
   api: BotApi,
+  installation: InstallationService,
   userId: number,
   reason: string,
   actor: ArchiveActor
@@ -4245,7 +4320,7 @@ async function banUserById(
     bannedBy: actor.telegramId,
   });
 
-  await logBanEvent(api, db, {
+  await logBanEvent(api, db, installation.requireStaffChatId(), {
     action: "BANNED",
     userTelegramId: userId,
     username: user?.username ?? null,
@@ -4253,27 +4328,34 @@ async function banUserById(
     performedBy: actor,
   });
 
-  const activeTicket = db.findActiveTicketForUser(userId, config.staffChatId);
+  const activeTicket = db.findActiveTicketForUser(userId, installation.requireStaffChatId());
   if (activeTicket) {
     const ticket = db.getTicketWithUser(activeTicket.id);
     if (ticket) {
-      await closeTicket(db, api, ticket.id, {
+      await closeTicket(db, api, installation, ticket.id, {
         notifyUser: true,
         userText: BANNED_TEXT,
         staffNotice: `User ${userId} was banned. Reason: ${reason}`,
         closedBy: actor,
       });
-      db.closeOtherActiveTicketsForUserInStaffChat(userId, config.staffChatId, ticket.id);
+      db.closeOtherActiveTicketsForUserInStaffChat(userId, installation.requireStaffChatId(), ticket.id);
       return;
     }
   }
 
-  await notifyUserOrStaff(api, userId, BANNED_TEXT, activeTicket?.message_thread_id ?? null);
+  await notifyUserOrStaff(
+    api,
+    installation.requireStaffChatId(),
+    userId,
+    BANNED_TEXT,
+    activeTicket?.message_thread_id ?? null
+  );
 }
 
 async function banUserForTicket(
   db: SupportDatabase,
   api: BotApi,
+  installation: InstallationService,
   ticket: TicketWithUser,
   actor: ArchiveActor,
   reason: string
@@ -4285,7 +4367,7 @@ async function banUserForTicket(
     bannedBy: actor.telegramId,
   });
 
-  await logBanEvent(api, db, {
+  await logBanEvent(api, db, installation.requireStaffChatId(), {
     action: "BANNED",
     userTelegramId: ticket.user_telegram_id,
     username: ticket.username,
@@ -4293,28 +4375,29 @@ async function banUserForTicket(
     performedBy: actor,
   });
 
-  await closeTicket(db, api, ticket.id, {
+  await closeTicket(db, api, installation, ticket.id, {
     notifyUser: true,
     userText: BANNED_TEXT,
     staffNotice: `User ${ticket.user_telegram_id} has been banned. Reason: ${reason}`,
     closedBy: actor,
   });
-  db.closeOtherActiveTicketsForUserInStaffChat(ticket.user_telegram_id, config.staffChatId, ticket.id);
+  db.closeOtherActiveTicketsForUserInStaffChat(ticket.user_telegram_id, installation.requireStaffChatId(), ticket.id);
 }
 
 async function closeTicket(
   db: SupportDatabase,
   api: BotApi,
+  installation: InstallationService,
   ticketId: number,
   options: CloseTicketOptions = {}
 ): Promise<string> {
   const ticket = db.getTicketWithUser(ticketId);
-  if (!ticket || ticket.staff_chat_id !== config.staffChatId) {
+  if (!ticket || ticket.staff_chat_id !== installation.requireStaffChatId()) {
     return `Ticket #${ticketId} was not found in this staff chat.`;
   }
 
   if (ticket.status === "CLOSED") {
-    const archived = await archiveTicketIfPossible(api, db, ticketId, {
+    const archived = await archiveTicketIfPossible(api, db, installation.requireStaffChatId(), ticketId, {
       onFailure: options.onArchiveFailure,
     });
     return archived
@@ -4323,17 +4406,23 @@ async function closeTicket(
   }
 
   const closedTicket = db.closeTicketRecord(ticketId, options.closedBy ?? systemActor());
-  await refreshStaffTicketMessage(db, api, ticketId);
+  await refreshStaffTicketMessage(db, api, installation, ticketId);
 
   if (options.staffNotice) {
-    await sendStaffTopicNotice(api, ticket, options.staffNotice);
+    await sendStaffTopicNotice(api, installation.requireStaffChatId(), ticket, options.staffNotice);
   }
 
   if (options.notifyUser) {
-    await notifyUserOrStaff(api, ticket.user_telegram_id, options.userText ?? CLOSED_TEXT, ticket.message_thread_id);
+    await notifyUserOrStaff(
+      api,
+      installation.requireStaffChatId(),
+      ticket.user_telegram_id,
+      options.userText ?? CLOSED_TEXT,
+      ticket.message_thread_id
+    );
   }
 
-  const archived = await archiveTicketIfPossible(api, db, ticketId, {
+  const archived = await archiveTicketIfPossible(api, db, installation.requireStaffChatId(), ticketId, {
     onFailure: options.onArchiveFailure,
   });
 
@@ -4342,9 +4431,18 @@ async function closeTicket(
     : `Ticket #${closedTicket?.id ?? ticketId} closed. Transcript archive is pending retry.`;
 }
 
-async function refreshStaffTicketMessage(db: SupportDatabase, api: BotApi, ticketId: number): Promise<void> {
+async function refreshStaffTicketMessage(
+  db: SupportDatabase,
+  api: BotApi,
+  installation: InstallationService,
+  ticketId: number
+): Promise<void> {
   const ticket = db.getTicketWithUser(ticketId);
-  if (!ticket?.staff_chat_id || ticket.staff_chat_id !== config.staffChatId || !ticket.staff_message_id) {
+  if (
+    !ticket?.staff_chat_id ||
+    ticket.staff_chat_id !== installation.requireStaffChatId() ||
+    !ticket.staff_message_id
+  ) {
     return;
   }
 
@@ -4364,6 +4462,7 @@ async function refreshStaffTicketMessage(db: SupportDatabase, api: BotApi, ticke
 async function maybeCopyOriginalMessageToStaff(
   db: SupportDatabase,
   ctx: Context,
+  installation: InstallationService,
   ticket: TicketWithUser,
   shouldCopyOriginal: boolean
 ): Promise<void> {
@@ -4372,13 +4471,14 @@ async function maybeCopyOriginalMessageToStaff(
   }
 
   try {
-    await ctx.api.copyMessage(config.staffChatId, ctx.chat.id, ctx.message.message_id, {
+    await ctx.api.copyMessage(installation.requireStaffChatId(), ctx.chat.id, ctx.message.message_id, {
       message_thread_id: ticket.message_thread_id,
     });
   } catch (error) {
     logger.error({ err: error, ticketId: ticket.id }, "Could not copy original user message to staff topic");
     await sendStaffTopicNotice(
       ctx.api,
+      installation.requireStaffChatId(),
       ticket,
       `Ticket #${ticket.id} was created, but the attachment could not be copied: ${describeError(error)}`
     );
@@ -4387,10 +4487,11 @@ async function maybeCopyOriginalMessageToStaff(
 
 async function deliverStaffMediaReplyToUser(
   api: BotApi,
+  staffChatId: number,
   ticket: TicketWithUser,
   sourceMessageId: number
 ): Promise<number> {
-  const sourceChatId = ticket.staff_chat_id ?? config.staffChatId;
+  const sourceChatId = ticket.staff_chat_id ?? staffChatId;
   const copied = await api.copyMessage(ticket.user_telegram_id, sourceChatId, sourceMessageId);
   return copied.message_id;
 }
@@ -4428,9 +4529,14 @@ function sleep(milliseconds: number): Promise<void> {
   });
 }
 
-async function sendStaffTopicNotice(api: BotApi, ticket: TicketRecord, text: string): Promise<void> {
+async function sendStaffTopicNotice(
+  api: BotApi,
+  staffChatId: number,
+  ticket: TicketRecord,
+  text: string
+): Promise<void> {
   if (!ticket.staff_chat_id || !ticket.message_thread_id) {
-    await notifyStaff(api, text);
+    await notifyStaff(api, staffChatId, text);
     return;
   }
 
@@ -4443,9 +4549,14 @@ async function sendStaffTopicNotice(api: BotApi, ticket: TicketRecord, text: str
   }
 }
 
-async function notifyStaff(api: BotApi, text: string, messageThreadId?: number | null): Promise<void> {
+async function notifyStaff(
+  api: BotApi,
+  staffChatId: number,
+  text: string,
+  messageThreadId?: number | null
+): Promise<void> {
   try {
-    await api.sendMessage(config.staffChatId, truncate(text, 3500), {
+    await api.sendMessage(staffChatId, truncate(text, 3500), {
       message_thread_id: messageThreadId ?? undefined,
     });
   } catch (error) {
@@ -4455,6 +4566,7 @@ async function notifyStaff(api: BotApi, text: string, messageThreadId?: number |
 
 async function notifyUserOrStaff(
   api: BotApi,
+  staffChatId: number,
   userTelegramId: number,
   text: string,
   messageThreadId?: number | null
@@ -4463,7 +4575,12 @@ async function notifyUserOrStaff(
     await api.sendMessage(userTelegramId, text);
   } catch (error) {
     logger.error({ err: error, userTelegramId }, "Could not message user");
-    await notifyStaff(api, `Could not message user ${userTelegramId}: ${describeError(error)}`, messageThreadId);
+    await notifyStaff(
+      api,
+      staffChatId,
+      `Could not message user ${userTelegramId}: ${describeError(error)}`,
+      messageThreadId
+    );
   }
 }
 
@@ -4609,12 +4726,12 @@ function userTicketKeyboard(ticketId: number): InlineKeyboard {
   return new InlineKeyboard().text("Close ticket", `user:close:${ticketId}`);
 }
 
-function formatSupportLogsTopicInfo(topic: SupportLogsTopicInfo): string {
+function formatSupportLogsTopicInfo(topic: SupportLogsTopicInfo, staffChatId: number): string {
   const lines = [
     "Support Logs topic",
     "",
     "Staff chat ID:",
-    String(config.staffChatId),
+    String(staffChatId),
     "",
     "Thread ID:",
     String(topic.threadId),
@@ -4630,8 +4747,8 @@ function formatSupportLogsTopicInfo(topic: SupportLogsTopicInfo): string {
   return lines.join("\n");
 }
 
-function staffHelpSentSettingKey(): string {
-  return `${STAFF_HELP_SENT_SETTING_PREFIX}:${config.staffChatId}`;
+function staffHelpSentSettingKey(staffChatId: number): string {
+  return `${STAFF_HELP_SENT_SETTING_PREFIX}:${staffChatId}`;
 }
 
 function topicName(ticketId: number, user: { id: number; username?: string }): string {
@@ -4820,9 +4937,10 @@ async function formatModerationStatus(
   db: SupportDatabase,
   moderation: ReturnType<typeof moderationConfig>,
   api: BotApi,
-  botId: number | undefined
+  botId: number | undefined,
+  staffChatId: number
 ): Promise<string> {
-  const pending = db.listLanguageModerationRecoveryJobs(config.staffChatId, new Date().toISOString()).length;
+  const pending = db.listLanguageModerationRecoveryJobs(staffChatId, new Date().toISOString()).length;
   const rights = await validateModerationRights(api, moderation.targetChatId, botId);
   return [
     `Moderation: ${moderation.enabled ? "enabled" : "disabled"}`,
@@ -4853,13 +4971,19 @@ async function validateModerationRights(
 async function handlePublicLanguageModeration(
   db: SupportDatabase,
   ctx: Context,
+  installation: InstallationService,
   now: () => Date,
   cleanupScheduler: ModerationCleanupScheduler,
-  backgroundTasks?: BackgroundTaskTracker
+  pendingWarnings: PendingWarningScheduler
 ): Promise<void> {
   if (!ctx.chat || !ctx.from || !ctx.message || ctx.from.is_bot) return;
   const moderation = moderationConfigForChat(db, ctx.chat.id);
-  if (!moderation.enabled || moderation.targetChatId !== ctx.chat.id || ctx.chat.id === config.staffChatId) return;
+  if (
+    !moderation.enabled ||
+    moderation.targetChatId !== ctx.chat.id ||
+    ctx.chat.id === installation.requireStaffChatId()
+  )
+    return;
   const content = getMessageContent(ctx.message).text;
   const messageThreadId = typeof ctx.message.message_thread_id === "number" ? ctx.message.message_thread_id : null;
   if (isOrdinaryUserModerationTarget(ctx.message, ctx.from)) {
@@ -4937,7 +5061,7 @@ async function handlePublicLanguageModeration(
           pendingWarningStartedAt: startedAt.toISOString(),
           pendingWarningDueAt: dueAt.toISOString(),
         });
-        schedulePendingWarning(ctx.api, db, ctx.chat.id, messageThreadId, 3_000, backgroundTasks);
+        pendingWarnings.schedule(ctx.api, db, ctx.chat.id, messageThreadId, 3_000);
       }
     } else {
       await advanceModerationStrike({
@@ -4951,6 +5075,7 @@ async function handlePublicLanguageModeration(
         state,
         now,
         cleanupScheduler,
+        staffChatId: installation.requireStaffChatId(),
         setStrikeReaction: true,
         strikeTime: currentTime,
       });
@@ -4968,6 +5093,7 @@ async function handlePublicLanguageModeration(
     state,
     now,
     cleanupScheduler,
+    staffChatId: installation.requireStaffChatId(),
     setStrikeReaction: true,
   });
 }
@@ -5003,6 +5129,7 @@ async function advanceModerationStrike(input: {
   state: Pick<LanguageModerationUserState, "current_strikes" | "sanction_tier" | "first_strike_at">;
   now: () => Date;
   cleanupScheduler: ModerationCleanupScheduler;
+  staffChatId: number;
   setStrikeReaction: boolean;
   strikeTime?: Date;
 }): Promise<{ currentStrikes: number; sanctionTier: number } | undefined> {
@@ -5053,7 +5180,7 @@ async function advanceModerationStrike(input: {
       first_strike_at: null,
     });
     const cleanupJobId = input.db.createLanguageModerationCleanupJob({
-      staff_chat_id: config.staffChatId,
+      staff_chat_id: input.staffChatId,
       chat_id: input.chatId,
       user_telegram_id: input.userId,
       username: input.username,
@@ -5112,37 +5239,41 @@ async function setModerationReaction(
   }
 }
 
-const pendingWarningTimers = new Map<string, ReturnType<typeof setTimeout>>();
+type PendingWarningTimer = ReturnType<typeof setTimeout>;
+type PendingWarningTimerFactory = (callback: () => void, delayMs: number) => PendingWarningTimer;
 
-function stopPendingWarnings(): void {
-  for (const timer of pendingWarningTimers.values()) clearTimeout(timer);
-  pendingWarningTimers.clear();
-}
+export class PendingWarningScheduler {
+  private readonly timers = new Map<string, PendingWarningTimer>();
 
-function schedulePendingWarning(
-  api: BotApi,
-  db: SupportDatabase,
-  chatId: number,
-  messageThreadId: number | null,
-  delayMs: number,
-  backgroundTasks?: BackgroundTaskTracker
-): void {
-  const key = `${chatId}:${messageThreadId ?? 0}`;
-  if (pendingWarningTimers.has(key)) return;
-  const timer = setTimeout(() => {
-    pendingWarningTimers.delete(key);
-    const run = () => processPendingWarning(api, db, chatId, messageThreadId);
-    if (backgroundTasks) {
-      const accepted = backgroundTasks.run(run);
-      if (!accepted)
-        logger.debug(
-          { operation: "moderation_pending_warning", chatId, messageThreadId },
-          "Background work was dropped during shutdown"
-        );
-    } else void run();
-  }, delayMs);
-  timer.unref();
-  pendingWarningTimers.set(key, timer);
+  constructor(
+    private readonly backgroundTasks?: BackgroundTaskTracker,
+    private readonly createTimer: PendingWarningTimerFactory = setTimeout,
+    private readonly clearTimer: (timer: PendingWarningTimer) => void = clearTimeout
+  ) {}
+
+  schedule(api: BotApi, db: SupportDatabase, chatId: number, messageThreadId: number | null, delayMs: number): void {
+    const key = `${chatId}:${messageThreadId ?? 0}`;
+    if (this.timers.has(key)) return;
+    const timer = this.createTimer(() => {
+      this.timers.delete(key);
+      const run = () => processPendingWarning(api, db, chatId, messageThreadId);
+      if (this.backgroundTasks) {
+        const accepted = this.backgroundTasks.run(run);
+        if (!accepted)
+          logger.debug(
+            { operation: "moderation_pending_warning", chatId, messageThreadId },
+            "Background work was dropped during shutdown"
+          );
+      } else void run();
+    }, delayMs);
+    timer.unref();
+    this.timers.set(key, timer);
+  }
+
+  stop(): void {
+    for (const timer of this.timers.values()) this.clearTimer(timer);
+    this.timers.clear();
+  }
 }
 
 export async function processPendingWarning(
@@ -5200,24 +5331,21 @@ function isPrivateChat(ctx: Context): boolean {
   return ctx.chat?.type === "private";
 }
 
-function isStaffChat(ctx: Context): boolean {
-  if (!isConfiguredStaffWorkspace(ctx)) return false;
-  const installation = installationServicesByContext.get(ctx);
-  const staffChatId = installation?.getStaffChatId();
-  if (staffChatId === null || staffChatId === undefined) return false;
+function isStaffChat(ctx: Context, installation: InstallationService): boolean {
+  if (!isConfiguredStaffWorkspace(ctx, installation)) return false;
+  const staffChatId = installation.getStaffChatId();
+  if (staffChatId === null) return false;
   if (!ctx.from) return false;
-  return installation?.isStaffAuthorized(ctx.from.id, staffChatId) ?? false;
+  return installation.isStaffAuthorized(ctx.from.id, staffChatId);
 }
 
-function isConfiguredStaffWorkspace(ctx: Context): boolean {
-  const staffChatId = installationServicesByContext.get(ctx)?.getStaffChatId();
-  return staffChatId !== null && staffChatId !== undefined && ctx.chat?.id === staffChatId;
+function isConfiguredStaffWorkspace(ctx: Context, installation: InstallationService): boolean {
+  const staffChatId = installation.getStaffChatId();
+  return staffChatId !== null && ctx.chat?.id === staffChatId;
 }
 
-function hasApplicationPermission(ctx: Context, permission: Permission): boolean {
+function hasApplicationPermission(ctx: Context, installation: InstallationService, permission: Permission): boolean {
   if (!ctx.from) return false;
-  const installation = installationServicesByContext.get(ctx);
-  if (!installation) return false;
   return (
     installation.getState().authorizationMode === "LEGACY_TRUSTED_GROUP" || installation.can(ctx.from.id, permission)
   );

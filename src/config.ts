@@ -84,10 +84,6 @@ export function loadHostConfig(options: { env?: NodeJS.ProcessEnv; envFile?: str
 }
 
 export const hostConfig = loadHostConfig();
-let runtimeStaffChatId = hostConfig.staffChatId;
-export function setRuntimeStaffChatId(chatId: number | null): void {
-  runtimeStaffChatId = chatId;
-}
 export const config = {
   nodeEnv: hostConfig.nodeEnv,
   botToken: hostConfig.botToken,
@@ -100,8 +96,4 @@ export const config = {
   opsHttpEnabled: hostConfig.opsHttpEnabled,
   opsHttpHost: hostConfig.opsHttpHost,
   opsHttpPort: hostConfig.opsHttpPort,
-  get staffChatId(): number {
-    if (runtimeStaffChatId === null) throw new Error("Staff workspace is not configured yet.");
-    return runtimeStaffChatId;
-  },
 } as const;

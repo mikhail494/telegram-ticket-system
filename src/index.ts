@@ -1,4 +1,4 @@
-import { config, hostConfig, setRuntimeStaffChatId } from "./config.js";
+import { config, hostConfig } from "./config.js";
 import { SupportDatabase } from "./db.js";
 import { TELEGRAM_ALLOWED_UPDATES, createBot, sendStaffOnboardingIfNeeded, setBotCommands } from "./bot.js";
 import { logger } from "./logger.js";
@@ -26,7 +26,6 @@ logger.info(
 
 const installationService = new InstallationService(db);
 if (hostConfig.staffChatId !== null) installationService.adoptLegacyInstallation(hostConfig.staffChatId);
-setRuntimeStaffChatId(installationService.getStaffChatId());
 const entityNotificationProviders: EntityNotificationProviderRegistry = new Map();
 const backgroundTasks = new BackgroundTaskRegistry();
 const bot = createBot(db, quickRepliesRegistry, { entityNotificationProviders, installationService, backgroundTasks });
@@ -108,9 +107,11 @@ async function main(): Promise<void> {
         logger.warn({ err: error }, "Could not discover staff workspace administrators");
       }
     },
-    initializeSupportLogs: () => initializeSupportLogsTopic(bot.api, db).then(() => undefined),
-    recoverArchives: () => archiveClosedTicketsPendingUpload(bot.api, db).then(() => undefined),
-    recoverModeration: () => processModerationRecovery(bot.api, db),
+    initializeSupportLogs: () =>
+      initializeSupportLogsTopic(bot.api, db, installationService.requireStaffChatId()).then(() => undefined),
+    recoverArchives: () =>
+      archiveClosedTicketsPendingUpload(bot.api, db, installationService.requireStaffChatId()).then(() => undefined),
+    recoverModeration: () => processModerationRecovery(bot.api, db, installationService.requireStaffChatId()),
     recoverBatch: () => bot.recoverPendingTicketBatchStaffOperations(),
     sendLegacyStaffOnboarding: () => sendStaffOnboardingIfNeeded(bot.api, db, installationService),
   });

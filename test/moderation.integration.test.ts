@@ -9,9 +9,9 @@ import {
   type RecordedApiCall,
 } from "./helpers/botHarness.js";
 import {
+  createModerationCleanupScheduler,
   processModerationCleanupJob,
   processModerationRecovery,
-  scheduleModerationCleanup,
 } from "../src/languageModeration.js";
 
 const PUBLIC_CHAT_ID = -100777;
@@ -316,7 +316,7 @@ describe("public language moderation sanctions", () => {
       );
 
       harness.clearApiCalls();
-      await processModerationCleanupJob(harness.bot.api, harness.db, jobId!, cleanupTime);
+      await processModerationCleanupJob(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, jobId!, cleanupTime);
       assert.deepEqual(
         harness.findApiCalls("deleteMessage").map((call) => call.payload.message_id),
         messageIds
@@ -342,9 +342,10 @@ describe("moderation cleanup and Support Logs recovery", () => {
       return { unref: () => undefined };
     };
 
-    scheduleModerationCleanup(harness.bot.api, harness.db, 70_001, 10_000, createTimer);
-    scheduleModerationCleanup(harness.bot.api, harness.db, 70_001, 10_000, createTimer);
-    scheduleModerationCleanup(harness.bot.api, harness.db, 70_002, 10_000, createTimer);
+    const scheduleCleanup = createModerationCleanupScheduler(() => TEST_STAFF_CHAT_ID, { createTimer });
+    scheduleCleanup(harness.bot.api, harness.db, 70_001, 10_000);
+    scheduleCleanup(harness.bot.api, harness.db, 70_001, 10_000);
+    scheduleCleanup(harness.bot.api, harness.db, 70_002, 10_000);
 
     assert.deepEqual(
       scheduled.map((item) => item.delayMs),
@@ -361,11 +362,17 @@ describe("moderation cleanup and Support Logs recovery", () => {
     seedCycleViolation(harness, 20, 204, 1);
     seedCycleViolation(harness, 21, 205, 0);
 
-    await processModerationCleanupJob(harness.bot.api, harness.db, jobId, new Date("2026-07-31T11:00:00.000Z"));
+    await processModerationCleanupJob(
+      harness.bot.api,
+      harness.db,
+      TEST_STAFF_CHAT_ID,
+      jobId,
+      new Date("2026-07-31T11:00:00.000Z")
+    );
     assert.equal(harness.countApiCalls("deleteMessage"), 0);
     assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "PENDING");
 
-    await processModerationCleanupJob(harness.bot.api, harness.db, jobId, FIXED_NOW);
+    await processModerationCleanupJob(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, jobId, FIXED_NOW);
     assert.deepEqual(
       harness.findApiCalls("deleteMessage").map((call) => call.payload.message_id),
       [201, 202, 203]
@@ -376,7 +383,13 @@ describe("moderation cleanup and Support Logs recovery", () => {
     assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "COMPLETED");
 
     harness.clearApiCalls();
-    await processModerationCleanupJob(harness.bot.api, harness.db, jobId, new Date("2026-08-01T00:00:00.000Z"));
+    await processModerationCleanupJob(
+      harness.bot.api,
+      harness.db,
+      TEST_STAFF_CHAT_ID,
+      jobId,
+      new Date("2026-08-01T00:00:00.000Z")
+    );
     assert.equal(harness.apiCalls.length, 0);
   });
 
@@ -395,7 +408,7 @@ describe("moderation cleanup and Support Logs recovery", () => {
     seedCycleViolation(harness, 22, 206, 0, "test-cycle:22:0", 202);
     harness.failNextApiCall("deleteMessage");
 
-    await processModerationCleanupJob(harness.bot.api, harness.db, jobId, FIXED_NOW);
+    await processModerationCleanupJob(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, jobId, FIXED_NOW);
 
     assert.equal(harness.countApiCalls("deleteMessage"), 2);
     assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "CLEANING");
@@ -406,7 +419,12 @@ describe("moderation cleanup and Support Logs recovery", () => {
     assert.equal(harness.countApiCalls("banChatMember"), 0);
 
     harness.clearApiCalls();
-    await processModerationRecovery(harness.bot.api, harness.db, new Date("2026-07-31T12:01:00.000Z"));
+    await processModerationRecovery(
+      harness.bot.api,
+      harness.db,
+      TEST_STAFF_CHAT_ID,
+      new Date("2026-07-31T12:01:00.000Z")
+    );
 
     assert.equal(harness.countApiCalls("deleteMessage"), 1);
     assert.equal(harness.db.listLanguageModerationCycleViolations(PUBLIC_CHAT_ID, 22, 0).length, 0);
@@ -415,7 +433,12 @@ describe("moderation cleanup and Support Logs recovery", () => {
     assert.match(String(publicLogMessages(harness)[0]?.payload.text), /@synthetic_community/);
     assert.match(String(publicLogMessages(harness)[0]?.payload.text), /Topic threads: 101, 202/);
 
-    await processModerationRecovery(harness.bot.api, harness.db, new Date("2026-07-31T12:02:00.000Z"));
+    await processModerationRecovery(
+      harness.bot.api,
+      harness.db,
+      TEST_STAFF_CHAT_ID,
+      new Date("2026-07-31T12:02:00.000Z")
+    );
     assert.equal(publicLogMessages(harness).length, 1);
   });
 
@@ -430,7 +453,7 @@ describe("moderation cleanup and Support Logs recovery", () => {
     }));
     harness.failNextApiCall("sendMessage");
 
-    await processModerationCleanupJob(harness.bot.api, harness.db, jobId, FIXED_NOW);
+    await processModerationCleanupJob(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, jobId, FIXED_NOW);
 
     assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "LOG_PENDING");
     assert.equal(
@@ -439,7 +462,12 @@ describe("moderation cleanup and Support Logs recovery", () => {
     );
 
     harness.clearApiCalls();
-    await processModerationRecovery(harness.bot.api, harness.db, new Date("2026-07-31T12:01:00.000Z"));
+    await processModerationRecovery(
+      harness.bot.api,
+      harness.db,
+      TEST_STAFF_CHAT_ID,
+      new Date("2026-07-31T12:01:00.000Z")
+    );
 
     assert.equal(harness.countApiCalls("deleteMessage"), 0);
     assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "COMPLETED");
@@ -452,19 +480,29 @@ describe("moderation cleanup and Support Logs recovery", () => {
     seedCycleViolation(harness, 23, 207);
     harness.failNextApiCall("sendMessage");
 
-    await processModerationCleanupJob(harness.bot.api, harness.db, jobId, FIXED_NOW);
+    await processModerationCleanupJob(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, jobId, FIXED_NOW);
     assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "LOG_PENDING");
     assert.equal(harness.countApiCalls("deleteMessage"), 1);
     assert.equal(harness.db.listLanguageModerationCycleViolations(PUBLIC_CHAT_ID, 23, 0).length, 1);
 
-    await processModerationRecovery(harness.bot.api, harness.db, new Date("2026-07-31T12:01:00.000Z"));
+    await processModerationRecovery(
+      harness.bot.api,
+      harness.db,
+      TEST_STAFF_CHAT_ID,
+      new Date("2026-07-31T12:01:00.000Z")
+    );
     assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "COMPLETED");
     assert.equal(harness.countApiCalls("deleteMessage"), 1, "LOG_PENDING retries only Support Logs delivery");
     assert.equal(harness.countApiCalls("restrictChatMember"), 0);
     assert.equal(harness.countApiCalls("banChatMember"), 0);
 
     const sentLogs = publicLogMessages(harness).length;
-    await processModerationRecovery(harness.bot.api, harness.db, new Date("2026-07-31T12:02:00.000Z"));
+    await processModerationRecovery(
+      harness.bot.api,
+      harness.db,
+      TEST_STAFF_CHAT_ID,
+      new Date("2026-07-31T12:02:00.000Z")
+    );
     assert.equal(publicLogMessages(harness).length, sentLogs);
   });
 
@@ -477,7 +515,7 @@ describe("moderation cleanup and Support Logs recovery", () => {
     seedCycleViolation(harness, 25, 209);
     harness.failNextApiCall("sendMessage");
 
-    await processModerationRecovery(harness.bot.api, harness.db, FIXED_NOW);
+    await processModerationRecovery(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, FIXED_NOW);
 
     assert.equal(harness.db.getLanguageModerationCleanupJob(cleaningJob)?.state, "LOG_PENDING");
     assert.equal(harness.db.getLanguageModerationCleanupJob(secondJob)?.state, "COMPLETED");
@@ -492,7 +530,7 @@ describe("moderation cleanup and Support Logs recovery", () => {
     const jobId = createDueJob(harness, 26);
     seedCycleViolation(harness, 26, 210);
 
-    await processModerationCleanupJob(harness.bot.api, harness.db, jobId, FIXED_NOW);
+    await processModerationCleanupJob(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, jobId, FIXED_NOW);
 
     const log = publicLogMessages(harness).at(-1);
     assert.ok(log);
@@ -505,7 +543,7 @@ describe("moderation cleanup and Support Logs recovery", () => {
     const jobId = createDueJob(harness, 27, 1, undefined, "2026-07-31T11:59:59.000Z", -100999);
     seedCycleViolation(harness, 27, 211);
 
-    await processModerationRecovery(harness.bot.api, harness.db, FIXED_NOW);
+    await processModerationRecovery(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, FIXED_NOW);
 
     assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "PENDING");
     assert.equal(harness.apiCalls.length, 0);

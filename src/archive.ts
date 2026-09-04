@@ -3,7 +3,6 @@ import type { Context } from "grammy";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { config } from "./config.js";
 import { SupportDatabase, type MessageSenderType, type TicketMessageRecord, type TicketWithUser } from "./db.js";
 import { formatDate, truncate } from "./format.js";
 import { displayTelegramUser } from "./telegram.js";
@@ -64,18 +63,26 @@ export interface SupportLogsTopicInfo {
   state: SupportLogsTopicState;
 }
 
-export async function initializeSupportLogsTopic(api: BotApi, db: SupportDatabase): Promise<number> {
-  const topic = await getSupportLogsTopicInfo(api, db);
+export async function initializeSupportLogsTopic(
+  api: BotApi,
+  db: SupportDatabase,
+  staffChatId: number
+): Promise<number> {
+  const topic = await getSupportLogsTopicInfo(api, db, staffChatId);
   return topic.threadId;
 }
 
-export async function getSupportLogsTopicInfo(api: BotApi, db: SupportDatabase): Promise<SupportLogsTopicInfo> {
-  const settingKey = supportLogsThreadSettingKey();
+export async function getSupportLogsTopicInfo(
+  api: BotApi,
+  db: SupportDatabase,
+  staffChatId: number
+): Promise<SupportLogsTopicInfo> {
+  const settingKey = supportLogsThreadSettingKey(staffChatId);
   const storedThreadId = parseStoredThreadId(db.getSetting(settingKey));
-  const storedTicketTopic = storedThreadId ? db.findTicketByStaffThread(config.staffChatId, storedThreadId) : undefined;
+  const storedTicketTopic = storedThreadId ? db.findTicketByStaffThread(staffChatId, storedThreadId) : undefined;
 
   if (storedThreadId && !storedTicketTopic) {
-    const verification = await verifyForumTopic(api, storedThreadId);
+    const verification = await verifyForumTopic(api, staffChatId, storedThreadId);
     if (verification === "ok") {
       return {
         threadId: storedThreadId,
@@ -86,7 +93,7 @@ export async function getSupportLogsTopicInfo(api: BotApi, db: SupportDatabase):
 
     if (verification === "closed") {
       try {
-        await api.reopenForumTopic(config.staffChatId, storedThreadId);
+        await api.reopenForumTopic(staffChatId, storedThreadId);
         return {
           threadId: storedThreadId,
           previousThreadId: null,
@@ -100,7 +107,7 @@ export async function getSupportLogsTopicInfo(api: BotApi, db: SupportDatabase):
     }
   }
 
-  const topic = await api.createForumTopic(config.staffChatId, SUPPORT_LOGS_TOPIC_NAME);
+  const topic = await api.createForumTopic(staffChatId, SUPPORT_LOGS_TOPIC_NAME);
   db.setSetting(settingKey, String(topic.message_thread_id));
   return {
     threadId: topic.message_thread_id,
@@ -109,26 +116,31 @@ export async function getSupportLogsTopicInfo(api: BotApi, db: SupportDatabase):
   };
 }
 
-export function setSupportLogsTopicOverride(db: SupportDatabase, messageThreadId: number): void {
-  db.setSetting(supportLogsThreadSettingKey(), String(messageThreadId));
+export function setSupportLogsTopicOverride(db: SupportDatabase, staffChatId: number, messageThreadId: number): void {
+  db.setSetting(supportLogsThreadSettingKey(staffChatId), String(messageThreadId));
 }
 
-async function recreateSupportLogsTopic(api: BotApi, db: SupportDatabase): Promise<number> {
-  const topic = await api.createForumTopic(config.staffChatId, SUPPORT_LOGS_TOPIC_NAME);
-  db.setSetting(supportLogsThreadSettingKey(), String(topic.message_thread_id));
+async function recreateSupportLogsTopic(api: BotApi, db: SupportDatabase, staffChatId: number): Promise<number> {
+  const topic = await api.createForumTopic(staffChatId, SUPPORT_LOGS_TOPIC_NAME);
+  db.setSetting(supportLogsThreadSettingKey(staffChatId), String(topic.message_thread_id));
   return topic.message_thread_id;
 }
 
-export async function archiveClosedTicketsPendingUpload(api: BotApi, db: SupportDatabase): Promise<void> {
-  const tickets = db.listClosedTicketsPendingArchive(config.staffChatId);
+export async function archiveClosedTicketsPendingUpload(
+  api: BotApi,
+  db: SupportDatabase,
+  staffChatId: number
+): Promise<void> {
+  const tickets = db.listClosedTicketsPendingArchive(staffChatId);
   for (const ticket of tickets) {
-    await archiveTicketIfPossible(api, db, ticket.id);
+    await archiveTicketIfPossible(api, db, staffChatId, ticket.id);
   }
 }
 
 export async function archiveTicketIfPossible(
   api: BotApi,
   db: SupportDatabase,
+  staffChatId: number,
   ticketId: number,
   options: ArchiveAttemptOptions = {}
 ): Promise<boolean> {
@@ -152,7 +164,7 @@ export async function archiveTicketIfPossible(
   const tempFile = await writeTemporaryTranscript(filename, transcript);
 
   try {
-    const delivery = await sendTranscriptToSupportLogs(api, db, ticket, tempFile.filePath, filename);
+    const delivery = await sendTranscriptToSupportLogs(api, db, staffChatId, ticket, tempFile.filePath, filename);
     db.markTicketArchivedAndDeleteMessages(ticket.id, delivery.summaryMessageId, delivery.documentMessageId);
     await removeTicketTopicAfterArchive(api, ticket);
     return true;
@@ -172,7 +184,7 @@ export async function archiveTicketIfPossible(
       );
 
       try {
-        const delivery = await sendTranscriptToSupportLogs(api, db, ticket, tempFile.filePath, filename, {
+        const delivery = await sendTranscriptToSupportLogs(api, db, staffChatId, ticket, tempFile.filePath, filename, {
           recreateTopic: true,
         });
         db.markTicketArchivedAndDeleteMessages(ticket.id, delivery.summaryMessageId, delivery.documentMessageId);
@@ -217,10 +229,15 @@ export async function archiveTicketIfPossible(
   }
 }
 
-export async function logBanEvent(api: BotApi, db: SupportDatabase, input: BanLogInput): Promise<void> {
+export async function logBanEvent(
+  api: BotApi,
+  db: SupportDatabase,
+  staffChatId: number,
+  input: BanLogInput
+): Promise<void> {
   try {
-    const logsThreadId = await initializeSupportLogsTopic(api, db);
-    await api.sendMessage(config.staffChatId, formatBanLog(input), {
+    const logsThreadId = await initializeSupportLogsTopic(api, db, staffChatId);
+    await api.sendMessage(staffChatId, formatBanLog(input), {
       message_thread_id: logsThreadId,
     });
   } catch (error) {
@@ -234,11 +251,12 @@ export async function logBanEvent(api: BotApi, db: SupportDatabase, input: BanLo
 export async function logModerationSanction(
   api: BotApi,
   db: SupportDatabase,
+  staffChatId: number,
   input: ModerationLogInput
 ): Promise<void> {
-  const topicId = await initializeSupportLogsTopic(api, db);
+  const topicId = await initializeSupportLogsTopic(api, db, staffChatId);
   await api.sendMessage(
-    config.staffChatId,
+    staffChatId,
     [
       "Public moderation sanction",
       `User ID: ${input.userTelegramId}`,
@@ -277,9 +295,9 @@ function userLabel(user: { username?: string | null; telegram_id?: number; id?: 
   return id ? `user_${id}` : "unknown";
 }
 
-async function verifyForumTopic(api: BotApi, messageThreadId: number): Promise<TopicVerification> {
+async function verifyForumTopic(api: BotApi, staffChatId: number, messageThreadId: number): Promise<TopicVerification> {
   try {
-    await api.sendChatAction(config.staffChatId, "typing", {
+    await api.sendChatAction(staffChatId, "typing", {
       message_thread_id: messageThreadId,
     });
     return "ok";
@@ -305,32 +323,33 @@ function parseStoredThreadId(value: string | undefined): number | null {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-function supportLogsThreadSettingKey(): string {
-  return `${SUPPORT_LOGS_THREAD_SETTING_PREFIX}:${config.staffChatId}`;
+function supportLogsThreadSettingKey(staffChatId: number): string {
+  return `${SUPPORT_LOGS_THREAD_SETTING_PREFIX}:${staffChatId}`;
 }
 
 async function sendTranscriptToSupportLogs(
   api: BotApi,
   db: SupportDatabase,
+  staffChatId: number,
   ticket: TicketWithUser,
   filePath: string,
   filename: string,
   options: SendTranscriptOptions = {}
 ): Promise<TranscriptDelivery> {
   const logsThreadId = options.recreateTopic
-    ? await recreateSupportLogsTopic(api, db)
-    : await initializeSupportLogsTopic(api, db);
+    ? await recreateSupportLogsTopic(api, db, staffChatId)
+    : await initializeSupportLogsTopic(api, db, staffChatId);
   const safeLogsThreadId =
-    logsThreadId === ticket.message_thread_id ? await recreateSupportLogsTopic(api, db) : logsThreadId;
+    logsThreadId === ticket.message_thread_id ? await recreateSupportLogsTopic(api, db, staffChatId) : logsThreadId;
   let summaryMessageId: number | null = null;
 
   try {
-    const summary = await api.sendMessage(config.staffChatId, formatTicketClosedLog(ticket), {
+    const summary = await api.sendMessage(staffChatId, formatTicketClosedLog(ticket), {
       message_thread_id: safeLogsThreadId,
     });
     summaryMessageId = summary.message_id;
 
-    const document = await api.sendDocument(config.staffChatId, new InputFile(filePath, filename), {
+    const document = await api.sendDocument(staffChatId, new InputFile(filePath, filename), {
       message_thread_id: safeLogsThreadId,
     });
 
@@ -340,7 +359,7 @@ async function sendTranscriptToSupportLogs(
     };
   } catch (error) {
     if (summaryMessageId !== null) {
-      await deleteMessageSafely(api, config.staffChatId, summaryMessageId);
+      await deleteMessageSafely(api, staffChatId, summaryMessageId);
     }
 
     throw error;
