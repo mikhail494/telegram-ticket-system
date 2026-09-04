@@ -316,7 +316,8 @@ test("batch help is vendor-neutral and returns to the pending workflow", async (
   const { harness } = createReadyHarness({ role: "ADMIN", rbac: true });
   harness.seedTicket();
   await harness.bot.handleUpdate(privateCallback(2, "batch-ui:export", 60));
-  const currentMessageId = harness.findApiCalls("sendMessage").at(-1)?.responseMessageId!;
+  const currentMessageId = harness.findApiCalls("sendMessage").at(-1)?.responseMessageId;
+  assert.ok(currentMessageId);
   harness.clearApiCalls();
 
   await harness.bot.handleUpdate(privateCallback(2, "batch-ui:help", currentMessageId));

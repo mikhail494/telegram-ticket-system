@@ -223,8 +223,10 @@ export function scheduleModerationCleanup(
         logger.warn({ jobId, err: error }, "Moderation cleanup timer failed");
       })
       .finally(() => scheduledCleanupJobs.delete(jobId));
-    if (backgroundTasks) backgroundTasks.run(run);
-    else void run();
+    if (backgroundTasks) {
+      const accepted = backgroundTasks.run(run);
+      if (!accepted) logger.debug({ operation: "moderation_cleanup", jobId }, "Background work was dropped during shutdown");
+    } else void run();
   }, delayMs);
   timer.unref?.();
 }

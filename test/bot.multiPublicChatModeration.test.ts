@@ -409,7 +409,8 @@ describe("multi-public-chat moderation", () => {
     manage(harness, CHAT_B, false);
     await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:config-warning:${CHAT_A}`, 1));
     await harness.bot.handleUpdate(privateText(OWNER_ID, "Synthetic warning A", 2));
-    const currentMessageId = harness.findApiCalls("sendMessage").at(-1)?.responseMessageId!;
+    const currentMessageId = harness.findApiCalls("sendMessage").at(-1)?.responseMessageId;
+    assert.ok(currentMessageId);
     await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:config-cooldown:${CHAT_A}`, currentMessageId));
     await harness.bot.handleUpdate(privateText(OWNER_ID, "23", 4));
 
