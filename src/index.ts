@@ -1,6 +1,6 @@
 import { config, hostConfig, setRuntimeStaffChatId } from "./config.js";
 import { SupportDatabase } from "./db.js";
-import { createBot, sendStaffOnboardingIfNeeded, setBotCommands } from "./bot.js";
+import { TELEGRAM_ALLOWED_UPDATES, createBot, sendStaffOnboardingIfNeeded, setBotCommands } from "./bot.js";
 import { logger } from "./logger.js";
 import { archiveClosedTicketsPendingUpload, initializeSupportLogsTopic } from "./archive.js";
 import { createPersistentQuickRepliesRegistry, loadQuickRepliesRegistry } from "./quickReplies.js";
@@ -116,7 +116,7 @@ async function main(): Promise<void> {
   process.once("SIGTERM", shutdown);
 
   polling = bot.start({
-    allowed_updates: ["message", "callback_query", "chat_member"],
+    allowed_updates: [...TELEGRAM_ALLOWED_UPDATES],
     onStart: (botInfo) => {
       operationalState = "READY";
       logger.info({ username: botInfo.username }, "Telegram support bot started");

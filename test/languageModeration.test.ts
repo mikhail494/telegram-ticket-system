@@ -56,6 +56,27 @@ const REAL_ALLOWED_LATIN_CHAT_CORPUS = [
   "The support agent will review the wallet status and send another update tomorrow."
 ] as const;
 
+const PRODUCTION_INDONESIAN_MALAY_REGRESSIONS = [
+  "Ikhlasin sir",
+  "anjing emang nge logout sendiri",
+  "Gabisa sir",
+  "Harus disimpan lain Kali sir",
+  "Tim kontol",
+  "Apakah sudah saatnya sir",
+  "Bubar bubar sudah scam",
+  "komen d sini uneg uneg kalian",
+  "Malaysia loh ya",
+  "duit kelan d tilep dev",
+  "Ga nongol2 nih adminnya ama bot nya",
+  "Dh kabur",
+  "Pantes orang indo di banned kelakuan Rasis begini, ga land ya cari garapan lain bro ga ush berisik",
+  "gw saldo depo ngentot....goblok tolol lu .",
+  "Hahah sikat bang ,tolol emang dia mah",
+  "5-10$ gamasalah anjing gw nyangkut 300$ mau buat give away ,keburu rebrand jd gw mau wd tolol",
+  "marahin bang",
+  "Gass tolol-tololin"
+] as const;
+
 describe("language moderation classifier", () => {
   it("ignores technical and non-linguistic input", () => {
     for (const value of [
@@ -102,7 +123,7 @@ describe("language moderation classifier", () => {
   });
 
   it("detects real Indonesian and Malay Telegram chat slang", () => {
-    for (const value of REAL_NON_ENGLISH_CHAT_CORPUS) {
+    for (const value of [...REAL_NON_ENGLISH_CHAT_CORPUS, ...PRODUCTION_INDONESIAN_MALAY_REGRESSIONS]) {
       assert.equal(classifyModerationLanguage(value), "non_english", value);
       assert.equal(classifyEnglishOnlyMessage(value), "violation", value);
     }
@@ -131,7 +152,19 @@ describe("language moderation classifier", () => {
       "still review same status",
       "need help with fluxa wallet",
       "why still pending bro",
-      "can you check my withdrawal"
+      "can you check my withdrawal",
+      "Wen land?",
+      "has anyone landed yet?",
+      "HHHH",
+      "Still not fixed, how bro, just 1$ not credited",
+      "How to contact Customer Support AgentOn?",
+      "The support agent will review the update from Jakarta and send the next response tomorrow.",
+      "Malaysia launch is delayed",
+      "I am in Malaysia",
+      "The admin is not here",
+      "The bot is not responding",
+      "The giveaway is 300 dollars",
+      "Support users in Indonesia can use English here"
     ];
     for (const value of brokenEnglish) {
       assert.notEqual(classifyModerationLanguage(value), "non_english", value);
