@@ -6,7 +6,7 @@ import test from "node:test";
 import Database from "better-sqlite3";
 import { SupportDatabase } from "../src/db.js";
 
-test("migrations 21 and 22 adopt legacy moderation data without changing historical state", async () => {
+test("migrations 21 through 23 adopt legacy moderation data without changing historical state", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "telegram-public-chat-migration-"));
   const databasePath = path.join(directory, "support.db");
   const legacy = new Database(databasePath);
@@ -97,9 +97,10 @@ test("migrations 21 and 22 adopt legacy moderation data without changing histori
     const inspected = new Database(databasePath, { readonly: true });
     try {
       const migrations = inspected.prepare("SELECT id FROM schema_migrations ORDER BY id").all() as Array<{ id: number }>;
-      assert.deepEqual(migrations.map((row) => row.id), Array.from({ length: 22 }, (_, index) => index + 1));
+      assert.deepEqual(migrations.map((row) => row.id), Array.from({ length: 23 }, (_, index) => index + 1));
       assert.equal((inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 21").get() as { count: number }).count, 1);
       assert.equal((inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 22").get() as { count: number }).count, 1);
+      assert.equal((inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 23").get() as { count: number }).count, 1);
       const violationColumns = inspected.prepare("PRAGMA table_info(language_moderation_violations)").all() as Array<{ name: string }>;
       assert.ok(violationColumns.some((column) => column.name === "message_thread_id"));
       const publicChatColumns = inspected.prepare("PRAGMA table_info(managed_public_chats)").all() as Array<{ name: string }>;

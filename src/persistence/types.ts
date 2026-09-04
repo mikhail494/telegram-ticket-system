@@ -286,6 +286,15 @@ export interface LanguageModerationUserState {
   sanction_tier: number; first_strike_at: string | null; updated_at: string;
 }
 
+export interface LanguageModerationMessageAuthor {
+  chat_id: number;
+  message_id: number;
+  user_telegram_id: number;
+  username: string | null;
+  message_thread_id: number | null;
+  created_at: string;
+}
+
 export interface LanguageModerationViolation {
   chat_id: number; user_telegram_id: number; message_id: number; username: string | null;
   message_thread_id: number | null;

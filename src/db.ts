@@ -8,7 +8,7 @@ import { TicketBatchRepository } from "./persistence/ticketBatchRepository.js";
 import { TicketRepository } from "./persistence/ticketsRepository.js";
 import { now } from "./persistence/helpers.js";
 import type { NormalizedDeliveryError } from "./deliveryDiagnostics.js";
-import type { AddMessageInput, BanUserInput, BannedUserRecord, CloseTicketInput, CreateTicketBatchAnswerPackageInput, CreateTicketBatchExportInput, EntityNotificationPublicationState, InstallationStateRecord, LanguageModerationCleanupJob, LanguageModerationUserState, LanguageModerationViolation, LanguageModerationViolationCleanupState, LanguageModerationWarningState, ManagedPublicChatRecord, OnboardingSessionRecord, QuickReplyCategoryRecord, QuickReplyTemplateRecord, SecureTokenRecord, TeamMemberRecord, TeamRole, TicketBatchAnswerItemRecord, TicketBatchAnswerItemState, TicketBatchAnswerPackageRecord, TicketBatchDeliveryFailureContext, TicketBatchExportItemRecord, TicketBatchExportRecord, TicketBatchFailureEventState, TicketBatchRecoveryAudit, TicketBatchStaffSyncContext, TicketBatchSummaryDeliveryState, TicketBatchTopicEchoState, TicketEscalationTarget, TicketFollowUpHistoryRecord, TicketFollowUpState, TicketMessageRecord, TicketRecord, TicketStatus, TicketWithUser, UserInput, UserRecord, WorkspaceRecord } from "./persistence/types.js";
+import type { AddMessageInput, BanUserInput, BannedUserRecord, CloseTicketInput, CreateTicketBatchAnswerPackageInput, CreateTicketBatchExportInput, EntityNotificationPublicationState, InstallationStateRecord, LanguageModerationCleanupJob, LanguageModerationMessageAuthor, LanguageModerationUserState, LanguageModerationViolation, LanguageModerationViolationCleanupState, LanguageModerationWarningState, ManagedPublicChatRecord, OnboardingSessionRecord, QuickReplyCategoryRecord, QuickReplyTemplateRecord, SecureTokenRecord, TeamMemberRecord, TeamRole, TicketBatchAnswerItemRecord, TicketBatchAnswerItemState, TicketBatchAnswerPackageRecord, TicketBatchDeliveryFailureContext, TicketBatchExportItemRecord, TicketBatchExportRecord, TicketBatchFailureEventState, TicketBatchRecoveryAudit, TicketBatchStaffSyncContext, TicketBatchSummaryDeliveryState, TicketBatchTopicEchoState, TicketEscalationTarget, TicketFollowUpHistoryRecord, TicketFollowUpState, TicketMessageRecord, TicketRecord, TicketStatus, TicketWithUser, UserInput, UserRecord, WorkspaceRecord } from "./persistence/types.js";
 export type * from "./persistence/types.js";
 interface TableColumnInfo { name: string; }
 interface Migration { id: number; name: string; up: () => void; }
@@ -383,6 +383,22 @@ export class SupportDatabase {
     return this.moderation.getLanguageModerationUserState(chatId, userId);
   }
 
+  addLanguageModerationMessageAuthor(input: {
+    chatId: number;
+    messageId: number;
+    userTelegramId: number;
+    username?: string | null;
+    messageThreadId?: number | null;
+  }): boolean
+  {
+    return this.moderation.addLanguageModerationMessageAuthor(input);
+  }
+
+  getLanguageModerationMessageAuthor(chatId: number, messageId: number): LanguageModerationMessageAuthor | undefined
+  {
+    return this.moderation.getLanguageModerationMessageAuthor(chatId, messageId);
+  }
+
   upsertLanguageModerationUserState(input: Omit<LanguageModerationUserState, "updated_at">): void
   {
     return this.moderation.upsertLanguageModerationUserState(input);
@@ -391,6 +407,11 @@ export class SupportDatabase {
   addLanguageModerationViolation(input: Pick<LanguageModerationViolation, "chat_id" | "user_telegram_id" | "message_id" | "username" | "cycle_tier"> & { message_thread_id?: number | null }): boolean
   {
     return this.moderation.addLanguageModerationViolation(input);
+  }
+
+  getLanguageModerationViolation(chatId: number, messageId: number): LanguageModerationViolation | undefined
+  {
+    return this.moderation.getLanguageModerationViolation(chatId, messageId);
   }
 
   listLanguageModerationViolations(chatId: number, since: string): LanguageModerationViolation[]
@@ -1459,6 +1480,23 @@ export class SupportDatabase {
             );
             CREATE INDEX IF NOT EXISTS idx_quick_reply_templates_category_order
               ON quick_reply_templates(category_id, sort_order, id);
+          `);
+        }
+      },
+      {
+        id: 23,
+        name: "add_language_moderation_message_authors",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS language_moderation_message_authors (
+              chat_id INTEGER NOT NULL,
+              message_id INTEGER NOT NULL,
+              user_telegram_id INTEGER NOT NULL,
+              username TEXT,
+              message_thread_id INTEGER,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY(chat_id, message_id)
+            );
           `);
         }
       }

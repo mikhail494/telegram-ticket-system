@@ -1,8 +1,27 @@
 import Database from "better-sqlite3";
 import { now } from "./helpers.js";
-import type { LanguageModerationCleanupJob, LanguageModerationUserState, LanguageModerationViolation, LanguageModerationViolationCleanupState, LanguageModerationWarningState } from "./types.js";
+import type { LanguageModerationCleanupJob, LanguageModerationMessageAuthor, LanguageModerationUserState, LanguageModerationViolation, LanguageModerationViolationCleanupState, LanguageModerationWarningState } from "./types.js";
 export class ModerationRepository {
   constructor(private readonly db: Database.Database) {}
+  addLanguageModerationMessageAuthor(input: {
+    chatId: number;
+    messageId: number;
+    userTelegramId: number;
+    username?: string | null;
+    messageThreadId?: number | null;
+  }): boolean {
+    const result = this.db.prepare(`INSERT OR IGNORE INTO language_moderation_message_authors
+      (chat_id, message_id, user_telegram_id, username, message_thread_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(input.chatId, input.messageId, input.userTelegramId, input.username ?? null, input.messageThreadId ?? null, now());
+    return result.changes === 1;
+  }
+
+  getLanguageModerationMessageAuthor(chatId: number, messageId: number): LanguageModerationMessageAuthor | undefined {
+    return this.db.prepare("SELECT * FROM language_moderation_message_authors WHERE chat_id = ? AND message_id = ?")
+      .get(chatId, messageId) as LanguageModerationMessageAuthor | undefined;
+  }
+
   getLanguageModerationUserState(chatId: number, userId: number): LanguageModerationUserState | undefined {
     return this.db.prepare("SELECT * FROM language_moderation_user_state WHERE chat_id = ? AND user_telegram_id = ?").get(chatId, userId) as LanguageModerationUserState | undefined;
   }
@@ -16,6 +35,11 @@ export class ModerationRepository {
     const result = this.db.prepare("INSERT OR IGNORE INTO language_moderation_violations (chat_id, user_telegram_id, message_id, username, detected_at, cycle_tier, message_thread_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(input.chat_id, input.user_telegram_id, input.message_id, input.username, now(), input.cycle_tier, input.message_thread_id ?? null);
     return result.changes === 1;
+  }
+
+  getLanguageModerationViolation(chatId: number, messageId: number): LanguageModerationViolation | undefined {
+    return this.db.prepare("SELECT * FROM language_moderation_violations WHERE chat_id = ? AND message_id = ?")
+      .get(chatId, messageId) as LanguageModerationViolation | undefined;
   }
 
   listLanguageModerationViolations(chatId: number, since: string): LanguageModerationViolation[] {

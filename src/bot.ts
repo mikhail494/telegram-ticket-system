@@ -1,7 +1,7 @@
 import { Bot, GrammyError, HttpError, InlineKeyboard, InputFile, Keyboard } from "grammy";
 import { randomUUID } from "node:crypto";
 import type { CommandContext, Context } from "grammy";
-import type { Message, ReactionTypeEmoji, User } from "grammy/types";
+import type { Message, ReactionType, ReactionTypeEmoji, User } from "grammy/types";
 import packageMetadata from "../package.json" with { type: "json" };
 import {
   archiveTicketIfPossible,
@@ -19,7 +19,9 @@ import {
   type TicketRecord,
   type TicketStatus,
   type TicketWithUser,
-  type TeamMemberRecord
+  type TeamMemberRecord,
+  type LanguageModerationUserState,
+  type LanguageModerationViolation
 } from "./db.js";
 import {
   CLOSED_TEXT,
@@ -100,6 +102,12 @@ const SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY = "support_expected_response_ti
 const SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY = "support_ticket_received_template";
 const STAFF_TEST_TICKET_MODE_SETTING_PREFIX = "staff_test_ticket_mode:";
 const STAFF_TEST_TICKET_ID_SETTING_PREFIX = "staff_test_ticket_id:";
+export const TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query", "chat_member", "message_reaction"] as const;
+const ORDINARY_MODERATION_MESSAGE_FIELDS = [
+  "text", "rich_message", "animation", "audio", "document", "live_photo", "paid_media", "photo",
+  "sticker", "story", "video", "video_note", "voice", "contact", "dice", "game", "poll", "venue",
+  "location", "checklist"
+] as const satisfies readonly (keyof Message)[];
 type ModerationReactionEmoji = "\u{1F440}" | "\u{1F621}";
 const MODERATION_STRIKE_REACTION: ModerationReactionEmoji = "\u{1F440}";
 const MODERATION_SANCTION_REACTION: ModerationReactionEmoji = "\u{1F621}";
@@ -1926,6 +1934,59 @@ export function createBot(
     const member = ctx.chatMember.new_chat_member;
     if (member.status === "left" || member.status === "kicked") return;
     enrollBaselineStaffMember(member.user);
+  });
+
+  bot.on("message_reaction", async (ctx) => {
+    const reaction = ctx.messageReaction;
+    const actor = reaction.user;
+    const owner = installation.getOwner();
+    if (
+      !actor
+      || reaction.actor_chat
+      || actor.is_bot
+      || !owner
+      || owner.userTelegramId !== actor.id
+      || hasEmojiReaction(reaction.old_reaction, MODERATION_STRIKE_REACTION)
+      || !hasEmojiReaction(reaction.new_reaction, MODERATION_STRIKE_REACTION)
+    ) return;
+
+    const moderation = moderationConfigForChat(db, reaction.chat.id);
+    if (!moderation.enabled || moderation.targetChatId !== reaction.chat.id || reaction.chat.id === config.staffChatId) return;
+    const author = db.getLanguageModerationMessageAuthor(reaction.chat.id, reaction.message_id);
+    if (!author) {
+      logger.debug({ chatId: reaction.chat.id, messageId: reaction.message_id }, "Manual moderation reaction has no stored message author");
+      return;
+    }
+
+    const state = db.getLanguageModerationUserState(reaction.chat.id, author.user_telegram_id)
+      ?? { current_strikes: 0, sanction_tier: 0, first_strike_at: null };
+    const added = db.addLanguageModerationViolation({
+      chat_id: reaction.chat.id,
+      user_telegram_id: author.user_telegram_id,
+      message_id: reaction.message_id,
+      message_thread_id: author.message_thread_id,
+      username: author.username,
+      cycle_tier: state.sanction_tier
+    });
+    if (!added && !isPendingCurrentCycleFirstStrike(
+      db.getLanguageModerationViolation(reaction.chat.id, reaction.message_id),
+      author.user_telegram_id,
+      state
+    )) return;
+
+    await advanceModerationStrike({
+      db,
+      api: ctx.api,
+      chatId: reaction.chat.id,
+      chatTitle: ("title" in reaction.chat ? reaction.chat.title : null) ?? null,
+      userId: author.user_telegram_id,
+      username: author.username,
+      messageId: reaction.message_id,
+      state,
+      now: moderationNow,
+      cleanupScheduler: moderationCleanupScheduler,
+      setStrikeReaction: false
+    });
   });
 
   bot.on("message", async (ctx) => {
@@ -3940,6 +4001,15 @@ async function handlePublicLanguageModeration(
   if (!moderation.enabled || moderation.targetChatId !== ctx.chat.id || ctx.chat.id === config.staffChatId) return;
   const content = getMessageContent(ctx.message).text;
   const messageThreadId = typeof ctx.message.message_thread_id === "number" ? ctx.message.message_thread_id : null;
+  if (isOrdinaryUserModerationTarget(ctx.message, ctx.from)) {
+    db.addLanguageModerationMessageAuthor({
+      chatId: ctx.chat.id,
+      messageId: ctx.message.message_id,
+      userTelegramId: ctx.from.id,
+      username: usernameOf(ctx.from),
+      messageThreadId
+    });
+  }
   const chatState = db.getLanguageModerationWarningState(ctx.chat.id, messageThreadId);
   db.upsertLanguageModerationWarningState(ctx.chat.id, messageThreadId, {
     lastWarningMessageId: chatState?.last_warning_message_id ?? null,
@@ -3968,56 +4038,106 @@ async function handlePublicLanguageModeration(
         schedulePendingWarning(ctx.api, db, ctx.chat.id, messageThreadId, 3_000, backgroundTasks);
       }
     } else {
-      db.upsertLanguageModerationUserState({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from), current_strikes: 1, sanction_tier: state.sanction_tier, first_strike_at: currentTime.toISOString() });
-      await setModerationReaction(
-        ctx.api,
-        ctx.chat.id,
-        ctx.message.message_id,
-        MODERATION_STRIKE_REACTION
-      );
+      await advanceModerationStrike({
+        db, api: ctx.api, chatId: ctx.chat.id, chatTitle: ("title" in ctx.chat ? ctx.chat.title : null) ?? null,
+        userId: ctx.from.id, username: usernameOf(ctx.from), messageId: ctx.message.message_id, state,
+        now, cleanupScheduler, setStrikeReaction: true, strikeTime: currentTime
+      });
     }
     return;
   }
-  if (state.current_strikes === 1) {
-    db.upsertLanguageModerationUserState({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from), current_strikes: 2, sanction_tier: state.sanction_tier, first_strike_at: state.first_strike_at });
-    await setModerationReaction(
-      ctx.api,
-      ctx.chat.id,
-      ctx.message.message_id,
-      MODERATION_STRIKE_REACTION
-    );
+  await advanceModerationStrike({
+    db, api: ctx.api, chatId: ctx.chat.id, chatTitle: ("title" in ctx.chat ? ctx.chat.title : null) ?? null,
+    userId: ctx.from.id, username: usernameOf(ctx.from), messageId: ctx.message.message_id, state,
+    now, cleanupScheduler, setStrikeReaction: true
+  });
+}
+
+function isOrdinaryUserModerationTarget(message: Message, from: User): boolean {
+  if (from.is_bot || message.sender_chat || message.message_id <= 0) return false;
+  return ORDINARY_MODERATION_MESSAGE_FIELDS.some((field) => field in message);
+}
+
+function isPendingCurrentCycleFirstStrike(
+  violation: LanguageModerationViolation | undefined,
+  userId: number,
+  state: Pick<LanguageModerationUserState, "current_strikes" | "sanction_tier">
+): boolean {
+  return Boolean(
+    violation
+    && state.current_strikes === 0
+    && violation.user_telegram_id === userId
+    && violation.cycle_tier === state.sanction_tier
+    && violation.moderation_cycle_id === null
+    && violation.cleanup_state === "PENDING"
+  );
+}
+
+async function advanceModerationStrike(input: {
+  db: SupportDatabase;
+  api: BotApi;
+  chatId: number;
+  chatTitle: string | null;
+  userId: number;
+  username: string | null;
+  messageId: number;
+  state: Pick<LanguageModerationUserState, "current_strikes" | "sanction_tier" | "first_strike_at">;
+  now: () => Date;
+  cleanupScheduler: ModerationCleanupScheduler;
+  setStrikeReaction: boolean;
+  strikeTime?: Date;
+}): Promise<void> {
+  if (input.state.current_strikes < 2) {
+    input.db.upsertLanguageModerationUserState({
+      chat_id: input.chatId,
+      user_telegram_id: input.userId,
+      username: input.username,
+      current_strikes: input.state.current_strikes + 1,
+      sanction_tier: input.state.sanction_tier,
+      first_strike_at: input.state.current_strikes === 0
+        ? (input.strikeTime ?? input.now()).toISOString()
+        : input.state.first_strike_at
+    });
+    if (input.setStrikeReaction) {
+      await setModerationReaction(input.api, input.chatId, input.messageId, MODERATION_STRIKE_REACTION);
+    }
     return;
   }
-  const tier = Math.min(state.sanction_tier, 2);
+
+  const tier = Math.min(input.state.sanction_tier, 2);
   try {
     await setModerationReaction(
-      ctx.api,
-      ctx.chat.id,
-      ctx.message.message_id,
+      input.api,
+      input.chatId,
+      input.messageId,
       MODERATION_SANCTION_REACTION
     );
-    if (tier === 2) await ctx.api.banChatMember(ctx.chat.id, ctx.from.id);
-    else await ctx.api.restrictChatMember(ctx.chat.id, ctx.from.id, { can_send_messages: false }, { until_date: Math.floor(now().getTime() / 1000) + (tier === 0 ? 86_400 : 604_800) });
-    const nextTier = Math.min(3, state.sanction_tier + 1);
+    if (tier === 2) await input.api.banChatMember(input.chatId, input.userId);
+    else await input.api.restrictChatMember(input.chatId, input.userId, { can_send_messages: false }, { until_date: Math.floor(input.now().getTime() / 1000) + (tier === 0 ? 86_400 : 604_800) });
+    const nextTier = Math.min(3, input.state.sanction_tier + 1);
     const violationCycleId = randomUUID();
-    db.assignLanguageModerationViolationCycle(ctx.chat.id, ctx.from.id, state.sanction_tier, violationCycleId);
-    db.upsertLanguageModerationUserState({ chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from), current_strikes: 0, sanction_tier: nextTier, first_strike_at: null });
-    const cleanupJobId = db.createLanguageModerationCleanupJob({ staff_chat_id: config.staffChatId, chat_id: ctx.chat.id, user_telegram_id: ctx.from.id, username: usernameOf(ctx.from) ?? null, chat_title: ("title" in ctx.chat ? ctx.chat.title : null) ?? null, sanction_tier: nextTier, sanction_kind: tier === 0 ? "24-hour mute" : tier === 1 ? "7-day mute" : "permanent ban", violation_cycle_id: violationCycleId, cleanup_due_at: new Date(now().getTime() + 10_000).toISOString() });
-    cleanupScheduler(ctx.api, db, cleanupJobId);
+    input.db.assignLanguageModerationViolationCycle(input.chatId, input.userId, input.state.sanction_tier, violationCycleId);
+    input.db.upsertLanguageModerationUserState({ chat_id: input.chatId, user_telegram_id: input.userId, username: input.username, current_strikes: 0, sanction_tier: nextTier, first_strike_at: null });
+    const cleanupJobId = input.db.createLanguageModerationCleanupJob({ staff_chat_id: config.staffChatId, chat_id: input.chatId, user_telegram_id: input.userId, username: input.username, chat_title: input.chatTitle, sanction_tier: nextTier, sanction_kind: tier === 0 ? "24-hour mute" : tier === 1 ? "7-day mute" : "permanent ban", violation_cycle_id: violationCycleId, cleanup_due_at: new Date(input.now().getTime() + 10_000).toISOString() });
+    input.cleanupScheduler(input.api, input.db, cleanupJobId);
   } catch (error) {
-    const managed = db.getManagedPublicChat(ctx.chat.id);
+    const managed = input.db.getManagedPublicChat(input.chatId);
     if (managed) {
-      db.recordManagedPublicChatPermissionHealth({
-        chatId: ctx.chat.id,
+      input.db.recordManagedPublicChatPermissionHealth({
+        chatId: input.chatId,
         healthy: false,
         reactionsAvailable: managed.reaction_status === "UNKNOWN" ? null : managed.reaction_status === "AVAILABLE"
       });
-      db.setManagedPublicChatModerationEnabled(ctx.chat.id, false);
+      input.db.setManagedPublicChatModerationEnabled(input.chatId, false);
     } else {
-      db.setSetting(moderationSettingKey("enabled"), "false");
+      input.db.setSetting(moderationSettingKey("enabled"), "false");
     }
-    logger.error({ chatId: ctx.chat.id, userId: ctx.from.id, err: error }, "Language moderation sanction failed; moderation disabled");
+    logger.error({ chatId: input.chatId, userId: input.userId, err: error }, "Language moderation sanction failed; moderation disabled");
   }
+}
+
+function hasEmojiReaction(reactions: readonly ReactionType[], emoji: ModerationReactionEmoji): boolean {
+  return reactions.some((reaction) => reaction.type === "emoji" && reaction.emoji === emoji);
 }
 
 async function setModerationReaction(
