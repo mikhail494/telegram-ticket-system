@@ -35,7 +35,7 @@ function createHarness(now: () => number, options: { capacity?: number } = {}): 
 
 describe("customer private support ingress protection", () => {
   it("allows twenty immediate customer messages through the normal ticket flow", async () => {
-    let now = 0;
+    const now = 0;
     const harness = createHarness(() => now);
 
     for (let index = 1; index <= 20; index += 1) {
@@ -74,7 +74,7 @@ describe("customer private support ingress protection", () => {
   });
 
   it("keeps banned customer replies bounded and leaves staff test-ticket mode exempt", async () => {
-    let now = 0;
+    const now = 0;
     const bannedHarness = createHarness(() => now, { capacity: 1 });
     bannedHarness.db.banUser({ userTelegramId: 503, username: "customer_503", reason: "Test", bannedBy: 1 });
     await bannedHarness.bot.handleUpdate(privateMessage(503, "First", 1));
@@ -100,7 +100,7 @@ describe("customer private support ingress protection", () => {
   });
 
   it("contains warning delivery failures without processing the rejected message", async () => {
-    let now = 0;
+    const now = 0;
     const harness = createHarness(() => now, { capacity: 1 });
     await harness.bot.handleUpdate(privateMessage(504, "Allowed", 1));
     const ticket = harness.db.findActiveTicketForUser(504, TEST_STAFF_CHAT_ID);
@@ -113,7 +113,7 @@ describe("customer private support ingress protection", () => {
   });
 
   it("does not consume customer limiter state for public or staff-workspace traffic", async () => {
-    let now = 0;
+    const now = 0;
     const limiter = new SupportIngressLimiter({ now: () => now, capacity: 1 });
     const harness = createBotHarness({ supportIngressLimiter: limiter });
     harnesses.push(harness);

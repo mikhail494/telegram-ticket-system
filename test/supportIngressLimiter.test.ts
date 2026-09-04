@@ -16,7 +16,7 @@ function createLimiter(now: () => number, overrides: Partial<ConstructorParamete
 
 describe("SupportIngressLimiter", () => {
   it("allows a legitimate immediate burst of twenty messages", () => {
-    let now = 0;
+    const now = 0;
     const limiter = createLimiter(() => now);
 
     for (let index = 0; index < 20; index += 1) {

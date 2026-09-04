@@ -36,8 +36,8 @@ jobs:
       - name: Check test TypeScript
         run: npm run test:typecheck
 
-      - name: Run automated tests
-        run: npm test
+      - name: Run automated tests with coverage
+        run: npm run test:coverage
 
       - name: Build application
         run: npm run build

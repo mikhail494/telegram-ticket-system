@@ -17,7 +17,7 @@
     "db:backup": "tsx src/dbBackup.ts",
     "db:restore:verify": "tsx src/dbRestoreVerify.ts",
     "test": "node scripts/run-tests.mjs",
-    "test:coverage": "c8 --reporter=text --reporter=json node scripts/run-tests.mjs",
+    "test:coverage": "c8 --check-coverage --statements 84 --branches 80 --functions 89 --lines 84 --reporter=text --reporter=json node scripts/run-tests.mjs",
     "test:typecheck": "tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint src test scripts --max-warnings=0",
     "format": "prettier --write .",

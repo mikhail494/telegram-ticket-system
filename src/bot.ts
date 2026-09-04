@@ -2856,10 +2856,11 @@ export function createBot(
     ticketBatchRecoveryTimer = setTimeout(() => {
       ticketBatchRecoveryTimer = undefined;
       ticketBatchRecoveryTimerAt = undefined;
-      backgroundTasks.run(async () => {
+      const accepted = backgroundTasks.run(async () => {
         try { await recoverTicketBatchStaffOperations(); }
         catch (error) { logger.warn({ category: normalizeTelegramDeliveryError(error).category }, "Ticket batch staff recovery failed"); }
       });
+      if (!accepted) logger.debug({ operation: "ticket_batch_staff_recovery" }, "Background work was dropped during shutdown");
     }, delay);
     ticketBatchRecoveryTimer.unref();
   }
@@ -4177,8 +4178,10 @@ function schedulePendingWarning(api: BotApi, db: SupportDatabase, chatId: number
   const timer = setTimeout(() => {
     pendingWarningTimers.delete(key);
     const run = () => processPendingWarning(api, db, chatId, messageThreadId);
-    if (backgroundTasks) backgroundTasks.run(run);
-    else void run();
+    if (backgroundTasks) {
+      const accepted = backgroundTasks.run(run);
+      if (!accepted) logger.debug({ operation: "moderation_pending_warning", chatId, messageThreadId }, "Background work was dropped during shutdown");
+    } else void run();
   }, delayMs);
   timer.unref();
   pendingWarningTimers.set(key, timer);

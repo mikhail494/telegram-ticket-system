@@ -1,16 +1,13 @@
 import tseslint from "typescript-eslint";
 
-export default [
+export default tseslint.config(
   {
     ignores: ["dist/**", "node_modules/**", "coverage/**"]
   },
   {
     files: ["src/**/*.ts", "test/**/*.ts"],
-    plugins: {
-      "@typescript-eslint": tseslint.plugin
-    },
+    extends: [tseslint.configs.recommended],
     languageOptions: {
-      parser: tseslint.parser,
       parserOptions: {
         project: ["./tsconfig.json", "./tsconfig.test.json"],
         tsconfigRootDir: import.meta.dirname
@@ -18,7 +15,15 @@ export default [
     },
     rules: {
       "@typescript-eslint/await-thenable": "error",
-      "@typescript-eslint/no-misused-promises": ["error", { "checksVoidReturn": false }]
+      "@typescript-eslint/no-misused-promises": ["error", { "checksVoidReturn": false }],
+      // Dead-code cleanup from earlier control-plane extraction belongs in its own reviewable change.
+      "@typescript-eslint/no-unused-vars": "off"
+    }
+  },
+  {
+    files: ["src/**/*.ts"],
+    rules: {
+      "@typescript-eslint/no-floating-promises": "error"
     }
   }
-];
+);
