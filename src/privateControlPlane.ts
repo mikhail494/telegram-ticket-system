@@ -14,7 +14,12 @@ import type { Permission } from "./installation.js";
 import { logger } from "./logger.js";
 import type { QuickRepliesManager } from "./quickReplies.js";
 import { isPrivateInviteLink, parsePublicSupergroupReference } from "./workspaceValidation.js";
-import { formatPublicChatPermissionChecklist, validatePublicModerationChat } from "./publicChatModeration.js";
+import {
+  formatPublicChatPermissionChecklist,
+  isManualStrikeReactionAvailable,
+  manualStrikeReactionChoices,
+  validatePublicModerationChat,
+} from "./publicChatModeration.js";
 
 export type PendingQuickReplyInput =
   | { kind: "EDIT_TITLE"; templateId: string }
@@ -346,7 +351,7 @@ export class PrivateControlPlane {
     const [namespace, action, value, extra] = data.split(":");
     if (!namespace || !this.operatorCallbackNamespaces.has(namespace)) return false;
     if (namespace === "dashboard") return this.handleDashboardCallback(ctx, action);
-    if (namespace === "public") return this.handlePublicChatCallback(ctx, action, value);
+    if (namespace === "public") return this.handlePublicChatCallback(ctx, action, value, extra);
     if (namespace === "quick") return this.handleQuickRepliesCallback(ctx, action, value);
     if (namespace === "support") return this.handleSupportSettingsCallback(ctx, action);
     if (namespace === "team") return this.handleTeamCallback(ctx, action, value, extra);
@@ -443,6 +448,9 @@ export class PrivateControlPlane {
       .row()
       .text("Check permissions", `public:check:${chat.chat_id}`)
       .row()
+      .text(`Manual strikes: ${chat.manual_strikes_enabled ? "ON" : "OFF"}`, `public:manual-toggle:${chat.chat_id}`)
+      .text(`Reaction: ${chat.manual_strike_reaction}`, `public:manual-reaction:${chat.chat_id}`)
+      .row()
       .text("Warning message", `public:config-warning:${chat.chat_id}`)
       .text("Allowed terms", `public:config-allowlist:${chat.chat_id}`)
       .row()
@@ -467,6 +475,8 @@ export class PrivateControlPlane {
         `Moderation: ${chat.moderation_enabled ? "enabled" : "disabled"}`,
         `Permissions: ${chat.permission_status.toLowerCase()}`,
         `Reactions: ${chat.reaction_status.toLowerCase()} (advisory only)`,
+        `Manual strikes: ${chat.manual_strikes_enabled ? "enabled" : "disabled"}`,
+        `Manual strike reaction: ${chat.manual_strike_reaction}`,
         `Warning: ${chat.warning_text}`,
         `Allowed terms: ${chat.allowlist.length}`,
         `Warning cooldown: ${chat.warning_cooldown_minutes} minutes`,
@@ -739,7 +749,8 @@ export class PrivateControlPlane {
   private async handlePublicChatCallback(
     ctx: Context,
     action: string | undefined,
-    rawChatId: string | undefined
+    rawChatId: string | undefined,
+    extra: string | undefined
   ): Promise<boolean> {
     if (!isPrivateChat(ctx) || !ctx.from || !this.installation.can(ctx.from.id, "CONFIGURE_INSTALLATION")) {
       if (isPrivateChat(ctx))
@@ -776,6 +787,63 @@ export class PrivateControlPlane {
       this.pendingPublicChatConfigurations.delete(ctx.from.id);
       await ctx.answerCallbackQuery();
       await this.showPublicChatSettings(ctx, chatId);
+      return true;
+    }
+    if (action === "manual-toggle") {
+      dependencies.db.updateManagedPublicChatManualStrikeConfig(chatId, {
+        enabled: !managed.manual_strikes_enabled,
+      });
+      await ctx.answerCallbackQuery({
+        text: `Manual strikes ${managed.manual_strikes_enabled ? "disabled" : "enabled"}.`,
+      });
+      await this.showPublicChatSettings(ctx, chatId);
+      return true;
+    }
+    if (action === "manual-reaction") {
+      try {
+        const chat = await ctx.api.getChat(chatId);
+        const reactions = "available_reactions" in chat ? chat.available_reactions : undefined;
+        const choices = manualStrikeReactionChoices(reactions);
+        if (choices.length === 0) {
+          await ctx.answerCallbackQuery({
+            text: "No standard reactions are available in this chat.",
+            show_alert: true,
+          });
+          return true;
+        }
+        const keyboard = new InlineKeyboard();
+        choices.forEach((reaction, index) => {
+          keyboard.text(reaction, `public:set-reaction:${chatId}:${reaction}`);
+          if ((index + 1) % 4 === 0) keyboard.row();
+        });
+        keyboard.row().text("Back", `public:open:${chatId}`);
+        await ctx.answerCallbackQuery();
+        await this.renderScreen(ctx, "Choose the OWNER manual strike reaction.", keyboard);
+      } catch (error) {
+        logger.warn({ chatId, err: error }, "Could not inspect manual strike reactions");
+        await ctx.answerCallbackQuery({ text: "The public chat reactions could not be inspected.", show_alert: true });
+      }
+      return true;
+    }
+    if (action === "set-reaction") {
+      if (!extra) {
+        await ctx.answerCallbackQuery({ text: "Invalid reaction.", show_alert: true });
+        return true;
+      }
+      try {
+        const chat = await ctx.api.getChat(chatId);
+        const reactions = "available_reactions" in chat ? chat.available_reactions : undefined;
+        if (!isManualStrikeReactionAvailable(reactions, extra)) {
+          await ctx.answerCallbackQuery({ text: "That reaction is not available in this chat.", show_alert: true });
+          return true;
+        }
+        dependencies.db.updateManagedPublicChatManualStrikeConfig(chatId, { reaction: extra });
+        await ctx.answerCallbackQuery({ text: `Manual strike reaction set to ${extra}.` });
+        await this.showPublicChatSettings(ctx, chatId);
+      } catch (error) {
+        logger.warn({ chatId, err: error }, "Could not validate manual strike reaction");
+        await ctx.answerCallbackQuery({ text: "The public chat reactions could not be inspected.", show_alert: true });
+      }
       return true;
     }
     if (action?.startsWith("config-")) {

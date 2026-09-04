@@ -18,7 +18,10 @@ import type {
   EntityNotificationPublicationState,
   InstallationStateRecord,
   LanguageModerationCleanupJob,
+  LanguageModerationLearningSignal,
   LanguageModerationMessageAuthor,
+  LanguageModerationMessageFeatures,
+  LanguageModerationSignalKind,
   LanguageModerationUserState,
   LanguageModerationViolation,
   LanguageModerationViolationCleanupState,
@@ -468,6 +471,73 @@ export class SupportDatabase {
     return this.moderation.getLanguageModerationMessageAuthor(chatId, messageId);
   }
 
+  recordLanguageModerationObservation(input: {
+    chatId: number;
+    messageId: number;
+    userTelegramId: number;
+    features: { fingerprintHash: string; tokenHashes: readonly string[]; trigramHashes: readonly string[] };
+    observedAt: string;
+    expiresAt: string;
+  }): boolean {
+    return this.moderation.recordLanguageModerationObservation(input);
+  }
+
+  getLanguageModerationMessageFeatures(
+    chatId: number,
+    messageId: number
+  ): LanguageModerationMessageFeatures | undefined {
+    return this.moderation.getLanguageModerationMessageFeatures(chatId, messageId);
+  }
+
+  getLanguageModerationAdaptiveEvidence(input: {
+    chatId: number;
+    features: {
+      fingerprintHash: string;
+      tokenHashes: readonly string[];
+      trigramHashes: readonly string[];
+      families: ReadonlyArray<{ tokenHash: string; trigramHashes: readonly string[] }>;
+    };
+    activeSince: string;
+    currentTime: string;
+  }): {
+    exactOwnerConfirmed: boolean;
+    families: Array<{
+      token?: {
+        kind: LanguageModerationSignalKind;
+        seenCount: number;
+        positiveCount: number;
+        lastPositiveAt: string | null;
+      };
+      trigrams: Array<{
+        kind: LanguageModerationSignalKind;
+        seenCount: number;
+        positiveCount: number;
+        lastPositiveAt: string | null;
+      }>;
+      totalTrigramCount: number;
+    }>;
+  } {
+    return this.moderation.getLanguageModerationAdaptiveEvidence(input);
+  }
+
+  recordLanguageModerationOwnerFeedback(input: {
+    chatId: number;
+    messageId: number;
+    userTelegramId: number;
+    recordedAt: string;
+    retainUntil: string;
+  }): { feedbackRecorded: boolean; featuresAvailable: boolean } {
+    return this.moderation.recordLanguageModerationOwnerFeedback(input);
+  }
+
+  countLanguageModerationOwnerFeedback(chatId: number): number {
+    return this.moderation.countLanguageModerationOwnerFeedback(chatId);
+  }
+
+  listLanguageModerationLearningSignals(chatId: number): LanguageModerationLearningSignal[] {
+    return this.moderation.listLanguageModerationLearningSignals(chatId);
+  }
+
   upsertLanguageModerationUserState(input: Omit<LanguageModerationUserState, "updated_at">): void {
     return this.moderation.upsertLanguageModerationUserState(input);
   }
@@ -772,6 +842,10 @@ export class SupportDatabase {
 
   setManagedPublicChatModerationEnabled(chatId: number, enabled: boolean): boolean {
     return this.installation.setManagedPublicChatModerationEnabled(chatId, enabled);
+  }
+
+  updateManagedPublicChatManualStrikeConfig(chatId: number, input: { enabled?: boolean; reaction?: string }): boolean {
+    return this.installation.updateManagedPublicChatManualStrikeConfig(chatId, input);
   }
 
   recordManagedPublicChatPermissionHealth(input: {
@@ -1699,6 +1773,73 @@ export class SupportDatabase {
               message_thread_id INTEGER,
               created_at TEXT NOT NULL,
               PRIMARY KEY(chat_id, message_id)
+            );
+          `);
+        },
+      },
+      {
+        id: 24,
+        name: "add_adaptive_moderation_feedback",
+        up: () => {
+          if (this.hasTable("managed_public_chats")) {
+            this.addColumnIfMissing(
+              "managed_public_chats",
+              "manual_strikes_enabled",
+              "INTEGER NOT NULL DEFAULT 1 CHECK(manual_strikes_enabled IN (0,1))"
+            );
+            this.addColumnIfMissing("managed_public_chats", "manual_strike_reaction", "TEXT NOT NULL DEFAULT '👀'");
+          }
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS language_moderation_message_features (
+              chat_id INTEGER NOT NULL,
+              message_id INTEGER NOT NULL,
+              user_telegram_id INTEGER NOT NULL,
+              fingerprint_hash TEXT NOT NULL,
+              token_hashes_json TEXT NOT NULL,
+              trigram_hashes_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              expires_at TEXT NOT NULL,
+              PRIMARY KEY(chat_id, message_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_language_moderation_message_features_expiry
+              ON language_moderation_message_features(expires_at, chat_id, message_id);
+            CREATE INDEX IF NOT EXISTS idx_language_moderation_message_features_chat_created
+              ON language_moderation_message_features(chat_id, created_at DESC, message_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_language_moderation_message_features_fingerprint
+              ON language_moderation_message_features(chat_id, fingerprint_hash, expires_at);
+
+            CREATE TABLE IF NOT EXISTS language_moderation_owner_feedback (
+              chat_id INTEGER NOT NULL,
+              message_id INTEGER NOT NULL,
+              user_telegram_id INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY(chat_id, message_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_language_moderation_owner_feedback_created
+              ON language_moderation_owner_feedback(chat_id, created_at, message_id);
+
+            CREATE TABLE IF NOT EXISTS language_moderation_learning_signal_observations (
+              chat_id INTEGER NOT NULL,
+              message_id INTEGER NOT NULL,
+              signal_kind TEXT NOT NULL CHECK(signal_kind IN ('TOKEN','TRIGRAM')),
+              signal_hash TEXT NOT NULL,
+              observed_at TEXT NOT NULL,
+              positive INTEGER NOT NULL DEFAULT 0 CHECK(positive IN (0,1)),
+              positive_at TEXT,
+              retained_at TEXT NOT NULL,
+              PRIMARY KEY(chat_id, message_id, signal_kind, signal_hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_language_moderation_signal_observations_lookup
+              ON language_moderation_learning_signal_observations
+                (chat_id, signal_kind, signal_hash, retained_at);
+            CREATE INDEX IF NOT EXISTS idx_language_moderation_signal_observations_prune
+              ON language_moderation_learning_signal_observations
+                (chat_id, retained_at, message_id, signal_kind, signal_hash);
+
+            CREATE TABLE IF NOT EXISTS language_moderation_adaptive_maintenance (
+              chat_id INTEGER PRIMARY KEY,
+              observations_since_maintenance INTEGER NOT NULL DEFAULT 0
+                CHECK(observations_since_maintenance >= 0)
             );
           `);
         },

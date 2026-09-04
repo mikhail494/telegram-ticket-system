@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SupportDatabase } from "../src/db.js";
-import { formatPublicChatPermissionChecklist, validatePublicModerationChat } from "../src/publicChatModeration.js";
+import {
+  formatPublicChatPermissionChecklist,
+  isManualStrikeReactionAvailable,
+  manualStrikeReactionChoices,
+  validatePublicModerationChat,
+} from "../src/publicChatModeration.js";
 import { createBotHarness, TEST_BOT_IDENTITY } from "./helpers/botHarness.js";
 
 const STAFF_CHAT_ID = -100500;
@@ -245,6 +250,19 @@ test("reaction advisory reports available only when both moderation emojis are a
   } finally {
     harness.cleanup();
   }
+});
+
+test("manual strike reaction choices use standard Telegram reactions conservatively", () => {
+  assert.deepEqual(manualStrikeReactionChoices(undefined), ["👀", "👍", "👎", "❤", "🔥", "🎉", "🤔", "😡", "💩"]);
+  const available = [
+    { type: "custom_emoji" as const, custom_emoji_id: "custom" },
+    { type: "emoji" as const, emoji: "🔥" as const },
+    { type: "emoji" as const, emoji: "👍" as const },
+  ];
+  assert.deepEqual(manualStrikeReactionChoices(available), ["🔥", "👍"]);
+  assert.equal(isManualStrikeReactionAvailable(available, "🔥"), true);
+  assert.equal(isManualStrikeReactionAvailable(available, "👀"), false);
+  assert.equal(isManualStrikeReactionAvailable([], "👀"), false);
 });
 
 test("dashboard counts disabled unhealthy managed chats", () => {

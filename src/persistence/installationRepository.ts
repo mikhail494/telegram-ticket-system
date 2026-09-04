@@ -336,6 +336,21 @@ export class InstallationRepository {
     );
   }
 
+  updateManagedPublicChatManualStrikeConfig(chatId: number, input: { enabled?: boolean; reaction?: string }): boolean {
+    const reaction = input.reaction?.trim();
+    if (input.enabled === undefined && !reaction) return false;
+    return (
+      this.db
+        .prepare(
+          `UPDATE managed_public_chats
+          SET manual_strikes_enabled = COALESCE(?, manual_strikes_enabled),
+              manual_strike_reaction = COALESCE(?, manual_strike_reaction), updated_at = ?
+          WHERE chat_id = ? AND active = 1`
+        )
+        .run(input.enabled === undefined ? null : input.enabled ? 1 : 0, reaction || null, now(), chatId).changes === 1
+    );
+  }
+
   recordManagedPublicChatPermissionHealth(input: {
     chatId: number;
     healthy: boolean;

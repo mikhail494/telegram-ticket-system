@@ -216,6 +216,7 @@ describe("language moderation classifier", () => {
 
   it("detects short Indonesian and Malay chat only with distinctive or corroborated signals", () => {
     for (const value of [
+      "bang, lu prnah wd ga dri agenton?",
       "ngapain lu disini",
       "belum dapet",
       "ngapain disini",
@@ -228,5 +229,21 @@ describe("language moderation classifier", () => {
       assert.equal(classifyModerationLanguage(value), "non_english", value);
       assert.equal(classifyEnglishOnlyMessage(value), "violation", value);
     }
+  });
+
+  it("normalizes corroborated Indonesian chat abbreviations without promoting generic tokens", () => {
+    for (const value of ["bang prnah dri", "bang pernah dari"]) {
+      assert.equal(classifyModerationLanguage(value), "non_english", value);
+      assert.equal(classifyEnglishOnlyMessage(value), "violation", value);
+    }
+    for (const value of ["wd", "bang", "wd pending", "bang bro"]) {
+      assert.notEqual(classifyModerationLanguage(value), "non_english", value);
+      assert.equal(classifyEnglishOnlyMessage(value), "ignored", value);
+    }
+  });
+
+  it("uses the recall-first 24-letter and 5-word franc path only with strong short-sample evidence", () => {
+    assert.equal(classifyModerationLanguage("Por favor necesito ayuda ahora mismo"), "non_english");
+    assert.equal(classifyEnglishOnlyMessage("Hello Dev, do you need chatter service?"), "ignored");
   });
 });

@@ -120,6 +120,8 @@ function reactionUpdate(
     oldEyes?: boolean;
     newEyes?: boolean;
     extraEmoji?: boolean;
+    reaction?: "👀" | "🔥" | "👍";
+    oldReaction?: "👀" | "🔥" | "👍";
   } = {}
 ): Update {
   const chatId = options.chatId ?? PUBLIC_CHAT_A;
@@ -127,9 +129,11 @@ function reactionUpdate(
     options.chatType === "private"
       ? { id: chatId, type: "private" as const, first_name: "Private" }
       : { id: chatId, type: "supergroup" as const, title: "Synthetic Community" };
-  const oldReaction = options.oldEyes ? [{ type: "emoji" as const, emoji: "👀" as const }] : [];
+  const trigger = options.reaction ?? "👀";
+  const previous = options.oldReaction ?? (options.oldEyes ? "👀" : undefined);
+  const oldReaction = previous ? [{ type: "emoji" as const, emoji: previous }] : [];
   const newReaction = [
-    ...(options.newEyes === false ? [] : [{ type: "emoji" as const, emoji: "👀" as const }]),
+    ...(options.newEyes === false ? [] : [{ type: "emoji" as const, emoji: trigger }]),
     ...(options.extraEmoji ? [{ type: "emoji" as const, emoji: "🔥" as const }] : []),
   ];
   return {
@@ -192,6 +196,50 @@ describe("OWNER manual moderation reaction", () => {
         "username",
       ]);
     }
+    assert.ok(harness.db.getLanguageModerationMessageFeatures(PUBLIC_CHAT_A, 82));
+    assert.ok(harness.db.getLanguageModerationMessageFeatures(PUBLIC_CHAT_A, 83));
+    assert.equal(harness.db.getLanguageModerationMessageFeatures(PUBLIC_CHAT_A, 84), undefined);
+    assert.equal(harness.db.getLanguageModerationMessageFeatures(PUBLIC_CHAT_A, 85), undefined);
+  });
+
+  it("honors per-chat manual strike enablement and configurable reactions", async () => {
+    const { harness } = createHarness();
+    harness.db.updateManagedPublicChatManualStrikeConfig(PUBLIC_CHAT_A, { enabled: false });
+    await harness.bot.handleUpdate(publicMessage(89));
+    await harness.bot.handleUpdate(reactionUpdate(9089, 89));
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_A, USER_ID), undefined);
+    assert.equal(harness.db.countLanguageModerationOwnerFeedback(PUBLIC_CHAT_A), 0);
+
+    harness.db.updateManagedPublicChatManualStrikeConfig(PUBLIC_CHAT_A, { enabled: true, reaction: "🔥" });
+    await harness.bot.handleUpdate(publicMessage(90));
+    await harness.bot.handleUpdate(reactionUpdate(9090, 90));
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_A, USER_ID), undefined);
+    await harness.bot.handleUpdate(reactionUpdate(9091, 90, { actorId: 42, reaction: "🔥" }));
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_A, USER_ID), undefined);
+    await harness.bot.handleUpdate(reactionUpdate(9092, 90, { reaction: "🔥" }));
+    await harness.bot.handleUpdate(reactionUpdate(9093, 90, { reaction: "🔥" }));
+    await harness.bot.handleUpdate(reactionUpdate(9094, 90, { oldReaction: "🔥", newEyes: false, reaction: "🔥" }));
+    await harness.bot.handleUpdate(reactionUpdate(9095, 90, { reaction: "🔥" }));
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_A, USER_ID)?.current_strikes, 1);
+    assert.equal(harness.db.countLanguageModerationOwnerFeedback(PUBLIC_CHAT_A), 1);
+
+    await harness.bot.handleUpdate(publicMessage(91, { chatId: PUBLIC_CHAT_B }));
+    await harness.bot.handleUpdate(reactionUpdate(9096, 91, { chatId: PUBLIC_CHAT_B }));
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_B, USER_ID)?.current_strikes, 1);
+  });
+
+  it("learns exact OWNER-confirmed uncertain text only inside the originating chat", async () => {
+    const { harness } = createHarness();
+    const text = "zorpa velin qumra";
+    await harness.bot.handleUpdate(publicMessage(92, { text }));
+    await harness.bot.handleUpdate(reactionUpdate(9093, 92));
+
+    await harness.bot.handleUpdate(publicMessage(93, { text }));
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_A, USER_ID)?.current_strikes, 2);
+    assert.equal(harness.db.listLanguageModerationViolations(PUBLIC_CHAT_A, "1970-01-01T00:00:00.000Z").length, 2);
+
+    await harness.bot.handleUpdate(publicMessage(94, { chatId: PUBLIC_CHAT_B, text }));
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_B, USER_ID), undefined);
   });
 
   it("lets OWNER manually strike a media-only message", async () => {
@@ -249,8 +297,13 @@ describe("OWNER manual moderation reaction", () => {
   it("uses the existing 0 to 1 to 2 to sanction ladder and cleanup cycle", async () => {
     const { harness } = createHarness();
 
-    for (const messageId of [130, 131, 132]) {
-      await harness.bot.handleUpdate(publicMessage(messageId));
+    const messages = [
+      [130, "alpha bravo charlie delta"],
+      [131, "echo foxtrot golf hotel"],
+      [132, "india juliet kilo lima"],
+    ] as const;
+    for (const [messageId, text] of messages) {
+      await harness.bot.handleUpdate(publicMessage(messageId, { text }));
       await harness.bot.handleUpdate(reactionUpdate(9200 + messageId, messageId));
     }
 
@@ -340,6 +393,7 @@ describe("OWNER manual moderation reaction", () => {
     await harness.bot.handleUpdate(reactionUpdate(9142, 140, { oldEyes: true, newEyes: false }));
     await harness.bot.handleUpdate(reactionUpdate(9143, 140));
     assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_A, USER_ID)?.current_strikes, 1);
+    assert.equal(harness.db.countLanguageModerationOwnerFeedback(PUBLIC_CHAT_A), 1);
 
     const otherUserId = 502;
     await harness.bot.handleUpdate(publicMessage(141, { userId: otherUserId, text: "привет как твои дела сегодня" }));
@@ -373,6 +427,7 @@ describe("OWNER manual moderation reaction", () => {
 
     assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_A, USER_ID)?.current_strikes, 1);
     assert.equal(harness.db.listLanguageModerationViolations(PUBLIC_CHAT_A, "1970-01-01T00:00:00.000Z").length, 1);
+    assert.equal(harness.db.countLanguageModerationOwnerFeedback(PUBLIC_CHAT_A), 1);
   });
 
   it("does not reuse a historical violation from a completed sanction cycle", async () => {
@@ -421,6 +476,7 @@ describe("OWNER manual moderation reaction", () => {
     assert.equal(harness.db.getLanguageModerationMessageAuthor(-100799, 151), undefined);
     assert.equal(harness.db.getLanguageModerationMessageAuthor(-100703, 152), undefined);
     assert.equal(harness.countApiCalls("restrictChatMember"), 0);
+    assert.equal(harness.db.countLanguageModerationOwnerFeedback(PUBLIC_CHAT_A), 0);
   });
 
   it("keeps identical message ids isolated between managed public chats", async () => {

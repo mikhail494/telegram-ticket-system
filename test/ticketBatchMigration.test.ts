@@ -81,7 +81,7 @@ it("upgrades a v1.2.1 ticket batch schema through the current migrations without
     const ticketColumns = inspected.prepare("PRAGMA table_info(tickets)").all() as Array<{ name: string }>;
     assert.deepEqual(
       migrationIds.map((row) => row.id),
-      Array.from({ length: 23 }, (_, index) => index + 1)
+      Array.from({ length: 24 }, (_, index) => index + 1)
     );
     assert.ok(
       inspected.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'installation_state'").get()

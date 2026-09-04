@@ -38,6 +38,8 @@ export interface ManagedPublicChatRecord {
   active: number;
   imported_from_legacy: number;
   moderation_enabled: number;
+  manual_strikes_enabled: number;
+  manual_strike_reaction: string;
   warning_text: string;
   allowlist_json: string;
   warning_cooldown_minutes: number;
@@ -381,6 +383,30 @@ export interface LanguageModerationMessageAuthor {
   username: string | null;
   message_thread_id: number | null;
   created_at: string;
+}
+
+export interface LanguageModerationMessageFeatures {
+  chat_id: number;
+  message_id: number;
+  user_telegram_id: number;
+  fingerprint_hash: string;
+  token_hashes_json: string;
+  trigram_hashes_json: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export type LanguageModerationSignalKind = "TOKEN" | "TRIGRAM";
+
+export interface LanguageModerationLearningSignal {
+  chat_id: number;
+  signal_kind: LanguageModerationSignalKind;
+  signal_hash: string;
+  seen_count: number;
+  positive_count: number;
+  first_observed_at: string;
+  last_seen_at: string;
+  last_positive_at: string | null;
 }
 
 export interface LanguageModerationViolation {

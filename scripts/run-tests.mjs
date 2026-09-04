@@ -17,5 +17,9 @@ const files = findTests("test");
 if (files.length === 0) throw new Error("No TypeScript test files found under test/.");
 
 const args = [require.resolve("tsx/cli"), "--test", ...files];
-const result = spawnSync(process.execPath, args, { stdio: "inherit" });
+const env = {
+  ...process.env,
+  BOT_TOKEN: process.env.BOT_TOKEN ?? "123456:TEST_BOT_TOKEN",
+};
+const result = spawnSync(process.execPath, args, { stdio: "inherit", env });
 process.exit(result.status ?? 1);
