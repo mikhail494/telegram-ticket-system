@@ -1,13 +1,31 @@
 import Database from "better-sqlite3";
+import {
+  ADAPTIVE_LEARNING_HORIZON_MS,
+  ADAPTIVE_STORAGE_MAINTENANCE_INTERVAL,
+  MAX_ADAPTIVE_MESSAGE_FEATURES_PER_CHAT,
+  MAX_ADAPTIVE_SIGNAL_OBSERVATIONS_PER_CHAT,
+  MAX_ADAPTIVE_TOKEN_FEATURES,
+  MAX_ADAPTIVE_TRIGRAM_FEATURES,
+} from "../adaptiveModerationPolicy.js";
 import { now } from "./helpers.js";
 import type {
   LanguageModerationCleanupJob,
+  LanguageModerationLearningSignal,
   LanguageModerationMessageAuthor,
+  LanguageModerationMessageFeatures,
+  LanguageModerationSignalKind,
   LanguageModerationUserState,
   LanguageModerationViolation,
   LanguageModerationViolationCleanupState,
   LanguageModerationWarningState,
 } from "./types.js";
+
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const SIGNAL_CHUNK_SIZE = 50;
+const PRUNE_BATCH_SIZE = 100;
+const STORAGE_CAP_PRUNE_BATCH_SIZE = 8_192;
+const MAX_OWNER_FEEDBACK_PER_CHAT = 500;
+
 export class ModerationRepository {
   constructor(private readonly db: Database.Database) {}
   addLanguageModerationMessageAuthor(input: {
@@ -38,6 +56,189 @@ export class ModerationRepository {
     return this.db
       .prepare("SELECT * FROM language_moderation_message_authors WHERE chat_id = ? AND message_id = ?")
       .get(chatId, messageId) as LanguageModerationMessageAuthor | undefined;
+  }
+
+  recordLanguageModerationObservation(input: {
+    chatId: number;
+    messageId: number;
+    userTelegramId: number;
+    features: { fingerprintHash: string; tokenHashes: readonly string[]; trigramHashes: readonly string[] };
+    observedAt: string;
+    expiresAt: string;
+  }): boolean {
+    const fingerprintHash = normalizeHash(input.features.fingerprintHash);
+    if (!fingerprintHash) return false;
+    const tokenHashes = normalizeHashes(input.features.tokenHashes, MAX_ADAPTIVE_TOKEN_FEATURES);
+    const trigramHashes = normalizeHashes(input.features.trigramHashes, MAX_ADAPTIVE_TRIGRAM_FEATURES);
+    const learningActiveSince = new Date(Date.parse(input.observedAt) - ADAPTIVE_LEARNING_HORIZON_MS).toISOString();
+    const transaction = this.db.transaction(() => {
+      this.pruneExpiredAdaptiveData(input.chatId, input.observedAt, learningActiveSince);
+      const inserted = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO language_moderation_message_features
+          (chat_id, message_id, user_telegram_id, fingerprint_hash, token_hashes_json, trigram_hashes_json, created_at, expires_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          input.chatId,
+          input.messageId,
+          input.userTelegramId,
+          fingerprintHash,
+          JSON.stringify(tokenHashes),
+          JSON.stringify(trigramHashes),
+          input.observedAt,
+          input.expiresAt
+        ).changes;
+      if (inserted !== 1) return false;
+      this.insertSignalObservations(input.chatId, input.messageId, "TOKEN", tokenHashes, input.observedAt);
+      this.insertSignalObservations(input.chatId, input.messageId, "TRIGRAM", trigramHashes, input.observedAt);
+      if (this.advanceAdaptiveMaintenanceCounter(input.chatId)) this.enforceAdaptiveStorageCaps(input.chatId);
+      return true;
+    });
+    return transaction();
+  }
+
+  getLanguageModerationMessageFeatures(
+    chatId: number,
+    messageId: number
+  ): LanguageModerationMessageFeatures | undefined {
+    return this.db
+      .prepare("SELECT * FROM language_moderation_message_features WHERE chat_id = ? AND message_id = ?")
+      .get(chatId, messageId) as LanguageModerationMessageFeatures | undefined;
+  }
+
+  getLanguageModerationAdaptiveEvidence(input: {
+    chatId: number;
+    features: {
+      fingerprintHash: string;
+      tokenHashes: readonly string[];
+      trigramHashes: readonly string[];
+      families: ReadonlyArray<{ tokenHash: string; trigramHashes: readonly string[] }>;
+    };
+    activeSince: string;
+    currentTime: string;
+  }): {
+    exactOwnerConfirmed: boolean;
+    families: Array<{
+      token?: {
+        kind: LanguageModerationSignalKind;
+        seenCount: number;
+        positiveCount: number;
+        lastPositiveAt: string | null;
+      };
+      trigrams: Array<{
+        kind: LanguageModerationSignalKind;
+        seenCount: number;
+        positiveCount: number;
+        lastPositiveAt: string | null;
+      }>;
+      totalTrigramCount: number;
+    }>;
+  } {
+    const fingerprintHash = normalizeHash(input.features.fingerprintHash);
+    const exactOwnerConfirmed = Boolean(
+      fingerprintHash &&
+      this.db
+        .prepare(
+          `SELECT 1 FROM language_moderation_owner_feedback feedback
+          JOIN language_moderation_message_features features
+            ON features.chat_id = feedback.chat_id AND features.message_id = feedback.message_id
+          WHERE feedback.chat_id = ? AND features.fingerprint_hash = ?
+            AND feedback.created_at >= ? AND features.expires_at > ? LIMIT 1`
+        )
+        .get(input.chatId, fingerprintHash, input.activeSince, input.currentTime)
+    );
+    const tokenRows = this.selectLearningSignals(
+      input.chatId,
+      "TOKEN",
+      normalizeHashes(input.features.tokenHashes, MAX_ADAPTIVE_TOKEN_FEATURES),
+      input.activeSince
+    );
+    const trigramRows = this.selectLearningSignals(
+      input.chatId,
+      "TRIGRAM",
+      normalizeHashes(input.features.trigramHashes, MAX_ADAPTIVE_TRIGRAM_FEATURES),
+      input.activeSince
+    );
+    const tokenEvidence = new Map(tokenRows.map((row) => [row.signal_hash, learningSignalEvidence(row)]));
+    const trigramEvidence = new Map(trigramRows.map((row) => [row.signal_hash, learningSignalEvidence(row)]));
+    return {
+      exactOwnerConfirmed,
+      families: input.features.families
+        .map((family) => {
+          const tokenHash = normalizeHash(family.tokenHash);
+          const trigramHashes = normalizeHashes(family.trigramHashes, MAX_ADAPTIVE_TRIGRAM_FEATURES);
+          return {
+            token: tokenHash ? tokenEvidence.get(tokenHash) : undefined,
+            trigrams: trigramHashes
+              .map((hash) => trigramEvidence.get(hash))
+              .filter((signal): signal is NonNullable<typeof signal> => signal !== undefined),
+            totalTrigramCount: trigramHashes.length,
+          };
+        })
+        .filter((family) => family.token !== undefined || family.totalTrigramCount > 0),
+    };
+  }
+
+  recordLanguageModerationOwnerFeedback(input: {
+    chatId: number;
+    messageId: number;
+    userTelegramId: number;
+    recordedAt: string;
+    retainUntil: string;
+  }): { feedbackRecorded: boolean; featuresAvailable: boolean } {
+    const transaction = this.db.transaction(() => {
+      const features = this.getLanguageModerationMessageFeatures(input.chatId, input.messageId);
+      const featuresAvailable =
+        features?.user_telegram_id === input.userTelegramId && features.expires_at > input.recordedAt;
+      const inserted = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO language_moderation_owner_feedback
+          (chat_id, message_id, user_telegram_id, created_at) VALUES (?, ?, ?, ?)`
+        )
+        .run(input.chatId, input.messageId, input.userTelegramId, input.recordedAt).changes;
+      if (inserted !== 1) return { feedbackRecorded: false, featuresAvailable };
+      if (featuresAvailable && features) {
+        this.db
+          .prepare(
+            `UPDATE language_moderation_message_features
+            SET expires_at = CASE WHEN expires_at < ? THEN ? ELSE expires_at END
+            WHERE chat_id = ? AND message_id = ?`
+          )
+          .run(input.retainUntil, input.retainUntil, input.chatId, input.messageId);
+        this.markSignalObservationsPositive(input.chatId, input.messageId, input.recordedAt);
+      }
+      this.enforceOwnerFeedbackCap(input.chatId);
+      return { feedbackRecorded: true, featuresAvailable };
+    });
+    return transaction();
+  }
+
+  countLanguageModerationOwnerFeedback(chatId: number): number {
+    return (
+      this.db
+        .prepare("SELECT COUNT(*) AS count FROM language_moderation_owner_feedback WHERE chat_id = ?")
+        .get(chatId) as {
+        count: number;
+      }
+    ).count;
+  }
+
+  listLanguageModerationLearningSignals(chatId: number): LanguageModerationLearningSignal[] {
+    return this.db
+      .prepare(
+        `SELECT chat_id, signal_kind, signal_hash,
+                COUNT(*) AS seen_count,
+                SUM(positive) AS positive_count,
+                MIN(observed_at) AS first_observed_at,
+                MAX(observed_at) AS last_seen_at,
+                MAX(positive_at) AS last_positive_at
+         FROM language_moderation_learning_signal_observations
+         WHERE chat_id = ?
+         GROUP BY chat_id, signal_kind, signal_hash
+         ORDER BY signal_kind, signal_hash`
+      )
+      .all(chatId) as LanguageModerationLearningSignal[];
   }
 
   getLanguageModerationUserState(chatId: number, userId: number): LanguageModerationUserState | undefined {
@@ -338,4 +539,206 @@ export class ModerationRepository {
       .prepare("UPDATE language_moderation_cleanup_jobs SET state = ?, updated_at = ? WHERE id = ?")
       .run(state, now(), id);
   }
+
+  private insertSignalObservations(
+    chatId: number,
+    messageId: number,
+    kind: LanguageModerationSignalKind,
+    hashes: readonly string[],
+    observedAt: string
+  ): void {
+    for (const hashChunk of chunks(hashes, SIGNAL_CHUNK_SIZE)) {
+      const values = hashChunk.map(() => "(?, ?, ?, ?, ?, 0, NULL, ?)").join(", ");
+      const parameters = hashChunk.flatMap((hash) => [chatId, messageId, kind, hash, observedAt, observedAt]);
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO language_moderation_learning_signal_observations
+          (chat_id, message_id, signal_kind, signal_hash, observed_at, positive, positive_at, retained_at)
+          VALUES ${values}`
+        )
+        .run(...parameters);
+    }
+  }
+
+  private markSignalObservationsPositive(chatId: number, messageId: number, recordedAt: string): void {
+    this.db
+      .prepare(
+        `UPDATE language_moderation_learning_signal_observations
+         SET positive = 1, positive_at = ?, retained_at = ?
+         WHERE chat_id = ? AND message_id = ? AND positive = 0`
+      )
+      .run(recordedAt, recordedAt, chatId, messageId);
+  }
+
+  private selectLearningSignals(
+    chatId: number,
+    kind: LanguageModerationSignalKind,
+    hashes: readonly string[],
+    activeSince: string
+  ): LanguageModerationLearningSignal[] {
+    const rows: LanguageModerationLearningSignal[] = [];
+    for (const hashChunk of chunks(hashes, SIGNAL_CHUNK_SIZE)) {
+      const placeholders = hashChunk.map(() => "?").join(", ");
+      rows.push(
+        ...(this.db
+          .prepare(
+            `SELECT chat_id, signal_kind, signal_hash,
+                    COUNT(*) AS seen_count,
+                    SUM(positive) AS positive_count,
+                    MIN(observed_at) AS first_observed_at,
+                    MAX(observed_at) AS last_seen_at,
+                    MAX(positive_at) AS last_positive_at
+             FROM language_moderation_learning_signal_observations
+             WHERE chat_id = ? AND signal_kind = ? AND retained_at >= ?
+               AND signal_hash IN (${placeholders})
+             GROUP BY chat_id, signal_kind, signal_hash`
+          )
+          .all(chatId, kind, activeSince, ...hashChunk) as LanguageModerationLearningSignal[])
+      );
+    }
+    return rows;
+  }
+
+  private pruneExpiredAdaptiveData(chatId: number, currentTime: string, learningActiveSince: string): void {
+    this.db
+      .prepare(
+        `DELETE FROM language_moderation_message_features WHERE rowid IN (
+          SELECT rowid FROM language_moderation_message_features
+          WHERE expires_at <= ? ORDER BY expires_at, chat_id, message_id LIMIT ?
+        )`
+      )
+      .run(currentTime, PRUNE_BATCH_SIZE);
+    this.db
+      .prepare(
+        `DELETE FROM language_moderation_learning_signal_observations WHERE rowid IN (
+          SELECT rowid FROM language_moderation_learning_signal_observations
+          WHERE chat_id = ? AND retained_at < ?
+          ORDER BY retained_at, message_id, signal_kind, signal_hash LIMIT ?
+        )`
+      )
+      .run(chatId, learningActiveSince, PRUNE_BATCH_SIZE);
+    this.pruneOwnerFeedback(chatId, learningActiveSince);
+  }
+
+  private pruneOwnerFeedback(chatId: number, activeSince: string): void {
+    this.db
+      .prepare(
+        `DELETE FROM language_moderation_owner_feedback WHERE rowid IN (
+          SELECT rowid FROM language_moderation_owner_feedback
+          WHERE chat_id = ? AND created_at < ? LIMIT ?
+        )`
+      )
+      .run(chatId, activeSince, PRUNE_BATCH_SIZE);
+  }
+
+  private enforceAdaptiveStorageCaps(chatId: number): void {
+    const featureExcess = Math.min(
+      STORAGE_CAP_PRUNE_BATCH_SIZE,
+      Math.max(
+        0,
+        this.countRowsForChat("language_moderation_message_features", chatId) - MAX_ADAPTIVE_MESSAGE_FEATURES_PER_CHAT
+      )
+    );
+    if (featureExcess > 0)
+      this.db
+        .prepare(
+          `DELETE FROM language_moderation_message_features WHERE rowid IN (
+            SELECT rowid FROM language_moderation_message_features WHERE chat_id = ?
+            ORDER BY created_at, message_id LIMIT ?
+          )`
+        )
+        .run(chatId, featureExcess);
+
+    const observationExcess = Math.min(
+      STORAGE_CAP_PRUNE_BATCH_SIZE,
+      Math.max(
+        0,
+        this.countRowsForChat("language_moderation_learning_signal_observations", chatId) -
+          MAX_ADAPTIVE_SIGNAL_OBSERVATIONS_PER_CHAT
+      )
+    );
+    if (observationExcess > 0)
+      this.db
+        .prepare(
+          `DELETE FROM language_moderation_learning_signal_observations WHERE rowid IN (
+            SELECT rowid FROM language_moderation_learning_signal_observations WHERE chat_id = ?
+            ORDER BY retained_at, message_id, signal_kind, signal_hash LIMIT ?
+          )`
+        )
+        .run(chatId, observationExcess);
+  }
+
+  private advanceAdaptiveMaintenanceCounter(chatId: number): boolean {
+    this.db
+      .prepare(
+        `INSERT INTO language_moderation_adaptive_maintenance (chat_id, observations_since_maintenance)
+         VALUES (?, 1)
+         ON CONFLICT(chat_id) DO UPDATE SET
+           observations_since_maintenance = observations_since_maintenance + 1`
+      )
+      .run(chatId);
+    const count = (
+      this.db
+        .prepare(
+          "SELECT observations_since_maintenance AS count FROM language_moderation_adaptive_maintenance WHERE chat_id = ?"
+        )
+        .get(chatId) as { count: number }
+    ).count;
+    if (count < ADAPTIVE_STORAGE_MAINTENANCE_INTERVAL) return false;
+    this.db
+      .prepare(
+        "UPDATE language_moderation_adaptive_maintenance SET observations_since_maintenance = 0 WHERE chat_id = ?"
+      )
+      .run(chatId);
+    return true;
+  }
+
+  private countRowsForChat(table: string, chatId: number): number {
+    return (
+      this.db.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE chat_id = ?`).get(chatId) as { count: number }
+    ).count;
+  }
+
+  private enforceOwnerFeedbackCap(chatId: number): void {
+    this.db
+      .prepare(
+        `DELETE FROM language_moderation_owner_feedback WHERE rowid IN (
+          SELECT rowid FROM language_moderation_owner_feedback WHERE chat_id = ?
+          ORDER BY created_at DESC, message_id DESC LIMIT ? OFFSET ?
+        )`
+      )
+      .run(chatId, PRUNE_BATCH_SIZE, MAX_OWNER_FEEDBACK_PER_CHAT);
+  }
+}
+
+function normalizeHash(value: string): string | undefined {
+  const normalized = value.toLowerCase();
+  return SHA256_PATTERN.test(normalized) ? normalized : undefined;
+}
+
+function normalizeHashes(values: readonly string[], limit: number): string[] {
+  return [...new Set(values.map(normalizeHash).filter((value): value is string => value !== undefined))].slice(
+    0,
+    limit
+  );
+}
+
+function learningSignalEvidence(signal: LanguageModerationLearningSignal): {
+  kind: LanguageModerationSignalKind;
+  seenCount: number;
+  positiveCount: number;
+  lastPositiveAt: string | null;
+} {
+  return {
+    kind: signal.signal_kind,
+    seenCount: signal.seen_count,
+    positiveCount: signal.positive_count,
+    lastPositiveAt: signal.last_positive_at,
+  };
+}
+
+function chunks<T>(values: readonly T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size) result.push(values.slice(index, index + size));
+  return result;
 }

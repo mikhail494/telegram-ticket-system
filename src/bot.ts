@@ -59,7 +59,10 @@ import {
 } from "./ticketBatch.js";
 import { displayTelegramUser, getMessageContent, isCommandText, usernameOf } from "./telegram.js";
 import {
+  ADAPTIVE_LEARNING_HORIZON_MS,
+  ADAPTIVE_MESSAGE_FEATURE_TTL_MS,
   classifyEnglishOnlyMessage,
+  extractAdaptiveModerationFeatures,
   parseModerationConfig,
   scheduleModerationCleanup,
   type ModerationCleanupScheduler,
@@ -2480,20 +2483,25 @@ export function createBot(
     const reaction = ctx.messageReaction;
     const actor = reaction.user;
     const owner = installation.getOwner();
+    const managed = db.getManagedPublicChat(reaction.chat.id, true);
+    const triggerReaction = managed?.manual_strike_reaction;
     if (
       !actor ||
       reaction.actor_chat ||
       actor.is_bot ||
       !owner ||
       owner.userTelegramId !== actor.id ||
-      hasEmojiReaction(reaction.old_reaction, MODERATION_STRIKE_REACTION) ||
-      !hasEmojiReaction(reaction.new_reaction, MODERATION_STRIKE_REACTION)
+      !managed ||
+      managed.active !== 1 ||
+      managed.moderation_enabled !== 1 ||
+      managed.manual_strikes_enabled !== 1 ||
+      reaction.chat.id === config.staffChatId ||
+      !triggerReaction ||
+      hasEmojiReaction(reaction.old_reaction, triggerReaction) ||
+      !hasEmojiReaction(reaction.new_reaction, triggerReaction)
     )
       return;
 
-    const moderation = moderationConfigForChat(db, reaction.chat.id);
-    if (!moderation.enabled || moderation.targetChatId !== reaction.chat.id || reaction.chat.id === config.staffChatId)
-      return;
     const author = db.getLanguageModerationMessageAuthor(reaction.chat.id, reaction.message_id);
     if (!author) {
       logger.debug(
@@ -2501,6 +2509,21 @@ export function createBot(
         "Manual moderation reaction has no stored message author"
       );
       return;
+    }
+
+    const feedbackTime = moderationNow();
+    const feedback = db.recordLanguageModerationOwnerFeedback({
+      chatId: reaction.chat.id,
+      messageId: reaction.message_id,
+      userTelegramId: author.user_telegram_id,
+      recordedAt: feedbackTime.toISOString(),
+      retainUntil: new Date(feedbackTime.getTime() + ADAPTIVE_LEARNING_HORIZON_MS).toISOString(),
+    });
+    if (feedback.feedbackRecorded && !feedback.featuresAvailable) {
+      logger.debug(
+        { chatId: reaction.chat.id, messageId: reaction.message_id, targetUserId: author.user_telegram_id },
+        "Manual moderation feedback has no stored adaptive features"
+      );
     }
 
     const state = db.getLanguageModerationUserState(reaction.chat.id, author.user_telegram_id) ?? {
@@ -2523,10 +2546,23 @@ export function createBot(
         author.user_telegram_id,
         state
       )
-    )
+    ) {
+      if (feedback.feedbackRecorded) {
+        logger.info(
+          {
+            chatId: reaction.chat.id,
+            messageId: reaction.message_id,
+            targetUserId: author.user_telegram_id,
+            targetUsername: author.username,
+            triggerReaction,
+          },
+          "Manual moderation feedback recorded without another strike"
+        );
+      }
       return;
+    }
 
-    await advanceModerationStrike({
+    const outcome = await advanceModerationStrike({
       db,
       api: ctx.api,
       chatId: reaction.chat.id,
@@ -2539,6 +2575,21 @@ export function createBot(
       cleanupScheduler: moderationCleanupScheduler,
       setStrikeReaction: false,
     });
+    if (outcome) {
+      logger.info(
+        {
+          chatId: reaction.chat.id,
+          messageId: reaction.message_id,
+          targetUserId: author.user_telegram_id,
+          targetUsername: author.username,
+          currentStrikes: outcome.currentStrikes,
+          sanctionTier: outcome.sanctionTier,
+          triggerReaction,
+          feedbackRecorded: feedback.feedbackRecorded,
+        },
+        "Manual moderation strike applied"
+      );
+    }
   });
 
   bot.on("message", async (ctx) => {
@@ -4828,7 +4879,27 @@ async function handlePublicLanguageModeration(
     pendingWarningDueAt: chatState?.pending_warning_due_at ?? null,
     pendingWarningStartedAt: chatState?.pending_warning_started_at ?? null,
   });
-  if (!content || isCommandText(content) || classifyEnglishOnlyMessage(content, moderation.allowlist) !== "violation")
+  if (!content || isCommandText(content)) return;
+  const classificationTime = now();
+  const adaptiveFeatures = extractAdaptiveModerationFeatures(content, moderation.allowlist);
+  let adaptiveEvidence;
+  if (adaptiveFeatures && isOrdinaryUserModerationTarget(ctx.message, ctx.from)) {
+    db.recordLanguageModerationObservation({
+      chatId: ctx.chat.id,
+      messageId: ctx.message.message_id,
+      userTelegramId: ctx.from.id,
+      features: adaptiveFeatures,
+      observedAt: classificationTime.toISOString(),
+      expiresAt: new Date(classificationTime.getTime() + ADAPTIVE_MESSAGE_FEATURE_TTL_MS).toISOString(),
+    });
+    adaptiveEvidence = db.getLanguageModerationAdaptiveEvidence({
+      chatId: ctx.chat.id,
+      features: adaptiveFeatures,
+      activeSince: new Date(classificationTime.getTime() - ADAPTIVE_LEARNING_HORIZON_MS).toISOString(),
+      currentTime: classificationTime.toISOString(),
+    });
+  }
+  if (classifyEnglishOnlyMessage(content, moderation.allowlist, adaptiveEvidence, classificationTime) !== "violation")
     return;
 
   const state = db.getLanguageModerationUserState(ctx.chat.id, ctx.from.id) ?? {
@@ -4934,13 +5005,14 @@ async function advanceModerationStrike(input: {
   cleanupScheduler: ModerationCleanupScheduler;
   setStrikeReaction: boolean;
   strikeTime?: Date;
-}): Promise<void> {
+}): Promise<{ currentStrikes: number; sanctionTier: number } | undefined> {
   if (input.state.current_strikes < 2) {
+    const currentStrikes = input.state.current_strikes + 1;
     input.db.upsertLanguageModerationUserState({
       chat_id: input.chatId,
       user_telegram_id: input.userId,
       username: input.username,
-      current_strikes: input.state.current_strikes + 1,
+      current_strikes: currentStrikes,
       sanction_tier: input.state.sanction_tier,
       first_strike_at:
         input.state.current_strikes === 0
@@ -4950,7 +5022,7 @@ async function advanceModerationStrike(input: {
     if (input.setStrikeReaction) {
       await setModerationReaction(input.api, input.chatId, input.messageId, MODERATION_STRIKE_REACTION);
     }
-    return;
+    return { currentStrikes, sanctionTier: input.state.sanction_tier };
   }
 
   const tier = Math.min(input.state.sanction_tier, 2);
@@ -4992,6 +5064,7 @@ async function advanceModerationStrike(input: {
       cleanup_due_at: new Date(input.now().getTime() + 10_000).toISOString(),
     });
     input.cleanupScheduler(input.api, input.db, cleanupJobId);
+    return { currentStrikes: 0, sanctionTier: nextTier };
   } catch (error) {
     const managed = input.db.getManagedPublicChat(input.chatId);
     if (managed) {
@@ -5011,7 +5084,7 @@ async function advanceModerationStrike(input: {
   }
 }
 
-function hasEmojiReaction(reactions: readonly ReactionType[], emoji: ModerationReactionEmoji): boolean {
+function hasEmojiReaction(reactions: readonly ReactionType[], emoji: string): boolean {
   return reactions.some((reaction) => reaction.type === "emoji" && reaction.emoji === emoji);
 }
 

@@ -2,6 +2,22 @@ import { normalizeTelegramDeliveryError } from "./deliveryDiagnostics.js";
 import { logger } from "./logger.js";
 import type { BackgroundTaskTracker } from "./lifecycle.js";
 import { francAll } from "franc-min";
+import { createHash } from "node:crypto";
+import {
+  ADAPTIVE_LEARNING_HORIZON_MS,
+  ADAPTIVE_MESSAGE_FEATURE_TTL_MS,
+  MAX_ADAPTIVE_FINGERPRINT_TOKENS,
+  MAX_ADAPTIVE_TOKEN_FEATURES,
+  MAX_ADAPTIVE_TOKEN_LENGTH,
+  MAX_ADAPTIVE_TRIGRAM_FEATURES,
+} from "./adaptiveModerationPolicy.js";
+
+export {
+  ADAPTIVE_LEARNING_HORIZON_MS,
+  ADAPTIVE_MESSAGE_FEATURE_TTL_MS,
+  MAX_ADAPTIVE_TOKEN_FEATURES,
+  MAX_ADAPTIVE_TRIGRAM_FEATURES,
+} from "./adaptiveModerationPolicy.js";
 
 export const DEFAULT_MODERATION_WARNING =
   "Please use English in the main chat. Further violations may be reviewed by an authorized moderator under the current community policy.";
@@ -19,11 +35,34 @@ export interface LanguageModerationConfig {
 export type LanguageClassification = "violation" | "ignored";
 export type ModerationLanguage = "english" | "non_english" | "uncertain";
 
-const MIN_LATIN_LANGUAGE_LETTERS = 44;
-const MIN_LATIN_LANGUAGE_WORDS = 7;
+const MIN_LATIN_LANGUAGE_LETTERS = 24;
+const MIN_LATIN_LANGUAGE_WORDS = 5;
+const LONG_LATIN_LANGUAGE_LETTERS = 44;
+const LONG_LATIN_LANGUAGE_WORDS = 7;
 const MIN_LANGUAGE_CONFIDENCE_GAP = 0.08;
+const MIN_SHORT_LANGUAGE_CONFIDENCE_GAP = 0.25;
+const MAX_SHORT_ENGLISH_SCORE = 0.6;
 const DISTINCTIVE_CHAT_SIGNAL_SCORE = 4;
 const CORROBORATED_CHAT_SIGNAL_SCORE = 4;
+const ADAPTIVE_VIOLATION_SCORE = 4;
+const MAX_ADAPTIVE_SCORE = 6;
+
+const ADAPTIVE_GENERALIZATION_STOP_TOKENS = new Set([
+  "admin",
+  "agenton",
+  "bot",
+  "bro",
+  "btc",
+  "deposit",
+  "dev",
+  "indonesia",
+  "malaysia",
+  "pending",
+  "usdt",
+  "wallet",
+  "wd",
+  "withdrawal",
+]);
 
 const INDONESIAN_MALAY_CHAT_NORMALIZATIONS: Readonly<Record<string, readonly string[]>> = {
   yg: ["yang"],
@@ -47,6 +86,8 @@ const INDONESIAN_MALAY_CHAT_NORMALIZATIONS: Readonly<Record<string, readonly str
   emng: ["emang"],
   gabisa: ["tidak", "bisa"],
   gamasalah: ["tidak", "masalah"],
+  prnah: ["pernah"],
+  dri: ["dari"],
   dh: ["sudah"],
 };
 
@@ -120,11 +161,44 @@ const INDONESIAN_MALAY_CHAT_SIGNAL_WEIGHTS: Readonly<Record<string, number>> = {
   tidak: 1,
   tahu: 1,
   usah: 1,
+  bang: 1,
+  pernah: 2,
+  dari: 1,
   lu: 1,
   gw: 1,
 };
 
 const scheduledCleanupJobs = new Set<number>();
+
+export interface AdaptiveModerationFeatures {
+  fingerprintHash: string;
+  tokenHashes: readonly string[];
+  trigramHashes: readonly string[];
+  families: readonly AdaptiveModerationFeatureFamily[];
+}
+
+export interface AdaptiveModerationFeatureFamily {
+  tokenHash: string;
+  trigramHashes: readonly string[];
+}
+
+export interface AdaptiveModerationSignalEvidence {
+  kind: "TOKEN" | "TRIGRAM";
+  seenCount: number;
+  positiveCount: number;
+  lastPositiveAt: string | null;
+}
+
+export interface AdaptiveModerationFamilyEvidence {
+  token?: AdaptiveModerationSignalEvidence;
+  trigrams: readonly AdaptiveModerationSignalEvidence[];
+  totalTrigramCount: number;
+}
+
+export interface AdaptiveModerationEvidence {
+  exactOwnerConfirmed: boolean;
+  families: readonly AdaptiveModerationFamilyEvidence[];
+}
 
 export type ModerationCleanupScheduler = (
   api: import("grammy").Context["api"],
@@ -135,11 +209,23 @@ export type ModerationCleanupScheduler = (
 
 export type ModerationTimerFactory = (callback: () => void, delayMs: number) => { unref?: () => void };
 
-export function classifyEnglishOnlyMessage(text: string, allowlist: readonly string[] = []): LanguageClassification {
-  return classifyModerationLanguage(text, allowlist) === "non_english" ? "violation" : "ignored";
+export function classifyEnglishOnlyMessage(
+  text: string,
+  allowlist: readonly string[] = [],
+  adaptiveEvidence?: AdaptiveModerationEvidence,
+  currentTime = new Date()
+): LanguageClassification {
+  return classifyModerationLanguage(text, allowlist, adaptiveEvidence, currentTime) === "non_english"
+    ? "violation"
+    : "ignored";
 }
 
-export function classifyModerationLanguage(text: string, allowlist: readonly string[] = []): ModerationLanguage {
+export function classifyModerationLanguage(
+  text: string,
+  allowlist: readonly string[] = [],
+  adaptiveEvidence?: AdaptiveModerationEvidence,
+  currentTime = new Date()
+): ModerationLanguage {
   const normalized = preprocessModerationText(text, allowlist);
   if (!normalized) return "uncertain";
 
@@ -155,17 +241,99 @@ export function classifyModerationLanguage(text: string, allowlist: readonly str
   const words = normalized.split(/\s+/).filter(Boolean);
   const normalizedChatTokens = normalizeIndonesianMalayChatTokens(words);
   const normalizedChatText = normalizedChatTokens.join(" ");
+  let statisticalClassification: ModerationLanguage = "uncertain";
   if (letters.length >= MIN_LATIN_LANGUAGE_LETTERS && words.length >= MIN_LATIN_LANGUAGE_WORDS) {
     const candidates = francAll(normalizedChatText, { minLength: MIN_LATIN_LANGUAGE_LETTERS });
     const [language, score] = candidates[0] ?? ["und", 0];
-    if (language === "eng") return "english";
+    if (language === "eng") statisticalClassification = "english";
     if (language !== "und") {
       const englishScore = candidates.find(([candidate]) => candidate === "eng")?.[1] ?? 0;
-      if (score - englishScore >= MIN_LANGUAGE_CONFIDENCE_GAP) return "non_english";
+      const longSample = letters.length >= LONG_LATIN_LANGUAGE_LETTERS && words.length >= LONG_LATIN_LANGUAGE_WORDS;
+      if (
+        score - englishScore >= (longSample ? MIN_LANGUAGE_CONFIDENCE_GAP : MIN_SHORT_LANGUAGE_CONFIDENCE_GAP) &&
+        (longSample || englishScore <= MAX_SHORT_ENGLISH_SCORE)
+      )
+        statisticalClassification = "non_english";
     }
   }
 
-  return hasIndonesianMalayChatSignals(normalizedChatTokens) ? "non_english" : "uncertain";
+  if (statisticalClassification === "english") return "english";
+  if (hasIndonesianMalayChatSignals(normalizedChatTokens)) return "non_english";
+  if (adaptiveEvidence && scoreAdaptiveModerationEvidence(adaptiveEvidence, currentTime) >= ADAPTIVE_VIOLATION_SCORE)
+    return "non_english";
+  return statisticalClassification;
+}
+
+export function extractAdaptiveModerationFeatures(
+  text: string,
+  allowlist: readonly string[] = []
+): AdaptiveModerationFeatures | undefined {
+  const normalized = preprocessModerationText(text, allowlist);
+  if (!normalized) return undefined;
+  const canonicalTokens = normalizeIndonesianMalayChatTokens(normalized.split(/\s+/));
+  const tokens = [
+    ...new Set(
+      canonicalTokens.filter(
+        (token) =>
+          token.length >= 2 &&
+          token.length <= MAX_ADAPTIVE_TOKEN_LENGTH &&
+          /\p{L}/u.test(token) &&
+          !ADAPTIVE_GENERALIZATION_STOP_TOKENS.has(token)
+      )
+    ),
+  ].slice(0, MAX_ADAPTIVE_TOKEN_FEATURES);
+  if (!canonicalTokens.length) return undefined;
+
+  const families: AdaptiveModerationFeatureFamily[] = [];
+  const trigrams = new Set<string>();
+  for (const token of tokens) {
+    const tokenTrigrams = new Set<string>();
+    const characters = [...token];
+    for (let index = 0; index <= characters.length - 3 && trigrams.size < MAX_ADAPTIVE_TRIGRAM_FEATURES; index += 1) {
+      const trigram = characters.slice(index, index + 3).join("");
+      tokenTrigrams.add(trigram);
+      trigrams.add(trigram);
+    }
+    families.push({
+      tokenHash: hashAdaptiveFeature("TOKEN", token),
+      trigramHashes: [...tokenTrigrams].map((trigram) => hashAdaptiveFeature("TRIGRAM", trigram)),
+    });
+  }
+
+  return {
+    fingerprintHash: hashAdaptiveFingerprint(canonicalTokens),
+    tokenHashes: tokens.map((token) => hashAdaptiveFeature("TOKEN", token)),
+    trigramHashes: [...trigrams].map((trigram) => hashAdaptiveFeature("TRIGRAM", trigram)),
+    families,
+  };
+}
+
+export function scoreAdaptiveModerationEvidence(
+  evidence: AdaptiveModerationEvidence,
+  currentTime = new Date()
+): number {
+  if (evidence.exactOwnerConfirmed) return ADAPTIVE_VIOLATION_SCORE;
+  const activeSince = currentTime.getTime() - ADAPTIVE_LEARNING_HORIZON_MS;
+  let score = 0;
+  let hasIndependentTokenEvidence = false;
+  for (const family of evidence.families) {
+    const tokenWeight = recentAdaptiveSignalWeight(family.token, activeSince);
+    if (tokenWeight >= 2) hasIndependentTokenEvidence = true;
+    const learnedTrigrams = family.trigrams
+      .map((signal) => recentAdaptiveSignalWeight(signal, activeSince))
+      .filter((weight) => weight > 0);
+    const trigramCoverage = family.totalTrigramCount > 0 ? learnedTrigrams.length / family.totalTrigramCount : 0;
+    const strongestTrigram = Math.max(0, ...learnedTrigrams);
+    const trigramWeight =
+      learnedTrigrams.length >= 3 && trigramCoverage >= 0.6 && strongestTrigram >= 2
+        ? 2
+        : learnedTrigrams.length >= 2 && trigramCoverage >= 0.5
+          ? 1
+          : 0;
+    // Token and trigram evidence describe one lexical family, so they cannot corroborate each other.
+    score += Math.min(2, Math.max(tokenWeight, trigramWeight));
+  }
+  return hasIndependentTokenEvidence ? Math.min(MAX_ADAPTIVE_SCORE, score) : Math.min(3, score);
 }
 
 export function preprocessModerationText(text: string, allowlist: readonly string[] = []): string {
@@ -449,6 +617,32 @@ function hasIndonesianMalayChatSignals(tokens: readonly string[]): boolean {
   const score = [...matchedSignals.values()].reduce((total, weight) => total + weight, 0);
   // One distinctive chat word is sufficient; otherwise require corroborating whole-token signals.
   return matchedSignals.size === 1 ? score >= DISTINCTIVE_CHAT_SIGNAL_SCORE : score >= CORROBORATED_CHAT_SIGNAL_SCORE;
+}
+
+function adaptiveSignalWeight(seenCount: number, positiveCount: number): number {
+  if (seenCount <= 0 || positiveCount < 2 || positiveCount > seenCount) return 0;
+  const ratio = positiveCount / seenCount;
+  if (positiveCount >= 8 && ratio >= 0.8) return 4;
+  if (positiveCount >= 5 && ratio >= 0.75) return 3;
+  if (positiveCount >= 3 && ratio >= 0.7) return 2;
+  return ratio >= 0.6 ? 1 : 0;
+}
+
+function recentAdaptiveSignalWeight(signal: AdaptiveModerationSignalEvidence | undefined, activeSince: number): number {
+  if (!signal?.lastPositiveAt || Date.parse(signal.lastPositiveAt) < activeSince) return 0;
+  return adaptiveSignalWeight(signal.seenCount, signal.positiveCount);
+}
+
+function hashAdaptiveFingerprint(tokens: readonly string[]): string {
+  const boundedTokens = tokens.slice(0, MAX_ADAPTIVE_FINGERPRINT_TOKENS);
+  return hashAdaptiveFeature(
+    "FINGERPRINT",
+    `${tokens.length}\0${boundedTokens.length}\0${boundedTokens.join("\u001f")}`
+  );
+}
+
+function hashAdaptiveFeature(kind: "FINGERPRINT" | "TOKEN" | "TRIGRAM", value: string): string {
+  return createHash("sha256").update(kind).update("\0").update(value).digest("hex");
 }
 
 function escapeRegExp(value: string): string {

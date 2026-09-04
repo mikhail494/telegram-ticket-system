@@ -6,7 +6,7 @@ import test from "node:test";
 import Database from "better-sqlite3";
 import { SupportDatabase } from "../src/db.js";
 
-test("migrations 21 through 23 adopt legacy moderation data without changing historical state", async () => {
+test("migrations 21 through 24 adopt legacy moderation data without changing historical state", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "telegram-public-chat-migration-"));
   const databasePath = path.join(directory, "support.db");
   const legacy = new Database(databasePath);
@@ -110,7 +110,7 @@ test("migrations 21 through 23 adopt legacy moderation data without changing his
       }>;
       assert.deepEqual(
         migrations.map((row) => row.id),
-        Array.from({ length: 23 }, (_, index) => index + 1)
+        Array.from({ length: 24 }, (_, index) => index + 1)
       );
       assert.equal(
         (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 21").get() as { count: number })

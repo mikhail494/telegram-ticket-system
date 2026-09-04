@@ -471,6 +471,55 @@ describe("multi-public-chat moderation", () => {
     );
   });
 
+  it("OWNER and ADMIN configure per-chat manual strikes using available standard reactions", async () => {
+    const { harness } = createHarness();
+    manage(harness, CHAT_A, true);
+    harness.setApiResponseOverride("getChat", (_call, success) => ({
+      ...success,
+      result: {
+        id: CHAT_A,
+        type: "supergroup",
+        title: "Synthetic Public Chat",
+        available_reactions: [
+          { type: "emoji", emoji: "👀" },
+          { type: "emoji", emoji: "🔥" },
+          { type: "custom_emoji", custom_emoji_id: "custom" },
+        ],
+      },
+    }));
+
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:open:${CHAT_A}`, 1));
+    const settings = String(harness.findApiCalls("editMessageText").at(-1)?.payload.text);
+    assert.match(settings, /Manual strikes: enabled/);
+    assert.match(settings, /Manual strike reaction: 👀/);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(ADMIN_ID, `public:manual-toggle:${CHAT_A}`, 1));
+    assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.manual_strikes_enabled, 0);
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:manual-reaction:${CHAT_A}`, 1));
+    const markup = harness.findApiCalls("editMessageText").at(-1)?.payload.reply_markup as {
+      inline_keyboard?: Array<Array<{ text: string; callback_data?: string }>>;
+    };
+    const callbacks =
+      markup.inline_keyboard
+        ?.flat()
+        .map((button) => button.callback_data)
+        .filter(Boolean) ?? [];
+    assert.ok(callbacks.includes(`public:set-reaction:${CHAT_A}:🔥`));
+    assert.ok(!callbacks.some((callback) => callback?.includes("custom")));
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:set-reaction:${CHAT_A}:🔥`, 1));
+    assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.manual_strike_reaction, "🔥");
+
+    harness.clearApiCalls();
+    await harness.bot.handleUpdate(privateCallback(OWNER_ID, `public:set-reaction:${CHAT_A}:👍`, 1));
+    assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.manual_strike_reaction, "🔥");
+    assert.match(String(harness.findApiCalls("answerCallbackQuery")[0]?.payload.text), /not available/i);
+  });
+
   it("cancels a public-chat picker without leaving its keyboard or pending selection active", async () => {
     const { harness } = createHarness();
     await harness.bot.handleUpdate(privateCallback(OWNER_ID, "public:add", 100));

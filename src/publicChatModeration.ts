@@ -19,6 +19,19 @@ export interface PublicChatValidationResult {
 }
 
 const MODERATION_REACTIONS = new Set(["\u{1F440}", "\u{1F621}"]);
+export const DEFAULT_MANUAL_STRIKE_REACTION = "\u{1F440}";
+export const MANUAL_STRIKE_REACTION_FALLBACKS = [
+  "\u{1F440}",
+  "\u{1F44D}",
+  "\u{1F44E}",
+  "\u{2764}",
+  "\u{1F525}",
+  "\u{1F389}",
+  "\u{1F914}",
+  "\u{1F621}",
+  "\u{1F4A9}",
+] as const;
+const MAX_MANUAL_STRIKE_REACTION_CHOICES = 24;
 
 export async function validatePublicModerationChat(
   api: Api,
@@ -75,6 +88,26 @@ export function formatPublicChatPermissionChecklist(result: PublicChatValidation
         ? "Reactions: available"
         : "Reactions: availability unknown (advisory only)";
   return [...required, reactions].join("\n");
+}
+
+export function manualStrikeReactionChoices(reactions: readonly ReactionType[] | undefined): readonly string[] {
+  if (reactions === undefined) return MANUAL_STRIKE_REACTION_FALLBACKS;
+  return [
+    ...new Set(
+      reactions
+        .filter((reaction): reaction is Extract<ReactionType, { type: "emoji" }> => reaction.type === "emoji")
+        .map((reaction) => reaction.emoji)
+    ),
+  ].slice(0, MAX_MANUAL_STRIKE_REACTION_CHOICES);
+}
+
+export function isManualStrikeReactionAvailable(
+  reactions: readonly ReactionType[] | undefined,
+  reaction: string
+): boolean {
+  if (reactions === undefined)
+    return MANUAL_STRIKE_REACTION_FALLBACKS.includes(reaction as (typeof MANUAL_STRIKE_REACTION_FALLBACKS)[number]);
+  return reactions.some((available) => available.type === "emoji" && available.emoji === reaction);
 }
 
 function reactionAvailability(reactions: readonly ReactionType[] | undefined): boolean | null {
