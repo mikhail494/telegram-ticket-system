@@ -19,9 +19,7 @@ if (files.length === 0) throw new Error("No TypeScript test files found under te
 const args = [require.resolve("tsx/cli"), "--test", ...files];
 const env = {
   ...process.env,
-  NODE_ENV: process.env.NODE_ENV ?? "test",
   BOT_TOKEN: process.env.BOT_TOKEN ?? "123456:TEST_BOT_TOKEN",
-  LOG_LEVEL: process.env.LOG_LEVEL ?? "silent",
 };
 const result = spawnSync(process.execPath, args, { stdio: "inherit", env });
 process.exit(result.status ?? 1);
