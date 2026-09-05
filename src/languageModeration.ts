@@ -168,8 +168,6 @@ const INDONESIAN_MALAY_CHAT_SIGNAL_WEIGHTS: Readonly<Record<string, number>> = {
   gw: 1,
 };
 
-const scheduledCleanupJobs = new Set<number>();
-
 export interface AdaptiveModerationFeatures {
   fingerprintHash: string;
   tokenHashes: readonly string[];
@@ -208,6 +206,11 @@ export type ModerationCleanupScheduler = (
 ) => void;
 
 export type ModerationTimerFactory = (callback: () => void, delayMs: number) => { unref?: () => void };
+
+interface ModerationCleanupSchedulerOptions {
+  createTimer?: ModerationTimerFactory;
+  backgroundTasks?: BackgroundTaskTracker;
+}
 
 export function classifyEnglishOnlyMessage(
   text: string,
@@ -388,55 +391,62 @@ export function parseAllowlist(value: string | undefined): readonly string[] {
   }
 }
 
-export function scheduleModerationCleanup(
-  api: import("grammy").Context["api"],
-  db: import("./db.js").SupportDatabase,
-  jobId: number,
-  delayMs = 10_000,
-  createTimer: ModerationTimerFactory = (callback, delay) => setTimeout(callback, delay),
-  backgroundTasks?: BackgroundTaskTracker
-): void {
-  if (scheduledCleanupJobs.has(jobId)) return;
-  scheduledCleanupJobs.add(jobId);
-  const timer = createTimer(() => {
-    const run = () =>
-      processModerationCleanupJob(api, db, jobId, new Date())
-        .catch(async (error) => {
-          const { logger } = await import("./logger.js");
-          logger.warn({ jobId, err: error }, "Moderation cleanup timer failed");
-        })
-        .finally(() => scheduledCleanupJobs.delete(jobId));
-    if (backgroundTasks) {
-      const accepted = backgroundTasks.run(run);
-      if (!accepted)
-        logger.debug({ operation: "moderation_cleanup", jobId }, "Background work was dropped during shutdown");
-    } else void run();
-  }, delayMs);
-  timer.unref?.();
+export function createModerationCleanupScheduler(
+  getStaffChatId: () => number | null,
+  options: ModerationCleanupSchedulerOptions = {}
+): ModerationCleanupScheduler {
+  const scheduledJobs = new Set<number>();
+  const createTimer = options.createTimer ?? ((callback, delay) => setTimeout(callback, delay));
+  return (api, db, jobId, delayMs = 10_000) => {
+    if (scheduledJobs.has(jobId)) return;
+    scheduledJobs.add(jobId);
+    const timer = createTimer(() => {
+      const run = () => {
+        const staffChatId = getStaffChatId();
+        if (staffChatId === null) return Promise.resolve();
+        return processModerationCleanupJob(api, db, staffChatId, jobId, new Date());
+      };
+      const trackedRun = () =>
+        run()
+          .catch(async (error) => {
+            const { logger } = await import("./logger.js");
+            logger.warn({ jobId, err: error }, "Moderation cleanup timer failed");
+          })
+          .finally(() => scheduledJobs.delete(jobId));
+      if (options.backgroundTasks) {
+        const accepted = options.backgroundTasks.run(trackedRun);
+        if (!accepted) {
+          scheduledJobs.delete(jobId);
+          logger.debug({ operation: "moderation_cleanup", jobId }, "Background work was dropped during shutdown");
+        }
+      } else void trackedRun();
+    }, delayMs);
+    timer.unref?.();
+  };
 }
 
 export async function processModerationRecovery(
   api: import("grammy").Context["api"],
   db: import("./db.js").SupportDatabase,
+  staffChatId: number,
   currentTime = new Date()
 ): Promise<void> {
-  const { config } = await import("./config.js");
-  for (const job of db.listLanguageModerationRecoveryJobs(config.staffChatId, currentTime.toISOString())) {
-    await processModerationCleanupJob(api, db, job.id, currentTime);
+  for (const job of db.listLanguageModerationRecoveryJobs(staffChatId, currentTime.toISOString())) {
+    await processModerationCleanupJob(api, db, staffChatId, job.id, currentTime);
   }
 }
 
 export async function processModerationCleanupJob(
   api: import("grammy").Context["api"],
   db: import("./db.js").SupportDatabase,
+  staffChatId: number,
   jobId: number,
   currentTime = new Date()
 ): Promise<void> {
-  const { config } = await import("./config.js");
   const job = db.getLanguageModerationCleanupJob(jobId);
   if (
     !job ||
-    job.staff_chat_id !== config.staffChatId ||
+    job.staff_chat_id !== staffChatId ||
     job.state === "COMPLETED" ||
     Date.parse(job.cleanup_due_at) > currentTime.getTime()
   )
@@ -546,7 +556,7 @@ export async function processModerationCleanupJob(
           .filter((threadId): threadId is number => threadId !== null)
       ),
     ].sort((left, right) => left - right);
-    await logModerationSanction(api, db, {
+    await logModerationSanction(api, db, staffChatId, {
       userTelegramId: job.user_telegram_id,
       username: job.username,
       publicChatId: job.chat_id,

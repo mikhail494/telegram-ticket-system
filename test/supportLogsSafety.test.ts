@@ -83,7 +83,7 @@ describe("Support Logs topic safety", () => {
     const ticket = harness.seedTicket({ messageThreadId: 5000 });
     harness.db.setSetting(SUPPORT_LOGS_SETTING_KEY, String(ticket.message_thread_id));
 
-    const topic = await getSupportLogsTopicInfo(harness.bot.api, harness.db);
+    const topic = await getSupportLogsTopicInfo(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID);
 
     assert.equal(topic.state, "created");
     assert.equal(topic.previousThreadId, ticket.message_thread_id);
@@ -116,7 +116,7 @@ describe("Support Logs topic safety", () => {
       username: "test_staff",
     });
 
-    const archived = await archiveTicketIfPossible(harness.bot.api, harness.db, ticket.id);
+    const archived = await archiveTicketIfPossible(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, ticket.id);
     const archiveCalls = [...harness.findApiCalls("sendMessage"), ...harness.findApiCalls("sendDocument")].filter(
       (call) => call.payload.chat_id === TEST_STAFF_CHAT_ID
     );

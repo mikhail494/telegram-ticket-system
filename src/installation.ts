@@ -102,6 +102,11 @@ export class InstallationService {
   getStaffChatId(): number | null {
     return this.db.getActiveWorkspace()?.telegram_chat_id ?? null;
   }
+  requireStaffChatId(): number {
+    const staffChatId = this.getStaffChatId();
+    if (staffChatId === null) throw new Error("Staff workspace is not configured yet.");
+    return staffChatId;
+  }
   getActiveWorkspace(): WorkspaceRecord | null {
     return this.db.getActiveWorkspace() ?? null;
   }

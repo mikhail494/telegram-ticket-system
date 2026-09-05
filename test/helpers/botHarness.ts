@@ -1,5 +1,5 @@
 import type { ApiCallFn, Context, Transformer } from "grammy";
-import type { SupportBot } from "../../src/bot.js";
+import type { PendingWarningScheduler, SupportBot } from "../../src/bot.js";
 import type { Update, User, UserFromGetMe } from "grammy/types";
 import type { QuickRepliesRegistry } from "../../src/quickReplies.js";
 import type { ModerationCleanupScheduler } from "../../src/languageModeration.js";
@@ -116,6 +116,7 @@ export interface BotHarnessOptions {
   entityNotificationProviders?: EntityNotificationProviderRegistry;
   installationServiceFactory?: (db: SupportDatabaseType) => InstallationService;
   supportIngressLimiter?: SupportIngressLimiter;
+  pendingWarningScheduler?: PendingWarningScheduler;
 }
 
 export interface BotHarness {
@@ -172,6 +173,7 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
     entityNotificationProviders: options.entityNotificationProviders,
     installationService,
     supportIngressLimiter: options.supportIngressLimiter,
+    pendingWarningScheduler: options.pendingWarningScheduler,
     staffChatDelivery: { minimumIntervalMs: 0, sleep: async () => undefined },
   });
   const apiCalls: RecordedApiCall[] = [];
