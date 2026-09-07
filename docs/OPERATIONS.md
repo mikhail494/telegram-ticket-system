@@ -10,7 +10,9 @@ OPS_HTTP_HOST=127.0.0.1
 OPS_HTTP_PORT=3000
 ```
 
-`GET /healthz` returns `200` while the process is alive. `GET /readyz` returns `200` only after Telegram polling has started and a lightweight SQLite `SELECT 1` succeeds; setup-required installations can still be ready. During graceful shutdown readiness becomes `503` before SQLite closes. `GET /metrics` provides only low-cardinality process and SQLite readiness gauges.
+`GET /healthz` returns `200` while the process and listener are alive. `GET /readyz` returns `200` only while the runtime is READY, Telegram polling is active and has not terminated unexpectedly, and a lightweight SQLite `SELECT 1` succeeds. Setup-required installations can still be ready. During graceful shutdown readiness becomes `503` before SQLite closes. Update failures and backup degradation remain observable without taking an otherwise working support runtime offline.
+
+`GET /metrics` exposes process-lifetime counters and gauges for polling, aggregate update outcomes, tracked background work, database probes, automatic backup success/failure/freshness, and operational alert delivery. Metrics use only a fixed category set and never include chat, user, message, ticket, filesystem path, exception text, or secret labels. Backup freshness becomes stale after the greater of twice the configured interval or the configured interval plus one hour. Disabled backups report disabled and never become stale.
 
 ```bash
 curl http://127.0.0.1:3000/healthz
@@ -19,6 +21,8 @@ curl http://127.0.0.1:3000/metrics
 ```
 
 These endpoints have no authentication. Keep the native listener on loopback by default and do not expose `/metrics` directly to the public internet without network controls or an appropriate reverse-proxy policy.
+
+The runtime evaluates health once per minute with one SQLite ping and constant-time in-memory checks. Actionable database, polling, and backup transitions produce one firing and one recovery notification in the currently active staff workspace. Database alerts require three consecutive failed probes; polling termination and hard scheduled-backup failure alert immediately; persistent conditions are deduplicated. Alert state and metrics reset on process restart. An external monitor can scrape `/readyz` and `/metrics` for durable alerting later.
 
 ## Docker runtime
 

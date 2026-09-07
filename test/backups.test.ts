@@ -397,13 +397,19 @@ test("scheduler does not duplicate a recent valid backup", async () => {
       retentionCount: 14,
     });
     const result = await service.createBackup();
+    const existing: Array<{ size: number; modifiedAt: Date }> = [];
     const scheduler = new BackupScheduler(
       service,
       { enabled: true, directory: backupDirectory, intervalMs: 86_400_000, retentionCount: 14 },
-      () => assert.fail("unexpected failure")
+      () => assert.fail("unexpected failure"),
+      () => undefined,
+      (backup) => existing.push(backup)
     );
     await scheduler.start();
     scheduler.stop();
+    assert.equal(existing.length, 1);
+    assert.equal(existing[0]?.size, result.size);
+    assert.equal(existing[0]?.modifiedAt instanceof Date, true);
     assert.equal((await readdir(backupDirectory)).filter((name) => /^support-.*\.sqlite$/.test(name)).length, 1);
     assert.equal(
       (await readdir(backupDirectory)).some(

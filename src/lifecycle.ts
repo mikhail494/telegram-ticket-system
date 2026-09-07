@@ -6,15 +6,43 @@ export interface BackgroundTaskTracker {
   drain(): Promise<void>;
 }
 
+export interface BackgroundTaskSnapshot {
+  accepting: boolean;
+  inFlight: number;
+  acceptedTotal: number;
+  rejectedTotal: number;
+  completedTotal: number;
+  failedTotal: number;
+}
+
 export class BackgroundTaskRegistry implements BackgroundTaskTracker {
   private accepting = true;
   private readonly tasks = new Set<Promise<void>>();
+  private acceptedTotal = 0;
+  private rejectedTotal = 0;
+  private completedTotal = 0;
+  private failedTotal = 0;
 
   run(task: () => Promise<void>): boolean {
-    if (!this.accepting) return false;
+    if (!this.accepting) {
+      this.rejectedTotal += 1;
+      return false;
+    }
+    this.acceptedTotal += 1;
     const pending = Promise.resolve().then(task);
     this.tasks.add(pending);
-    void pending.finally(() => this.tasks.delete(pending)).catch(() => undefined);
+    void pending
+      .then(
+        () => {
+          this.completedTotal += 1;
+        },
+        () => {
+          this.completedTotal += 1;
+          this.failedTotal += 1;
+        }
+      )
+      .finally(() => this.tasks.delete(pending))
+      .catch(() => undefined);
     return true;
   }
 
@@ -24,6 +52,17 @@ export class BackgroundTaskRegistry implements BackgroundTaskTracker {
 
   async drain(): Promise<void> {
     while (this.tasks.size) await Promise.allSettled([...this.tasks]);
+  }
+
+  snapshot(): BackgroundTaskSnapshot {
+    return {
+      accepting: this.accepting,
+      inFlight: this.tasks.size,
+      acceptedTotal: this.acceptedTotal,
+      rejectedTotal: this.rejectedTotal,
+      completedTotal: this.completedTotal,
+      failedTotal: this.failedTotal,
+    };
   }
 }
 

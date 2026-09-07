@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { afterEach, describe, it } from "node:test";
-import { OperationalServer, type OperationalRuntimeState } from "../src/operationsHttp.js";
+import { OperationalServer } from "../src/operationsHttp.js";
+import { RuntimeHealthRegistry, type OperationalRuntimeState } from "../src/runtimeObservability.js";
+import type { BackgroundTaskSnapshot } from "../src/lifecycle.js";
 
 const servers: OperationalServer[] = [];
 
@@ -23,22 +25,35 @@ async function request(
 }
 
 function createOperationalServer(
-  getState: () => OperationalRuntimeState,
+  state: OperationalRuntimeState,
   checkDatabase: () => boolean = () => true
-): OperationalServer {
-  const server = new OperationalServer({ host: "127.0.0.1", port: 0, getState, checkDatabase });
+): { server: OperationalServer; health: RuntimeHealthRegistry } {
+  const health = new RuntimeHealthRegistry({ backupEnabled: true, backupIntervalMs: 86_400_000 });
+  health.setRuntimeState(state);
+  if (state === "READY") health.markPollingStarted();
+  const background: BackgroundTaskSnapshot = {
+    accepting: true,
+    inFlight: 0,
+    acceptedTotal: 0,
+    rejectedTotal: 0,
+    completedTotal: 0,
+    failedTotal: 0,
+  };
+  const server = new OperationalServer({
+    host: "127.0.0.1",
+    port: 0,
+    getSnapshot: () => health.snapshot(background),
+    checkDatabase,
+    recordDatabaseProbe: (ready) => health.recordDatabaseProbe(ready),
+  });
   servers.push(server);
-  return server;
+  return { server, health };
 }
 
 describe("OperationalServer", () => {
   it("keeps health live while startup and readiness follows runtime/database state", async () => {
-    let state: OperationalRuntimeState = "STARTING";
     let databaseReady = true;
-    const server = createOperationalServer(
-      () => state,
-      () => databaseReady
-    );
+    const { server, health } = createOperationalServer("STARTING", () => databaseReady);
     await server.start();
     const port = server.port;
     assert.ok(port);
@@ -54,30 +69,24 @@ describe("OperationalServer", () => {
       contentType: "application/json; charset=utf-8",
     });
 
-    state = "READY";
+    health.setRuntimeState("READY");
+    health.markPollingStarted();
     assert.equal((await request(port, "/readyz")).status, 200);
     databaseReady = false;
     assert.equal((await request(port, "/readyz")).status, 503);
-    const unavailable = createOperationalServer(
-      () => "READY",
-      () => {
-        throw new Error("database unavailable");
-      }
-    );
+    const { server: unavailable } = createOperationalServer("READY", () => {
+      throw new Error("database unavailable");
+    });
     await unavailable.start();
     assert.equal((await request(unavailable.port!, "/readyz")).status, 503);
     assert.match((await request(unavailable.port!, "/metrics")).body, /^telegram_support_database_ready 0$/m);
-    state = "SHUTTING_DOWN";
+    health.setRuntimeState("SHUTTING_DOWN");
     assert.equal((await request(port, "/healthz")).status, 200);
     assert.equal((await request(port, "/readyz")).status, 503);
   });
 
   it("serves safe Prometheus metrics and conventional routing responses", async () => {
-    let state: OperationalRuntimeState = "READY";
-    const server = createOperationalServer(
-      () => state,
-      () => true
-    );
+    const { server, health } = createOperationalServer("READY", () => true);
     await server.start();
     const port = server.port;
     assert.ok(port);
@@ -89,10 +98,22 @@ describe("OperationalServer", () => {
       "telegram_support_up",
       "telegram_support_ready",
       "telegram_support_process_uptime_seconds",
+      "telegram_support_process_start_unixtime",
       "telegram_support_process_resident_memory_bytes",
       "telegram_support_process_heap_used_bytes",
       "telegram_support_process_heap_total_bytes",
       "telegram_support_database_ready",
+      "telegram_support_database_consecutive_failures",
+      "telegram_support_polling_active",
+      "telegram_support_updates_processed_total",
+      "telegram_support_update_errors_total",
+      "telegram_support_background_tasks_inflight",
+      "telegram_support_backup_enabled",
+      "telegram_support_backup_success_total",
+      "telegram_support_backup_failure_total",
+      "telegram_support_backup_retention_deleted_total",
+      "telegram_support_backup_age_seconds",
+      "telegram_support_alert_delivery_failures_total",
     ]) {
       assert.match(metrics.body, new RegExp(`^${name} \\d`, "m"));
     }
@@ -101,8 +122,33 @@ describe("OperationalServer", () => {
     assert.equal((await request(port, "/healthz", "POST")).status, 405);
     assert.equal((await request(port, "/healthz", "HEAD")).body, "");
 
-    state = "STOPPED";
+    health.setRuntimeState("STOPPED");
     assert.match((await request(port, "/metrics")).body, /^telegram_support_ready 0$/m);
+  });
+
+  it("requires active healthy polling but not backup health for readiness", async () => {
+    const { server, health } = createOperationalServer("READY");
+    health.markPollingStopped();
+    await server.start();
+    assert.equal((await request(server.port!, "/readyz")).status, 503);
+
+    health.markPollingStarted();
+    health.recordBackupFailure();
+    assert.equal((await request(server.port!, "/readyz")).status, 200);
+
+    health.recordUnexpectedPollingTermination();
+    assert.equal((await request(server.port!, "/readyz")).status, 503);
+  });
+
+  it("never exposes operational secrets or identifiers through metrics", async () => {
+    const { server, health } = createOperationalServer("READY", () => {
+      throw new Error("BOT_TOKEN=secret file://private 123456789");
+    });
+    health.recordUpdateError("unknown");
+    await server.start();
+    const metrics = (await request(server.port!, "/metrics")).body;
+    assert.doesNotMatch(metrics, /secret|private|123456789|BOT_TOKEN/);
+    assert.equal(metrics.endsWith("\n"), true);
   });
 
   it("stops idempotently and rejects a bind conflict without retaining a listener", async () => {
@@ -110,17 +156,19 @@ describe("OperationalServer", () => {
     await new Promise<void>((resolve) => occupied.listen(0, "127.0.0.1", resolve));
     const address = occupied.address();
     assert.ok(address && typeof address !== "string");
+    const health = new RuntimeHealthRegistry({ backupEnabled: false, backupIntervalMs: 1 });
     const conflicting = new OperationalServer({
       host: "127.0.0.1",
       port: address.port,
-      getState: () => "STARTING",
+      getSnapshot: () => health.snapshot(),
       checkDatabase: () => true,
+      recordDatabaseProbe: (ready) => health.recordDatabaseProbe(ready),
     });
     await assert.rejects(conflicting.start(), /listen|EADDRINUSE/i);
     await conflicting.stop();
     await new Promise<void>((resolve, reject) => occupied.close((error) => (error ? reject(error) : resolve())));
 
-    const server = createOperationalServer(() => "READY");
+    const { server } = createOperationalServer("READY");
     await server.start();
     const port = server.port;
     await Promise.all([server.stop(), server.stop()]);
