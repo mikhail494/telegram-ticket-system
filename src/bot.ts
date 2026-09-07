@@ -86,6 +86,7 @@ import {
 } from "./workspaceValidation.js";
 import { formatPublicChatPermissionChecklist, validatePublicModerationChat } from "./publicChatModeration.js";
 import { PrivateControlPlane, type PublicChatConfigurationField } from "./privateControlPlane.js";
+import type { RuntimeHealthRegistry, UpdateErrorCategory } from "./runtimeObservability.js";
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
@@ -247,6 +248,7 @@ interface BotRuntimeDependencies {
   backgroundTasks?: BackgroundTaskTracker;
   supportIngressLimiter?: SupportIngressLimiter;
   pendingWarningScheduler?: PendingWarningScheduler;
+  runtimeHealth?: RuntimeHealthRegistry;
 }
 
 export type SupportBot = Bot<Context> & {
@@ -266,6 +268,15 @@ export function createBot(
       installation.adoptLegacyInstallation(hostConfig.staffChatId);
     }
   }
+  bot.use(async (_ctx, next) => {
+    try {
+      await next();
+      runtime.runtimeHealth?.recordUpdateSuccess();
+    } catch (error) {
+      runtime.runtimeHealth?.recordUpdateError(updateErrorCategory(error));
+      throw error;
+    }
+  });
   bot.use(async (ctx, next) => {
     if (
       ctx.from &&
@@ -3789,6 +3800,12 @@ export function createBot(
     pendingWarnings.stop();
   };
   return supportBot;
+}
+
+function updateErrorCategory(error: unknown): UpdateErrorCategory {
+  if (error instanceof GrammyError) return "telegram";
+  if (error instanceof HttpError) return "http";
+  return "unknown";
 }
 
 export async function setBotCommands(bot: Bot<Context>, installation: InstallationService): Promise<void> {

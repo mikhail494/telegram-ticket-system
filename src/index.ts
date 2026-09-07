@@ -11,6 +11,12 @@ import { runWorkspaceStartup } from "./startup.js";
 import { createAutomaticBackupScheduler } from "./backups.js";
 import { ApplicationLifecycle, awaitApplicationCompletion, BackgroundTaskRegistry } from "./lifecycle.js";
 import { OperationalServer, type OperationalRuntimeState } from "./operationsHttp.js";
+import {
+  OperationalAlertCoordinator,
+  RuntimeHealthEvaluator,
+  RuntimeHealthRegistry,
+  observePollingCompletion,
+} from "./runtimeObservability.js";
 
 const db = new SupportDatabase(config.databaseUrl);
 const quickRepliesRegistry = createPersistentQuickRepliesRegistry(db, loadQuickRepliesRegistry());
@@ -28,18 +34,50 @@ const installationService = new InstallationService(db);
 if (hostConfig.staffChatId !== null) installationService.adoptLegacyInstallation(hostConfig.staffChatId);
 const entityNotificationProviders: EntityNotificationProviderRegistry = new Map();
 const backgroundTasks = new BackgroundTaskRegistry();
-const bot = createBot(db, quickRepliesRegistry, { entityNotificationProviders, installationService, backgroundTasks });
 const backupOptions = {
   enabled: config.backupEnabled,
   directory: config.backupDir,
   intervalMs: config.backupIntervalHours * 3_600_000,
   retentionCount: config.backupRetentionCount,
 };
+const runtimeHealth = new RuntimeHealthRegistry({
+  backupEnabled: backupOptions.enabled,
+  backupIntervalMs: backupOptions.intervalMs,
+});
+const bot = createBot(db, quickRepliesRegistry, {
+  entityNotificationProviders,
+  installationService,
+  backgroundTasks,
+  runtimeHealth,
+});
+const operationalAlerts = new OperationalAlertCoordinator({
+  health: runtimeHealth,
+  backgroundTasks,
+  getStaffChatId: () => installationService.getStaffChatId(),
+  sendMessage: (chatId, text) => bot.api.sendMessage(chatId, text),
+});
+const telemetrySnapshot = () => runtimeHealth.snapshot(backgroundTasks.snapshot());
+const evaluateAlerts = () => operationalAlerts.evaluate(telemetrySnapshot());
+const evaluateAlertsWhileRunning = () => {
+  if (runtimeHealth.getRuntimeState() === "READY") evaluateAlerts();
+};
+const healthEvaluator = new RuntimeHealthEvaluator({
+  health: runtimeHealth,
+  checkDatabase: () => db.ping(),
+  evaluateAlerts,
+});
+const recordAutomaticBackupFailure = (error: unknown) => {
+  runtimeHealth.recordBackupFailure();
+  evaluateAlertsWhileRunning();
+  logger.warn({ err: error }, "Automatic SQLite backups are unavailable; support bot startup will continue");
+};
 const backupScheduler = createAutomaticBackupScheduler(
   db,
   backupOptions,
-  (error) => logger.warn({ err: error }, "Automatic SQLite backups are unavailable; support bot startup will continue"),
+  recordAutomaticBackupFailure,
   (result) => {
+    runtimeHealth.recordBackupSuccess(result);
+    evaluateAlertsWhileRunning();
     const details = {
       backup: result.basename,
       size: result.size,
@@ -51,15 +89,19 @@ const backupScheduler = createAutomaticBackupScheduler(
     if (result.tempCleanupFailed)
       logger.warn(details, "Automatic SQLite backup completed with temporary cleanup failures");
     else logger.info(details, "Automatic SQLite backup completed");
-  }
+  },
+  (backup) => runtimeHealth.recordExistingBackup(backup)
 );
 let polling: Promise<void> | null = null;
-let operationalState: OperationalRuntimeState = "STARTING";
 let operationalServer: OperationalServer | null = null;
 const lifecycle = new ApplicationLifecycle({
   stopPolling: () => bot.stop(),
   pollingCompletion: () => polling,
-  stopBackgroundWork: () => bot.stopBackgroundWork(),
+  stopBackgroundWork: () => {
+    runtimeHealth.setRuntimeState("SHUTTING_DOWN");
+    healthEvaluator.stop();
+    bot.stopBackgroundWork();
+  },
   backgroundTasks,
   stopAndDrainBackups: () => backupScheduler?.stopAndDrain() ?? Promise.resolve(),
   closeDatabase: () => db.close(),
@@ -71,7 +113,12 @@ function getOperationalRuntimeState(): OperationalRuntimeState {
   const lifecycleState = lifecycle.getState();
   if (lifecycleState === "SHUTTING_DOWN") return "SHUTTING_DOWN";
   if (lifecycleState === "STOPPED") return "STOPPED";
-  return operationalState;
+  return runtimeHealth.getRuntimeState();
+}
+
+function getOperationalSnapshot() {
+  runtimeHealth.setRuntimeState(getOperationalRuntimeState());
+  return telemetrySnapshot();
 }
 
 async function main(): Promise<void> {
@@ -79,8 +126,9 @@ async function main(): Promise<void> {
     operationalServer = new OperationalServer({
       host: config.opsHttpHost,
       port: config.opsHttpPort,
-      getState: getOperationalRuntimeState,
+      getSnapshot: getOperationalSnapshot,
       checkDatabase: () => db.ping(),
+      recordDatabaseProbe: (ready) => runtimeHealth.recordDatabaseProbe(ready),
     });
     await operationalServer.start();
     logger.info({ host: config.opsHttpHost, port: config.opsHttpPort }, "Operational HTTP server started");
@@ -121,10 +169,7 @@ async function main(): Promise<void> {
       "No OWNER is paired. Run npm run owner:pair in an interactive terminal to create a one-use pairing link."
     );
   }
-  if (backupScheduler)
-    void backupScheduler
-      .start()
-      .catch((error) => logger.warn({ err: error }, "Automatic SQLite backup scheduler failed to start"));
+  if (backupScheduler) void backupScheduler.start().catch(recordAutomaticBackupFailure);
 
   const shutdown = (signal: NodeJS.Signals) => {
     logger.info({ signal }, "Stopping bot");
@@ -134,11 +179,22 @@ async function main(): Promise<void> {
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
 
-  polling = bot.start({
+  const pollingRun = bot.start({
     allowed_updates: [...TELEGRAM_ALLOWED_UPDATES],
     onStart: (botInfo) => {
-      operationalState = "READY";
+      runtimeHealth.markPollingStarted();
+      runtimeHealth.setRuntimeState("READY");
+      healthEvaluator.start();
+      evaluateAlerts();
       logger.info({ username: botInfo.username }, "Telegram support bot started");
+    },
+  });
+  polling = observePollingCompletion(pollingRun, {
+    health: runtimeHealth,
+    isExpectedTermination: () => lifecycle.getState() !== "RUNNING" || runtimeHealth.getRuntimeState() !== "READY",
+    onUnexpectedTermination: (outcome) => {
+      logger.error({ outcome }, "Telegram polling terminated unexpectedly");
+      evaluateAlerts();
     },
   });
   await awaitApplicationCompletion(polling, lifecycle);

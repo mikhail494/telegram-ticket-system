@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+### Added
+
+- Instance-owned runtime health telemetry, polling-aware readiness, low-cardinality Prometheus metrics, and bounded staff-workspace alerts for database, polling, and backup degradation and recovery.
+
 ## [1.4.0] - 2026-08-15
 
 ### Added

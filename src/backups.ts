@@ -28,6 +28,11 @@ export interface BackupResult {
   tempCleanupFailed: number;
 }
 
+export interface ExistingBackupObservation {
+  size: number;
+  modifiedAt: Date;
+}
+
 export interface RestoreVerificationResult {
   path: string;
   checksum: "verified" | "metadata absent";
@@ -266,13 +271,22 @@ export class BackupScheduler {
     private readonly service: BackupService,
     private readonly options: BackupOptions,
     private readonly onFailure: (error: unknown) => void,
-    private readonly onSuccess: (result: BackupResult) => void = () => undefined
+    private readonly onSuccess: (result: BackupResult) => void = () => undefined,
+    private readonly onExistingBackup: (backup: ExistingBackupObservation) => void = () => undefined
   ) {}
   async start(): Promise<void> {
     if (!this.options.enabled) return;
     this.stopped = false;
     const latest = await this.service.newestValidBackup();
-    const age = latest ? Date.now() - (await stat(latest)).mtimeMs : Number.POSITIVE_INFINITY;
+    const latestStat = latest ? await stat(latest) : null;
+    if (latestStat) {
+      try {
+        this.onExistingBackup({ size: latestStat.size, modifiedAt: latestStat.mtime });
+      } catch {
+        /* telemetry observers must not change backup scheduling */
+      }
+    }
+    const age = latestStat ? Date.now() - latestStat.mtimeMs : Number.POSITIVE_INFINITY;
     if (age >= this.options.intervalMs) await this.run();
     else this.schedule(this.options.intervalMs - age);
   }
@@ -320,11 +334,12 @@ export function createAutomaticBackupScheduler(
   database: SupportDatabase,
   options: BackupOptions,
   onFailure: (error: unknown) => void,
-  onSuccess: (result: BackupResult) => void = () => undefined
+  onSuccess: (result: BackupResult) => void = () => undefined,
+  onExistingBackup: (backup: ExistingBackupObservation) => void = () => undefined
 ): BackupScheduler | null {
   if (!options.enabled) return null;
   try {
-    return new BackupScheduler(new BackupService(database, options), options, onFailure, onSuccess);
+    return new BackupScheduler(new BackupService(database, options), options, onFailure, onSuccess, onExistingBackup);
   } catch (error) {
     onFailure(error);
     return null;

@@ -6,6 +6,7 @@ import type { ModerationCleanupScheduler } from "../../src/languageModeration.js
 import type { EntityNotificationProviderRegistry } from "../../src/entityNotifications.js";
 import type { InstallationService } from "../../src/installation.js";
 import type { SupportIngressLimiter } from "../../src/supportIngressLimiter.js";
+import type { RuntimeHealthRegistry } from "../../src/runtimeObservability.js";
 import type { SupportDatabase as SupportDatabaseType, TicketStatus, TicketWithUser } from "../../src/db.js";
 
 process.env.NODE_ENV = "test";
@@ -117,6 +118,7 @@ export interface BotHarnessOptions {
   installationServiceFactory?: (db: SupportDatabaseType) => InstallationService;
   supportIngressLimiter?: SupportIngressLimiter;
   pendingWarningScheduler?: PendingWarningScheduler;
+  runtimeHealth?: RuntimeHealthRegistry;
 }
 
 export interface BotHarness {
@@ -174,6 +176,7 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
     installationService,
     supportIngressLimiter: options.supportIngressLimiter,
     pendingWarningScheduler: options.pendingWarningScheduler,
+    runtimeHealth: options.runtimeHealth,
     staffChatDelivery: { minimumIntervalMs: 0, sleep: async () => undefined },
   });
   const apiCalls: RecordedApiCall[] = [];

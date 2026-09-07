@@ -214,3 +214,44 @@ test("lifecycle keeps readiness in shutdown before closing the operational liste
   assert.deepEqual(events, ["db-close", "server-close"]);
   assert.equal(lifecycle.getState(), "STOPPED");
 });
+
+test("background task telemetry preserves acceptance, completion, failure, and shutdown semantics", async () => {
+  const tasks = new BackgroundTaskRegistry();
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  assert.equal(
+    tasks.run(async () => pending),
+    true
+  );
+  assert.deepEqual(tasks.snapshot(), {
+    accepting: true,
+    inFlight: 1,
+    acceptedTotal: 1,
+    rejectedTotal: 0,
+    completedTotal: 0,
+    failedTotal: 0,
+  });
+  release();
+  await tasks.drain();
+  assert.equal(tasks.snapshot().completedTotal, 1);
+
+  assert.equal(
+    tasks.run(async () => {
+      throw new Error("expected task failure");
+    }),
+    true
+  );
+  await tasks.drain();
+  assert.equal(tasks.snapshot().completedTotal, 2);
+  assert.equal(tasks.snapshot().failedTotal, 1);
+
+  tasks.stopAccepting();
+  assert.equal(
+    tasks.run(async () => undefined),
+    false
+  );
+  assert.equal(tasks.snapshot().rejectedTotal, 1);
+  assert.equal(tasks.snapshot().accepting, false);
+});
