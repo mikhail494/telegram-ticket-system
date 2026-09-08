@@ -343,6 +343,11 @@ export class SupportDatabase {
     return this.batch.listPendingTicketBatchReplyAndCloseContinuations(staffChatId, at, limit);
   }
 
+  listPendingTicketBatchSilentCloseContinuations(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[]
+  {
+    return this.batch.listPendingTicketBatchSilentCloseContinuations(staffChatId, at, limit);
+  }
+
   getNextTicketBatchStaffRetryAt(staffChatId: number): string | undefined
   {
     return this.batch.getNextTicketBatchStaffRetryAt(staffChatId);

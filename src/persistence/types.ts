@@ -247,7 +247,7 @@ export interface TicketBatchAnswerPackageRecord {
 }
 
 export interface TicketBatchAnswerItemRecord {
-  answer_package_id: string; ticket_id: number; snapshot_token: string; action: "reply_keep_open" | "reply_and_close" | "no_action";
+  answer_package_id: string; ticket_id: number; snapshot_token: string; action: "reply_keep_open" | "reply_and_close" | "silent_close" | "no_action";
   reply_text: string | null; state: TicketBatchAnswerItemState; delivery_message_id: number | null;
   applied_at: string | null; last_error: string | null; updated_at: string;
   follow_up_state: TicketFollowUpState; internal_note: string | null; escalation_target: TicketEscalationTarget;

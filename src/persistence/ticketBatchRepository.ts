@@ -363,6 +363,15 @@ export class TicketBatchRepository {
       ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
   }
 
+  listPendingTicketBatchSilentCloseContinuations(staffChatId: number, at: string, limit = 20): TicketBatchAnswerItemRecord[] {
+    return this.db.prepare(`SELECT i.* FROM ticket_batch_answer_items i
+      JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
+      WHERE p.staff_chat_id = ? AND p.status IN ('APPLYING', 'PARTIAL')
+        AND i.action = 'silent_close' AND i.state = 'APPLYING'
+        AND (i.topic_echo_next_retry_at IS NULL OR i.topic_echo_next_retry_at <= ?)
+      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`).all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
+  }
+
   getNextTicketBatchStaffRetryAt(staffChatId: number): string | undefined {
     const row = this.db.prepare(`SELECT MIN(retry_at) AS retry_at FROM (
       SELECT i.topic_echo_next_retry_at AS retry_at
@@ -371,7 +380,9 @@ export class TicketBatchRepository {
       WHERE p.staff_chat_id = ? AND i.topic_echo_next_retry_at IS NOT NULL
         AND (i.topic_echo_state IN ('PENDING', 'FAILED')
           OR (i.action = 'reply_and_close' AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING')
-            AND i.topic_echo_state IN ('SENT', 'NOT_REQUIRED')))
+            AND i.topic_echo_state IN ('SENT', 'NOT_REQUIRED'))
+          OR (i.action = 'silent_close' AND i.state = 'APPLYING'
+            AND i.topic_echo_state = 'NOT_REQUIRED'))
       UNION ALL
       SELECT i.delivery_failure_event_next_retry_at
       FROM ticket_batch_answer_items i
