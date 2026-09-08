@@ -269,7 +269,10 @@ const answerSchemaV2 = answerFieldsSchema
   .strict()
   .superRefine((answer, ctx) => {
     validateAnswerText(answer, ctx);
-    if ((answer.action === "reply_and_close" || answer.action === "silent_close") && answer.follow_up_state !== "NONE") {
+    if (
+      (answer.action === "reply_and_close" || answer.action === "silent_close") &&
+      answer.follow_up_state !== "NONE"
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["follow_up_state"],

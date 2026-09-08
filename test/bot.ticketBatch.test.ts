@@ -172,14 +172,19 @@ describe("ticket batch Telegram workflow", () => {
       harness.db.listMessagesChronological(ticket.id).some((message) => message.direction === "STAFF_TO_USER"),
       false
     );
-    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
     assert.equal(
-      harness.findApiCalls("sendMessage").some(
-        (call) =>
-          call.payload.chat_id === TEST_STAFF_CHAT_ID &&
-          call.payload.message_thread_id === ticket.message_thread_id &&
-          String(call.payload.text).includes("silently closed by batch answer")
-      ),
+      harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id),
+      false
+    );
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some(
+          (call) =>
+            call.payload.chat_id === TEST_STAFF_CHAT_ID &&
+            call.payload.message_thread_id === ticket.message_thread_id &&
+            String(call.payload.text).includes("silently closed by batch answer")
+        ),
       true
     );
     assert.equal(harness.countApiCalls("sendDocument"), 1);
@@ -219,7 +224,10 @@ describe("ticket batch Telegram workflow", () => {
     assert.equal(harness.db.getTicket(ticket.id)?.status, "OPEN");
     assert.equal(harness.db.getTicket(ticket.id)?.archived_at, null);
     assert.equal(harness.countApiCalls("sendDocument"), 0);
-    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(
+      harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id),
+      false
+    );
     assert.equal(
       harness.db.listMessagesChronological(ticket.id).some((message) => message.direction === "STAFF_TO_USER"),
       false
@@ -243,7 +251,11 @@ describe("ticket batch Telegram workflow", () => {
       items: [{ ticketId: ticket.id, snapshotToken: token }],
     });
     harness.setDownloadResponse(answerPackage("export_silent_archive_retry", ticket.id, token, "silent_close"));
-    harness.setApiResponseOverride("sendDocument", () => ({ ok: false, error_code: 500, description: "Archive unavailable" }));
+    harness.setApiResponseOverride("sendDocument", () => ({
+      ok: false,
+      error_code: 500,
+      description: "Archive unavailable",
+    }));
 
     await harness.bot.handleUpdate(
       buildStaffDocumentUpdate({ fileName: "ticket-answers_export_silent_archive_retry.json" })
@@ -263,7 +275,10 @@ describe("ticket batch Telegram workflow", () => {
     assert.equal(pending?.delivery_error_category, null);
     assert.equal(pending?.delivery_failure_event_state, "NOT_REQUIRED");
     assert.ok(pending?.topic_echo_next_retry_at);
-    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(
+      harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id),
+      false
+    );
     assert.equal(
       harness.db.listMessagesChronological(ticket.id).some((message) => message.direction === "STAFF_TO_USER"),
       false
@@ -281,7 +296,10 @@ describe("ticket batch Telegram workflow", () => {
     const completed = harness.db.listTicketBatchAnswerItems("answers_1")[0];
     assert.equal(completed?.state, "COMPLETED");
     assert.ok(harness.db.getTicket(ticket.id)?.archived_at);
-    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(
+      harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id),
+      false
+    );
     assert.equal(
       harness.db.listMessagesChronological(ticket.id).some((message) => message.direction === "STAFF_TO_USER"),
       false
@@ -331,7 +349,10 @@ describe("ticket batch Telegram workflow", () => {
     assert.equal(item?.topic_echo_state, "NOT_REQUIRED");
     assert.equal(harness.db.getTicketBatchAnswerPackage("silent_recovery", TEST_STAFF_CHAT_ID)?.status, "COMPLETED");
     assert.ok(harness.db.getTicket(ticket.id)?.archived_at);
-    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(
+      harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id),
+      false
+    );
     assert.equal(
       harness.db.listMessagesChronological(ticket.id).some((message) => message.direction === "STAFF_TO_USER"),
       false
@@ -342,7 +363,10 @@ describe("ticket batch Telegram workflow", () => {
     harness.clearApiCalls();
     await harness.bot.recoverPendingTicketBatchStaffOperations();
     assert.equal(harness.countApiCalls("sendDocument"), 0);
-    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(
+      harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id),
+      false
+    );
   });
 
   it("sends one self-contained export document without copying attachments into the staff chat", async () => {
