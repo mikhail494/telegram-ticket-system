@@ -213,7 +213,7 @@ export type TicketEscalationTarget = (typeof ESCALATION_TARGETS)[number];
 export interface TicketBatchAnswer {
   ticket_id: number;
   snapshot_token: string;
-  action: "reply_keep_open" | "reply_and_close" | "no_action";
+  action: "reply_keep_open" | "reply_and_close" | "silent_close" | "no_action";
   reply_text: string | null;
   follow_up_state: TicketFollowUpState;
   internal_note: string | null;
@@ -224,7 +224,7 @@ const answerFieldsSchema = z
   .object({
     ticket_id: z.number().int().min(1),
     snapshot_token: z.string().min(1).max(256),
-    action: z.enum(["reply_keep_open", "reply_and_close", "no_action"]),
+    action: z.enum(["reply_keep_open", "reply_and_close", "silent_close", "no_action"]),
     reply_text: z.string().nullable(),
   })
   .strict();
@@ -237,11 +237,11 @@ function validateAnswerText(answer: { action: string; reply_text: string | null 
       message: "Reply actions require non-empty reply_text.",
     });
   }
-  if (answer.action === "no_action" && answer.reply_text !== null) {
+  if ((answer.action === "no_action" || answer.action === "silent_close") && answer.reply_text !== null) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["reply_text"],
-      message: "no_action requires reply_text to be null.",
+      message: `${answer.action} requires reply_text to be null.`,
     });
   }
   if (answer.reply_text !== null && Array.from(answer.reply_text).length > MAX_ANSWER_TEXT_CHARACTERS) {
@@ -269,11 +269,11 @@ const answerSchemaV2 = answerFieldsSchema
   .strict()
   .superRefine((answer, ctx) => {
     validateAnswerText(answer, ctx);
-    if (answer.action === "reply_and_close" && answer.follow_up_state !== "NONE") {
+    if ((answer.action === "reply_and_close" || answer.action === "silent_close") && answer.follow_up_state !== "NONE") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["follow_up_state"],
-        message: "reply_and_close requires follow_up_state NONE.",
+        message: `${answer.action} requires follow_up_state NONE.`,
       });
     }
   });
@@ -580,6 +580,7 @@ export interface TicketBatchPreview {
   totals: {
     readyReplyKeepOpen: number;
     readyReplyClose: number;
+    readySilentClose: number;
     noAction: number;
     staleChanged: number;
     inactiveClosed: number;
@@ -599,6 +600,7 @@ export function buildAnswerPackagePreview(
   const totals = {
     readyReplyKeepOpen: 0,
     readyReplyClose: 0,
+    readySilentClose: 0,
     noAction: 0,
     staleChanged: 0,
     inactiveClosed: 0,
@@ -632,6 +634,7 @@ export function buildAnswerPackagePreview(
       }
       if (answer.action === "reply_keep_open") totals.readyReplyKeepOpen += 1;
       else if (answer.action === "reply_and_close") totals.readyReplyClose += 1;
+      else if (answer.action === "silent_close") totals.readySilentClose += 1;
       else totals.noAction += 1;
       return {
         ticketId: answer.ticket_id,
@@ -694,6 +697,7 @@ export function buildAnswerPackageInstructions(exportId: string): string {
     "- answers: one answer per exported ticket",
     "",
     "Actions:",
+    "- \`silent_close\`: reply_text must be null; closes the ticket without sending a message to the user, using the existing close/archive/Support Logs workflow. Use it for stale or obsolete tickets where another reply would be unnecessary or spam.",
     "- \`no_action\`: reply_text must be null; use it when the existing reply remains current, optionally updating staff-only follow-up context.",
     "- \`reply_keep_open\`: reply_text must be a non-empty string; the bot sends it through the existing delivery/transcript path and keeps the ticket active.",
     "- \`reply_and_close\`: reply_text must be a non-empty string; the bot sends it, then uses the existing close/archive/Support Logs workflow.",
@@ -751,6 +755,15 @@ export function buildAnswerPackageInstructions(exportId: string): string {
             internal_note: "...",
             escalation_target: "PAYMENTS",
           },
+          {
+            ticket_id: 71,
+            snapshot_token: "<exact snapshot token>",
+            action: "silent_close",
+            reply_text: null,
+            follow_up_state: "NONE",
+            internal_note: "No new user update; close stale ticket.",
+            escalation_target: "NONE",
+          },
         ],
       },
       null,
@@ -792,7 +805,7 @@ export function getAnswerPackageJsonSchema(): Record<string, unknown> {
           properties: {
             ticket_id: { type: "integer", minimum: 1 },
             snapshot_token: { type: "string", minLength: 1, maxLength: 256 },
-            action: { enum: ["no_action", "reply_keep_open", "reply_and_close"] },
+            action: { enum: ["no_action", "reply_keep_open", "reply_and_close", "silent_close"] },
             reply_text: { type: ["string", "null"], maxLength: MAX_ANSWER_TEXT_CHARACTERS },
             follow_up_state: { enum: FOLLOW_UP_STATES },
             internal_note: { type: ["string", "null"], minLength: 1, maxLength: MAX_INTERNAL_NOTE_CHARACTERS },
@@ -802,6 +815,10 @@ export function getAnswerPackageJsonSchema(): Record<string, unknown> {
             {
               if: { properties: { action: { const: "no_action" } } },
               then: { properties: { reply_text: { type: "null" } } },
+            },
+            {
+              if: { properties: { action: { const: "silent_close" } } },
+              then: { properties: { reply_text: { type: "null" }, follow_up_state: { const: "NONE" } } },
             },
             {
               if: { properties: { action: { enum: ["reply_keep_open", "reply_and_close"] } } },
@@ -1325,8 +1342,8 @@ function formatTicketBatchPreviewHeader(exportId: string, totals: TicketBatchPre
     "Ticket answer package preview",
     `Export: ${exportId}`,
     "Package status: PENDING",
-    `Expected tickets: ${totals.readyReplyKeepOpen + totals.readyReplyClose + totals.noAction + totals.staleChanged + totals.inactiveClosed + totals.validationFailures + totals.manualReview}`,
-    `Ready: ${totals.readyReplyKeepOpen + totals.readyReplyClose} | keep open: ${totals.readyReplyKeepOpen} | close: ${totals.readyReplyClose} | no action: ${totals.noAction}`,
+    `Expected tickets: ${totals.readyReplyKeepOpen + totals.readyReplyClose + totals.readySilentClose + totals.noAction + totals.staleChanged + totals.inactiveClosed + totals.validationFailures + totals.manualReview}`,
+    `Ready: ${totals.readyReplyKeepOpen + totals.readyReplyClose + totals.readySilentClose} | keep open: ${totals.readyReplyKeepOpen} | close: ${totals.readyReplyClose} | silent close: ${totals.readySilentClose} | no action: ${totals.noAction}`,
     `Blocked: stale: ${totals.staleChanged} | inactive: ${totals.inactiveClosed} | validation: ${totals.validationFailures} | manual review: ${totals.manualReview}`,
   ].join("\n");
 }
@@ -1335,8 +1352,12 @@ function formatTicketBatchPreviewEntry(entry: TicketBatchPreviewEntry): string {
   return [
     `Ticket #${entry.ticketId}`,
     `Classification: ${entry.classification}`,
-    `Action: ${entry.action}`,
-    entry.action === "no_action" ? "Reply: no_action" : `Reply:\n${entry.replyText ?? ""}`,
+    `Action: ${entry.action === "silent_close" ? "Silent close" : entry.action}`,
+    entry.action === "no_action"
+      ? "Reply: no_action"
+      : entry.action === "silent_close"
+        ? "Reply: none - no user message will be sent"
+        : `Reply:\n${entry.replyText ?? ""}`,
   ].join("\n");
 }
 

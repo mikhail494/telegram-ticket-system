@@ -43,7 +43,7 @@ function answerPackage(
   exportId: string,
   ticketId: number,
   token: string,
-  action: "reply_keep_open" | "reply_and_close" | "no_action" = "reply_keep_open"
+  action: "reply_keep_open" | "reply_and_close" | "silent_close" | "no_action" = "reply_keep_open"
 ): string {
   return JSON.stringify({
     schema: "telegram_ticket_answer_package",
@@ -56,7 +56,7 @@ function answerPackage(
         ticket_id: ticketId,
         snapshot_token: token,
         action,
-        reply_text: action === "no_action" ? null : "A valid reply",
+        reply_text: action === "no_action" || action === "silent_close" ? null : "A valid reply",
       },
     ],
   });
@@ -67,7 +67,7 @@ function multiAnswerPackage(
   answers: Array<{
     ticketId: number;
     token: string;
-    action: "reply_keep_open" | "reply_and_close" | "no_action";
+    action: "reply_keep_open" | "reply_and_close" | "silent_close" | "no_action";
     text?: string;
   }>
 ): string {
@@ -81,7 +81,10 @@ function multiAnswerPackage(
       ticket_id: answer.ticketId,
       snapshot_token: answer.token,
       action: answer.action,
-      reply_text: answer.action === "no_action" ? null : (answer.text ?? `Reply for ${answer.ticketId}`),
+      reply_text:
+        answer.action === "no_action" || answer.action === "silent_close"
+          ? null
+          : (answer.text ?? `Reply for ${answer.ticketId}`),
     })),
   });
 }
@@ -126,6 +129,222 @@ function batchCallback(data: string, updateId: number, preview: RecordedApiCall)
 }
 
 describe("ticket batch Telegram workflow", () => {
+  it("silently closes and archives a ticket without any user delivery", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket({ user: { id: 2801 }, messageThreadId: 72801 });
+    harness.db.addMessage({ ticketId: ticket.id, direction: "USER_TO_STAFF", text: "No further help needed." });
+    const token = getTicketSnapshotToken(
+      harness.db.getTicketWithUser(ticket.id)!,
+      harness.db.listMessagesChronological(ticket.id)
+    );
+    harness.db.createTicketBatchExport({
+      exportId: "export_silent_close",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      selectionMode: "all_active",
+      ticketCount: 1,
+      items: [{ ticketId: ticket.id, snapshotToken: token }],
+    });
+    harness.setDownloadResponse(answerPackage("export_silent_close", ticket.id, token, "silent_close"));
+
+    await harness.bot.handleUpdate(buildStaffDocumentUpdate({ fileName: "ticket-answers_export_silent_close.json" }));
+    const preview = harness
+      .findApiCalls("sendMessage")
+      .find((call) => String(call.payload.text).includes("Ticket answer package preview"));
+    assert.ok(preview);
+    assert.match(String(preview.payload.text), /Silent close/);
+    assert.match(String(preview.payload.text), /no user message will be sent/i);
+
+    await harness.bot.handleUpdate(batchCallback(callbackData(preview, "Apply"), 2801, preview));
+
+    const item = harness.db.listTicketBatchAnswerItems("answers_1")[0];
+    assert.equal(harness.db.getTicket(ticket.id)?.status, "CLOSED");
+    assert.ok(harness.db.getTicket(ticket.id)?.archived_at);
+    assert.equal(item?.state, "COMPLETED");
+    assert.equal(item?.delivery_message_id, null);
+    assert.equal(item?.delivery_error_category, null);
+    assert.equal(item?.delivery_error_permanence, null);
+    assert.equal(item?.delivery_attempt_count, 0);
+    assert.equal(item?.delivery_failure_event_state, "NOT_REQUIRED");
+    assert.equal(item?.topic_echo_state, "NOT_REQUIRED");
+    assert.equal(item?.follow_up_state, "NONE");
+    assert.equal(
+      harness.db.listMessagesChronological(ticket.id).some((message) => message.direction === "STAFF_TO_USER"),
+      false
+    );
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(
+      harness.findApiCalls("sendMessage").some(
+        (call) =>
+          call.payload.chat_id === TEST_STAFF_CHAT_ID &&
+          call.payload.message_thread_id === ticket.message_thread_id &&
+          String(call.payload.text).includes("silently closed by batch answer")
+      ),
+      true
+    );
+    assert.equal(harness.countApiCalls("sendDocument"), 1);
+  });
+
+  it("marks a claimed silent close stale when user activity arrives before recovery", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket({ user: { id: 2804 }, messageThreadId: 72804 });
+    harness.db.addMessage({ ticketId: ticket.id, direction: "USER_TO_STAFF", text: "Original request." });
+    const token = getTicketSnapshotToken(
+      harness.db.getTicketWithUser(ticket.id)!,
+      harness.db.listMessagesChronological(ticket.id)
+    );
+    harness.db.createTicketBatchExport({
+      exportId: "export_silent_stale",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      selectionMode: "all_active",
+      ticketCount: 1,
+      items: [{ ticketId: ticket.id, snapshotToken: token }],
+    });
+    harness.db.createTicketBatchAnswerPackage({
+      answerPackageId: "silent_stale",
+      exportId: "export_silent_stale",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      packageHash: "sha256:silent_stale",
+      packageCreatedAt: "2026-07-30T00:00:00.000Z",
+      items: [{ ticket_id: ticket.id, snapshot_token: token, action: "silent_close", reply_text: null }],
+    });
+    harness.db.claimTicketBatchAnswerPackage("silent_stale", TEST_STAFF_CHAT_ID);
+    harness.db.claimTicketBatchAnswerItem("silent_stale", ticket.id);
+    harness.db.addMessage({ ticketId: ticket.id, direction: "USER_TO_STAFF", text: "A new follow-up arrived." });
+
+    await harness.bot.recoverPendingTicketBatchStaffOperations();
+
+    assert.equal(harness.db.listTicketBatchAnswerItems("silent_stale")[0]?.state, "STALE");
+    assert.equal(harness.db.getTicket(ticket.id)?.status, "OPEN");
+    assert.equal(harness.db.getTicket(ticket.id)?.archived_at, null);
+    assert.equal(harness.countApiCalls("sendDocument"), 0);
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(
+      harness.db.listMessagesChronological(ticket.id).some((message) => message.direction === "STAFF_TO_USER"),
+      false
+    );
+  });
+
+  it("keeps a silent close awaiting archive recovery without creating user delivery state", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket({ user: { id: 2803 }, messageThreadId: 72803 });
+    harness.db.addMessage({ ticketId: ticket.id, direction: "USER_TO_STAFF", text: "Archive this without replying." });
+    const token = getTicketSnapshotToken(
+      harness.db.getTicketWithUser(ticket.id)!,
+      harness.db.listMessagesChronological(ticket.id)
+    );
+    harness.db.createTicketBatchExport({
+      exportId: "export_silent_archive_retry",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      selectionMode: "all_active",
+      ticketCount: 1,
+      items: [{ ticketId: ticket.id, snapshotToken: token }],
+    });
+    harness.setDownloadResponse(answerPackage("export_silent_archive_retry", ticket.id, token, "silent_close"));
+    harness.setApiResponseOverride("sendDocument", () => ({ ok: false, error_code: 500, description: "Archive unavailable" }));
+
+    await harness.bot.handleUpdate(
+      buildStaffDocumentUpdate({ fileName: "ticket-answers_export_silent_archive_retry.json" })
+    );
+    const preview = harness
+      .findApiCalls("sendMessage")
+      .find((call) => String(call.payload.text).includes("Ticket answer package preview"));
+    assert.ok(preview);
+    await harness.bot.handleUpdate(batchCallback(callbackData(preview, "Apply"), 2803, preview));
+
+    const pending = harness.db.listTicketBatchAnswerItems("answers_1")[0];
+    assert.equal(harness.db.getTicket(ticket.id)?.status, "CLOSED");
+    assert.equal(harness.db.getTicket(ticket.id)?.archived_at, null);
+    assert.equal(pending?.state, "APPLYING");
+    assert.equal(pending?.delivery_message_id, null);
+    assert.equal(pending?.delivery_attempt_count, 0);
+    assert.equal(pending?.delivery_error_category, null);
+    assert.equal(pending?.delivery_failure_event_state, "NOT_REQUIRED");
+    assert.ok(pending?.topic_echo_next_retry_at);
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(
+      harness.db.listMessagesChronological(ticket.id).some((message) => message.direction === "STAFF_TO_USER"),
+      false
+    );
+
+    harness.clearApiCalls();
+    harness.clearApiOverrides();
+    await harness.bot.recoverPendingTicketBatchStaffOperations();
+    assert.equal(harness.db.listTicketBatchAnswerItems("answers_1")[0]?.state, "APPLYING");
+    assert.equal(harness.countApiCalls("sendDocument"), 0);
+
+    harness.db.setTicketBatchPostDeliveryRetry("answers_1", ticket.id, "2020-01-01T00:00:00.000Z", null);
+    await harness.bot.recoverPendingTicketBatchStaffOperations();
+
+    const completed = harness.db.listTicketBatchAnswerItems("answers_1")[0];
+    assert.equal(completed?.state, "COMPLETED");
+    assert.ok(harness.db.getTicket(ticket.id)?.archived_at);
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(
+      harness.db.listMessagesChronological(ticket.id).some((message) => message.direction === "STAFF_TO_USER"),
+      false
+    );
+  });
+
+  it("recovers an already closed silent-close item without user delivery", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket({ user: { id: 2802 }, messageThreadId: 72802 });
+    harness.db.addMessage({ ticketId: ticket.id, direction: "USER_TO_STAFF", text: "This ticket is obsolete." });
+    const token = getTicketSnapshotToken(
+      harness.db.getTicketWithUser(ticket.id)!,
+      harness.db.listMessagesChronological(ticket.id)
+    );
+    harness.db.createTicketBatchExport({
+      exportId: "export_silent_recovery",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      selectionMode: "all_active",
+      ticketCount: 1,
+      items: [{ ticketId: ticket.id, snapshotToken: token }],
+    });
+    harness.db.createTicketBatchAnswerPackage({
+      answerPackageId: "silent_recovery",
+      exportId: "export_silent_recovery",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      packageHash: "sha256:silent_recovery",
+      packageCreatedAt: "2026-07-30T00:00:00.000Z",
+      items: [{ ticket_id: ticket.id, snapshot_token: token, action: "silent_close", reply_text: null }],
+    });
+    harness.db.claimTicketBatchAnswerPackage("silent_recovery", TEST_STAFF_CHAT_ID);
+    harness.db.claimTicketBatchAnswerItem("silent_recovery", ticket.id);
+    harness.db.closeTicketRecord(ticket.id, {
+      type: "STAFF",
+      displayName: "Synthetic Staff",
+      username: "synthetic_staff",
+    });
+    harness.clearApiCalls();
+
+    await harness.bot.recoverPendingTicketBatchStaffOperations();
+
+    const item = harness.db.listTicketBatchAnswerItems("silent_recovery")[0];
+    assert.equal(item?.state, "COMPLETED");
+    assert.equal(item?.delivery_message_id, null);
+    assert.equal(item?.delivery_error_category, null);
+    assert.equal(item?.delivery_error_permanence, null);
+    assert.equal(item?.topic_echo_state, "NOT_REQUIRED");
+    assert.equal(harness.db.getTicketBatchAnswerPackage("silent_recovery", TEST_STAFF_CHAT_ID)?.status, "COMPLETED");
+    assert.ok(harness.db.getTicket(ticket.id)?.archived_at);
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+    assert.equal(
+      harness.db.listMessagesChronological(ticket.id).some((message) => message.direction === "STAFF_TO_USER"),
+      false
+    );
+    assert.equal(harness.countApiCalls("sendDocument"), 1);
+    assert.equal(harness.countApiCalls("deleteForumTopic"), 1);
+
+    harness.clearApiCalls();
+    await harness.bot.recoverPendingTicketBatchStaffOperations();
+    assert.equal(harness.countApiCalls("sendDocument"), 0);
+    assert.equal(harness.findApiCalls("sendMessage").some((call) => call.payload.chat_id === ticket.user_telegram_id), false);
+  });
+
   it("sends one self-contained export document without copying attachments into the staff chat", async () => {
     const harness = createHarness();
     const active = harness.seedTicket({ messageThreadId: 5000 });

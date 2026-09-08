@@ -482,6 +482,10 @@ export function createBot(
       item.topic_echo_state === "TERMINAL_FAILED"
     )
       return;
+    if (item.action === "silent_close") {
+      db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
+      return;
+    }
     if (ticket.staff_chat_id !== requireStaffChatId() || ticket.message_thread_id === null) {
       throw new Error("Ticket topic is unavailable for batch echo.");
     }
@@ -534,7 +538,12 @@ export function createBot(
     diagnostic: NormalizedDeliveryError
   ): Promise<void> {
     if (item.delivery_failure_event_state === "SENT") return;
-    if (item.action === "no_action" || item.delivery_message_id !== null || item.delivery_error_category === null) {
+    if (
+      item.action === "no_action" ||
+      item.action === "silent_close" ||
+      item.delivery_message_id !== null ||
+      item.delivery_error_category === null
+    ) {
       db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
       return;
     }
@@ -607,7 +616,7 @@ export function createBot(
 
   function isConfirmedBatchReply(item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]): boolean {
     return (
-      item.action !== "no_action" &&
+      (item.action === "reply_keep_open" || item.action === "reply_and_close") &&
       item.delivery_message_id !== null &&
       item.delivery_error_category === null &&
       item.delivery_error_permanence === null &&
@@ -3104,6 +3113,7 @@ export function createBot(
     const totals = {
       keep: 0,
       close: 0,
+      silentClose: 0,
       noAction: 0,
       stale: 0,
       inactive: 0,
@@ -3118,6 +3128,13 @@ export function createBot(
     for (const item of items) {
       if (["COMPLETED", "NO_ACTION", "STALE", "INACTIVE"].includes(item.state)) {
         totals.skipped += 1;
+        continue;
+      }
+      if (item.action === "silent_close" && item.state === "APPLYING") {
+        const continuation = await resumeSilentClose(item, staffUser);
+        if (continuation === "COMPLETED") totals.silentClose += 1;
+        else if (continuation === "STALE") totals.stale += 1;
+        else if (continuation === "INACTIVE") totals.inactive += 1;
         continue;
       }
       if (item.state === "UNKNOWN_DELIVERY" || item.state === "APPLYING") {
@@ -3214,6 +3231,13 @@ export function createBot(
       }
       if (!db.claimTicketBatchAnswerItem(answerPackageId, item.ticket_id)) {
         totals.skipped += 1;
+        continue;
+      }
+      if (item.action === "silent_close") {
+        const continuation = await resumeSilentClose(item, staffUser);
+        if (continuation === "COMPLETED") totals.silentClose += 1;
+        else if (continuation === "STALE") totals.stale += 1;
+        else if (continuation === "INACTIVE") totals.inactive += 1;
         continue;
       }
       if (item.action === "no_action") {
@@ -3335,6 +3359,78 @@ export function createBot(
     }
     db.finalizeTicketBatchAnswerPackage(answerPackageId, requireStaffChatId());
     return buildPersistedTicketBatchSummary(answerPackageId);
+  }
+
+  async function resumeSilentClose(
+    item: TicketBatchAnswerItemRecord,
+    staffUser: User | undefined
+  ): Promise<"COMPLETED" | "PENDING" | "STALE" | "INACTIVE"> {
+    const persistedItem = db
+      .listTicketBatchAnswerItems(item.answer_package_id)
+      .find((candidate) => candidate.ticket_id === item.ticket_id);
+    if (!persistedItem || persistedItem.action !== "silent_close") return "INACTIVE";
+
+    const ticket = db.getTicketWithUser(item.ticket_id);
+    if (!ticket || ticket.staff_chat_id !== requireStaffChatId()) {
+      db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "INACTIVE", { applied: true });
+      return "INACTIVE";
+    }
+    if (
+      ticket.status !== "CLOSED" &&
+      getTicketSnapshotToken(ticket, db.listMessagesChronological(ticket.id)) !== persistedItem.snapshot_token
+    ) {
+      db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "STALE", { applied: true });
+      return "STALE";
+    }
+
+    db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
+    db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
+    let archiveFailure: NormalizedDeliveryError | undefined;
+    try {
+      await closeTicket(db, bot.api, installation, ticket.id, {
+        notifyUser: false,
+        staffNotice: "Ticket silently closed by batch answer.",
+        closedBy: staffActor(staffUser),
+        onArchiveFailure: (diagnostic) => {
+          archiveFailure = diagnostic;
+        },
+      });
+    } catch (error) {
+      const diagnostic = normalizeTelegramDeliveryError(error);
+      const retryAt = ticketBatchContinuationRetryAt(diagnostic, error);
+      db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "APPLYING", {
+        lastError: "Silent ticket close or archive remains pending.",
+      });
+      db.setTicketBatchPostDeliveryRetry(item.answer_package_id, item.ticket_id, retryAt, diagnostic.category);
+      if (retryAt !== STAFF_OPERATION_NO_RETRY_AT) scheduleTicketBatchStaffRecovery(retryAt);
+      logger.warn(
+        { answerPackageId: item.answer_package_id, ticketId: item.ticket_id, category: diagnostic.category },
+        "Silent batch ticket closure remains pending"
+      );
+      return "PENDING";
+    }
+
+    const reconciledTicket = db.getTicketWithUser(item.ticket_id);
+    if (reconciledTicket?.status === "CLOSED" && reconciledTicket.archived_at !== null) {
+      db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "COMPLETED", { applied: true });
+      db.setTicketBatchPostDeliveryRetry(item.answer_package_id, item.ticket_id, null, null);
+      return "COMPLETED";
+    }
+
+    db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "APPLYING", {
+      lastError: "Silent ticket close completed; transcript archive pending.",
+    });
+    const retryAt = archiveFailure
+      ? ticketBatchContinuationRetryAt(archiveFailure)
+      : new Date(Date.now() + 60_000).toISOString();
+    db.setTicketBatchPostDeliveryRetry(
+      item.answer_package_id,
+      item.ticket_id,
+      retryAt,
+      archiveFailure?.category ?? "ARCHIVE"
+    );
+    if (retryAt !== STAFF_OPERATION_NO_RETRY_AT) scheduleTicketBatchStaffRecovery(retryAt);
+    return "PENDING";
   }
 
   async function resumeReplyAndClosePostDelivery(
@@ -3489,6 +3585,9 @@ export function createBot(
     const items = db.listTicketBatchAnswerItems(answerPackageId);
     const delivered = items.filter((item) => item.delivery_message_id !== null).length;
     const noAction = items.filter((item) => item.action === "no_action").length;
+    const silentCloseItems = items.filter(
+      (item) => item.action === "silent_close" && (item.state === "APPLYING" || item.state === "COMPLETED")
+    );
     const permanent = items.filter((item) => item.delivery_error_permanence === "PERMANENT");
     const temporary = items.filter((item) => item.delivery_error_permanence === "TEMPORARY");
     const unknown = items.filter(
@@ -3503,17 +3602,21 @@ export function createBot(
     const terminalStaffFailures = items.filter(
       (item) => item.topic_echo_state === "TERMINAL_FAILED" && requiresStaffTopicEvent(item)
     );
-    const replyAndCloseItems = items.filter((item) => item.action === "reply_and_close" && isConfirmedBatchReply(item));
-    const replyAndCloseTickets = replyAndCloseItems.map((item) => ({
+    const closeItems = [
+      ...items.filter((item) => item.action === "reply_and_close" && isConfirmedBatchReply(item)),
+      ...silentCloseItems,
+    ];
+    const closeTickets = closeItems.map((item) => ({
       item,
       ticket: db.getTicketWithUser(item.ticket_id),
     }));
-    const ticketsClosed = replyAndCloseTickets.filter(({ ticket }) => ticket?.status === "CLOSED").length;
-    const ticketClosuresPending = replyAndCloseTickets.length - ticketsClosed;
-    const archivesCompleted = replyAndCloseTickets.filter(
+    const ticketsClosed = closeTickets.filter(({ ticket }) => ticket?.status === "CLOSED").length;
+    const silentClosed = silentCloseItems.filter((item) => db.getTicket(item.ticket_id)?.status === "CLOSED").length;
+    const ticketClosuresPending = closeItems.length - ticketsClosed;
+    const archivesCompleted = closeTickets.filter(
       ({ ticket }) => ticket?.archived_at !== null && ticket?.archived_at !== undefined
     ).length;
-    const archivesPending = replyAndCloseTickets.length - archivesCompleted;
+    const archivesPending = closeItems.length - archivesCompleted;
     const topicClosuresUnconfirmed = archivesCompleted;
     const hasIssues =
       permanent.length ||
@@ -3528,6 +3631,7 @@ export function createBot(
       "",
       `Delivered replies: ${delivered}`,
       `No action: ${noAction}`,
+      `Silent closed: ${silentClosed}`,
       `Permanent user-delivery failures: ${permanent.length}`,
       `Temporary user-delivery failures: ${temporary.length}`,
       `Unknown user delivery: ${unknown}`,
@@ -3652,6 +3756,14 @@ export function createBot(
       packagesToFinalize.add(item.answer_package_id);
       if (result !== "PENDING") packagesToRefresh.add(item.answer_package_id);
     }
+    const silentClosures = db
+      .listPendingTicketBatchSilentCloseContinuations(requireStaffChatId(), at, 20)
+      .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
+    for (const item of silentClosures) {
+      const result = await resumeSilentClose(item, undefined);
+      packagesToFinalize.add(item.answer_package_id);
+      if (result !== "PENDING") packagesToRefresh.add(item.answer_package_id);
+    }
     for (const packageId of packagesToFinalize) {
       db.finalizeTicketBatchAnswerPackage(packageId, requireStaffChatId());
     }
@@ -3662,7 +3774,7 @@ export function createBot(
         buildPersistedTicketBatchSummary(packageId)
       );
     }
-    if (continuations.length === 20) {
+    if (continuations.length === 20 || silentClosures.length === 20) {
       scheduleTicketBatchStaffRecovery(new Date(Date.now() + 250).toISOString());
     }
 
