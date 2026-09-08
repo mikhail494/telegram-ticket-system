@@ -16,6 +16,7 @@
     "owner:pair": "tsx src/ownerPair.ts",
     "db:backup": "tsx src/dbBackup.ts",
     "db:restore:verify": "tsx src/dbRestoreVerify.ts",
+    "security:audit": "npm audit --omit=dev --audit-level=high",
     "test": "node scripts/run-tests.mjs",
     "test:coverage": "c8 --check-coverage --statements 84 --branches 80 --functions 89 --lines 84 --reporter=text --reporter=json node scripts/run-tests.mjs",
     "test:typecheck": "tsc -p tsconfig.test.json --noEmit",
