@@ -233,6 +233,7 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
       responseOverrides.clear();
       pendingFailures.clear();
       apiCalls.length = 0;
+      bot.stopBackgroundWork();
       db.close();
     },
     seedTicket: (seedOptions = {}) => seedTicket(db, seedOptions),

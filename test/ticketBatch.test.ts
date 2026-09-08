@@ -6,6 +6,7 @@ import {
   TicketBatchValidationError,
   buildAnswerPackagePreview,
   buildAnswerPackageInstructions,
+  getAnswerPackageJsonSchema,
   buildTicketBatchPreviewPages,
   buildTicketBatchExportSnapshot,
   cleanupTicketBatchZip,
@@ -530,6 +531,113 @@ describe("ticket answer package validation and preview", () => {
         TicketBatchValidationError
       );
     }
+  });
+
+  it("accepts and previews silent_close separately from replies and no_action", () => {
+    const parsed = parseAndValidateAnswerPackage(
+      JSON.stringify({
+        schema: "telegram_ticket_answer_package",
+        version: 2,
+        export_id: "export_answers",
+        answer_package_id: "answers_silent_close",
+        created_at: "2026-07-30T00:00:00.000Z",
+        answers: [
+          {
+            ticket_id: 1,
+            snapshot_token: "sha256:first",
+            action: "silent_close",
+            reply_text: null,
+            follow_up_state: "NONE",
+            internal_note: null,
+            escalation_target: "NONE",
+          },
+          {
+            ticket_id: 2,
+            snapshot_token: "sha256:second",
+            action: "no_action",
+            reply_text: null,
+            follow_up_state: "NONE",
+            internal_note: null,
+            escalation_target: "NONE",
+          },
+          {
+            ticket_id: 3,
+            snapshot_token: "sha256:third",
+            action: "reply_keep_open",
+            reply_text: "Still investigating.",
+            follow_up_state: "NONE",
+            internal_note: null,
+            escalation_target: "NONE",
+          },
+        ],
+      }),
+      "export_answers",
+      exported
+    );
+
+    const preview = buildAnswerPackagePreview(parsed, exported, (ticketId) => ({
+      status: "OPEN",
+      snapshotToken: `sha256:${ticketId === 1 ? "first" : ticketId === 2 ? "second" : "third"}`,
+    }));
+    const pages = buildTicketBatchPreviewPages("export_answers", preview);
+
+    assert.equal(preview.totals.readySilentClose, 1);
+    assert.match(pages[0]!, /silent close: 1/i);
+    assert.match(pages[0]!, /Action: Silent close/);
+    assert.match(pages[0]!, /no user message will be sent/i);
+    assert.match(JSON.stringify(getAnswerPackageJsonSchema()), /silent_close/);
+    assert.match(
+      buildAnswerPackageInstructions("export_answers"),
+      /`silent_close`: reply_text must be null; closes the ticket without sending a message to the user/i
+    );
+  });
+
+  it("rejects silent_close reply text and non-NONE follow-up state", () => {
+    const packageFor = (answer: Record<string, unknown>) =>
+      JSON.stringify({
+        schema: "telegram_ticket_answer_package",
+        version: 2,
+        export_id: "export_silent_validation",
+        answer_package_id: "answers_silent_validation",
+        created_at: "2026-07-30T00:00:00.000Z",
+        answers: [answer],
+      });
+    const exportedSilent = [{ ticket_id: 1, snapshot_token: "sha256:silent" }];
+
+    assert.throws(
+      () =>
+        parseAndValidateAnswerPackage(
+          packageFor({
+            ticket_id: 1,
+            snapshot_token: "sha256:silent",
+            action: "silent_close",
+            reply_text: "Do not send this.",
+            follow_up_state: "NONE",
+            internal_note: null,
+            escalation_target: "NONE",
+          }),
+          "export_silent_validation",
+          exportedSilent
+        ),
+      TicketBatchValidationError
+    );
+    assert.throws(
+      () =>
+        parseAndValidateAnswerPackage(
+          packageFor({
+            ticket_id: 1,
+            snapshot_token: "sha256:silent",
+            action: "silent_close",
+            reply_text: null,
+            follow_up_state: "WAITING_USER",
+            internal_note: null,
+            escalation_target: "NONE",
+          }),
+          "export_silent_validation",
+          exportedSilent
+        ),
+      TicketBatchValidationError
+    );
   });
 
   it("builds an advisory preview with ready, stale, and inactive classifications", () => {
