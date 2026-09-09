@@ -1,8 +1,27 @@
 {
   "name": "telegram-support-ticket-bot",
   "version": "1.4.0",
+  "private": true,
   "license": "PolyForm-Noncommercial-1.0.0",
   "description": "Production-ready Telegram support ticket bot built with Node.js, TypeScript, grammY, and SQLite.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mikhail494/telegram-ticket-system.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mikhail494/telegram-ticket-system/issues"
+  },
+  "homepage": "https://github.com/mikhail494/telegram-ticket-system#readme",
+  "keywords": [
+    "telegram",
+    "telegram-bot",
+    "customer-support",
+    "helpdesk",
+    "ticket-system",
+    "grammy",
+    "sqlite",
+    "typescript"
+  ],
   "type": "module",
   "engines": {
     "node": ">=20"
