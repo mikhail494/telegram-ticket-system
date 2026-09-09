@@ -1,0 +1,74 @@
+name: Bug report
+description: Report a reproducible problem in the repository
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Do not include secrets, private Telegram data, databases, backups, transcripts, or unredacted support exports.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Release version or commit SHA where the problem occurs.
+      placeholder: "v1.4.0 or abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment type
+      options:
+        - Docker
+        - Node.js directly
+        - Railway
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest reliable sequence that reproduces the problem.
+      placeholder: |
+        1. Configure ...
+        2. Send ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or diagnostics
+      description: Remove tokens, credentials, user data, message contents, and other sensitive values before pasting logs.
+      render: shell
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed secrets and private support data from this report.
+          required: true
+        - label: This is not a security vulnerability. Security reports belong in the private process described in SECURITY.md.
+          required: true
