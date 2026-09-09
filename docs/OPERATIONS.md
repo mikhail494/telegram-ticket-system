@@ -26,7 +26,7 @@ The runtime evaluates health once per minute with one SQLite ping and constant-t
 
 ## Docker runtime
 
-The Docker image enables the operational listener on `0.0.0.0:3000`, runs as the non-root `node` user, and defaults `DATABASE_URL` to `file:/data/support.db`. Docker declares `/data` as a volume, so durable deployments must mount or otherwise persist `/data`; otherwise the database and its local backups disappear with an ephemeral container. The image healthcheck uses `/readyz`. `EXPOSE 3000` and binding to `0.0.0.0` inside the container do not publish a host port by themselves. This repository contains no host-port publication configuration; if a deployment publishes port 3000, bind it to loopback or a private network and enforce firewall or reverse-proxy ACLs. These unauthenticated aggregate operational endpoints remain internal data.
+The Docker image uses the digest-pinned Node.js 24 LTS Bookworm Slim base, enables the operational listener on `0.0.0.0:3000`, runs as the non-root `node` user, and defaults `DATABASE_URL` to `file:/data/support.db`. Docker declares `/data` as a volume, so durable deployments must mount or otherwise persist `/data`; otherwise the database and its local backups disappear with an ephemeral container. The image healthcheck uses `/readyz`. `EXPOSE 3000` and binding to `0.0.0.0` inside the container do not publish a host port by themselves. This repository contains no host-port publication configuration; if a deployment publishes port 3000, bind it to loopback or a private network and enforce firewall or reverse-proxy ACLs. These unauthenticated aggregate operational endpoints remain internal data.
 
 ## SQLite backups
 

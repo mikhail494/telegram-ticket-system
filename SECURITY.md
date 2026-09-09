@@ -36,7 +36,7 @@ Use GitHub's private vulnerability reporting or Security Advisories feature for 
 - Review MODERATE and LOW findings during normal maintenance unless their exploitability changes the priority.
 - Do not use `npm audit fix --force` blindly. Review release notes, regenerate the lockfile only intentionally, and run the full validation and Docker build after dependency changes.
 
-Dependabot checks npm and GitHub Actions weekly. Security updates are reviewed separately; there is no automatic merge. The `@types/node` major-version ignore keeps the supported Node 20 type baseline deliberate rather than silently changing it.
+Dependabot checks npm, GitHub Actions, and the Docker base image weekly. Security updates are reviewed separately; there is no automatic merge. The `@types/node` major-version ignore keeps the supported Node 24 type baseline deliberate rather than silently changing it.
 
 ## Data at Rest Decision
 
@@ -56,7 +56,7 @@ Decision: **DEFER** application-level encryption at rest. Repository-level confi
 
 CI pins `actions/checkout` and `actions/setup-node` to reviewed immutable commit SHAs, with the corresponding release versions documented beside each workflow reference. Dependabot continues to monitor GitHub Actions so those pins can be updated intentionally through reviewed pull requests. `actions/checkout` also runs with persisted Git credentials disabled after checkout.
 
-The Dockerfile still uses the mutable `node:20-bookworm-slim` base-image tag. The npm lockfile pins JavaScript packages, not operating-system layers or the Node base image, so image updates must continue to be reviewed through normal build and runtime validation. A future digest pin should be adopted only together with a maintainable update path rather than copied from an unverified source.
+The Dockerfile pins the official multi-platform `node:24-bookworm-slim` image index by digest. The npm lockfile pins JavaScript packages, not operating-system layers or the Node base image; Dependabot monitors the Docker dependency so image updates remain reviewed through normal build and runtime validation.
 
 ## Filesystem Permissions
 

@@ -17,7 +17,7 @@ npm ci
 cp .env.example .env
 ```
 
-Node.js 20 or newer is required.
+Node.js 24 LTS is required.
 
 ## Required validation
 

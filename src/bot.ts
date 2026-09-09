@@ -864,6 +864,7 @@ export function createBot(
       can_edit_messages: false,
       can_pin_messages: true,
       can_manage_topics: true,
+      can_send_welcome_messages: false,
     };
     const keyboard = new Keyboard()
       .requestChat("Select forum staff group", 1300, {
@@ -1103,6 +1104,7 @@ export function createBot(
       can_edit_messages: false,
       can_pin_messages: false,
       can_manage_topics: false,
+      can_send_welcome_messages: false,
     };
     const keyboard = new Keyboard()
       .requestChat("Select public supergroup", 1400, {
