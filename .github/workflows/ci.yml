@@ -68,4 +68,5 @@ jobs:
           docker image inspect telegram-ticket-system-ci --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx 'OPS_HTTP_ENABLED=true'
           docker image inspect telegram-ticket-system-ci --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx 'OPS_HTTP_HOST=0.0.0.0'
           docker image inspect telegram-ticket-system-ci --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx 'OPS_HTTP_PORT=3000'
+          docker run --rm --entrypoint node telegram-ticket-system-ci --version | grep -Eq '^v24\.'
           docker run --rm --entrypoint node telegram-ticket-system-ci -e "import { accessSync, constants } from 'node:fs'; if (process.getuid() === 0) process.exit(1); accessSync('/data', constants.W_OK);"

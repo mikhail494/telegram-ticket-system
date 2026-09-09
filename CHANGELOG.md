@@ -22,6 +22,7 @@ All notable changes to this project are documented in this file. This project fo
 - Extracted durable Ticket Batch runtime and recovery orchestration, plus ticket routing and close/archive lifecycle, behind focused instance-owned services while preserving existing bot behavior and persistence contracts.
 - Added the idempotent Batch `silent_close` action without changing reply delivery or recovery semantics.
 - Hardened lifecycle ownership, tracked background work, filesystem permissions, backup validation, runtime observability, and container safety while preserving the existing support workflow.
+- Upgraded `better-sqlite3` from the v11 line to 13.0.3 for the Node.js 24 runtime, moving to its current N-API-based native binding.
 - Updated grammY to 1.46.0 for Telegram Bot API 10.3 compatibility, including the unchanged picker permission set.
 - Updated the Docker and CI runtime baseline to Node.js 24 LTS.
 
