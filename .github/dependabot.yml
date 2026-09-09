@@ -44,5 +44,8 @@ updates:
       day: monday
       time: "06:00"
       timezone: Etc/UTC
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
     commit-message:
       prefix: "chore(docker)"

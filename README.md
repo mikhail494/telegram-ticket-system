@@ -8,7 +8,7 @@ A Telegram-native support desk that turns private user messages into structured 
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-7A3E9D.svg)](LICENSE)
 
-Source version: `2.0.0` (unreleased)
+Version: `2.0.0`
 
 [Architecture](docs/ARCHITECTURE.md) · [Operations](docs/OPERATIONS.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [Latest release](https://github.com/mikhail494/telegram-ticket-system/releases/latest)
 
@@ -420,7 +420,7 @@ Use `DATABASE_URL=file:/data/support.db` with a persistent volume mounted at `/d
 
 ## Release
 
-Source version `2.0.0` is not tagged or released yet. Latest stable GitHub Release: [v1.4.0](https://github.com/mikhail494/telegram-ticket-system/releases/tag/v1.4.0).
+Latest stable release: [v2.0.0](https://github.com/mikhail494/telegram-ticket-system/releases/tag/v2.0.0).
 
 See [CHANGELOG.md](CHANGELOG.md) for release history and [LICENSE](LICENSE) for licensing terms.
 
