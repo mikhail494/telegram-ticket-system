@@ -83,7 +83,26 @@ export function resolveDatabasePath(databaseUrl: string): string {
 function ensureDirectoryForDatabase(databasePath: string): void {
   if (databasePath === ":memory:") return;
   const directory = path.dirname(databasePath);
-  if (directory && directory !== ".") fs.mkdirSync(directory, { recursive: true });
+  if (directory && directory !== ".") fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+}
+function createDatabaseFileWithRestrictedPermissions(databasePath: string): void {
+  if (databasePath === ":memory:" || process.platform === "win32") return;
+  try {
+    const descriptor = fs.openSync(databasePath, "wx", 0o600);
+    fs.closeSync(descriptor);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+}
+function secureDatabaseArtifacts(databasePath: string): void {
+  if (databasePath === ":memory:" || process.platform === "win32") return;
+  for (const filePath of [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]) {
+    try {
+      fs.chmodSync(filePath, 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
 }
 export class SupportDatabase {
   private readonly db: Database.Database;
@@ -96,10 +115,12 @@ export class SupportDatabase {
   constructor(databaseUrl: string) {
     const databasePath = resolveDatabasePath(databaseUrl);
     ensureDirectoryForDatabase(databasePath);
+    createDatabaseFileWithRestrictedPermissions(databasePath);
     this.databasePath = databasePath;
     this.db = new Database(databasePath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
+    secureDatabaseArtifacts(databasePath);
     // Migration 20 reads legacy settings through the public facade.
     this.installation = new InstallationRepository(this.db);
     this.migrate();
@@ -107,6 +128,7 @@ export class SupportDatabase {
     this.batch = new TicketBatchRepository(this.db);
     this.moderation = new ModerationRepository(this.db);
     this.quickReplies = new QuickRepliesRepository(this.db);
+    secureDatabaseArtifacts(databasePath);
   }
   close(): void {
     this.db.close();
