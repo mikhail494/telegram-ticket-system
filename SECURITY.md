@@ -54,7 +54,9 @@ Decision: **DEFER** application-level encryption at rest. Repository-level confi
 
 ## Build Supply Chain
 
-CI currently uses maintained major tags for `actions/checkout@v7` and `actions/setup-node@v7`; Dependabot checks GitHub Actions weekly. Tags are easier to maintain but remain mutable references, so they carry less source-build reproducibility than immutable commit SHAs. The Dockerfile likewise uses the mutable `node:20-bookworm-slim` tag: the lockfile pins npm packages, not its operating-system layers. No action SHA or image digest is pinned in this package because a verified, maintainable resolution was not available locally; review future pins together with their Dependabot update path.
+CI pins `actions/checkout` and `actions/setup-node` to reviewed immutable commit SHAs, with the corresponding release versions documented beside each workflow reference. Dependabot continues to monitor GitHub Actions so those pins can be updated intentionally through reviewed pull requests. `actions/checkout` also runs with persisted Git credentials disabled after checkout.
+
+The Dockerfile still uses the mutable `node:20-bookworm-slim` base-image tag. The npm lockfile pins JavaScript packages, not operating-system layers or the Node base image, so image updates must continue to be reviewed through normal build and runtime validation. A future digest pin should be adopted only together with a maintainable update path rather than copied from an unverified source.
 
 ## Filesystem Permissions
 
