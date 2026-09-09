@@ -4,7 +4,6 @@ import type { CommandContext, Context } from "grammy";
 import type { Message, ReactionType, ReactionTypeEmoji, User } from "grammy/types";
 import packageMetadata from "../package.json" with { type: "json" };
 import {
-  archiveTicketIfPossible,
   getSupportLogsTopicInfo,
   initializeSupportLogsTopic,
   logBanEvent,
@@ -15,7 +14,6 @@ import {
 import { config, hostConfig } from "./config.js";
 import {
   SupportDatabase,
-  type TicketRecord,
   type TicketStatus,
   type TicketWithUser,
   type TeamMemberRecord,
@@ -28,11 +26,8 @@ import {
   DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE,
   formatTicketReceived,
   START_TEXT,
-  formatPinnedTicketSummary,
   formatStatus,
   formatTicketDetails,
-  formatTicketPost,
-  formatTicketUpdate,
   formatWhois,
   formatUserTicketList,
   SUPPORT_RESPONSE_TIME_PLACEHOLDER,
@@ -85,6 +80,7 @@ import {
   TicketBatchRuntime,
   TicketBatchStaffOperationError,
 } from "./ticketBatchRuntime.js";
+import { TicketRoutingService } from "./ticketRouting.js";
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
@@ -199,26 +195,9 @@ const STAFF_ONBOARDING_TEXT = [
 
 type BotApi = Context["api"];
 
-interface CloseTicketOptions {
-  notifyUser?: boolean;
-  userText?: string;
-  staffNotice?: string;
-  closedBy?: ArchiveActor;
-  onArchiveFailure?: (diagnostic: NormalizedDeliveryError) => void;
-}
-
 interface BanCommand {
   userId: number;
   reason: string;
-}
-
-interface ErrorWithCode extends Error {
-  code?: string;
-}
-
-interface StaffTextReplySource {
-  chatId: number;
-  messageId: number;
 }
 
 interface QuickRepliesCallbackTarget {
@@ -227,13 +206,6 @@ interface QuickRepliesCallbackTarget {
   messageId: number;
   messageThreadId: number;
 }
-
-type DeliverAndRecordStaffTextReply = (
-  ticket: TicketWithUser,
-  text: string,
-  staffUser: User | undefined,
-  source?: StaffTextReplySource
-) => Promise<number>;
 
 interface BotRuntimeDependencies {
   fetch?: typeof fetch;
@@ -428,33 +400,16 @@ export function createBot(
     );
   }
 
-  async function deliverAndRecordStaffTextReply(
-    ticket: TicketWithUser,
-    text: string,
-    staffUser: User | undefined,
-    source?: StaffTextReplySource
-  ): Promise<number> {
-    const sent = await bot.api.sendMessage(ticket.user_telegram_id, truncate(text.trim(), 3500));
-
-    db.addMessage({
-      ticketId: ticket.id,
-      direction: "STAFF_TO_USER",
-      sourceChatId: source?.chatId ?? ticket.staff_chat_id ?? requireStaffChatId(),
-      sourceMessageId: source?.messageId ?? null,
-      deliveryChatId: ticket.user_telegram_id,
-      deliveryMessageId: sent.message_id,
-      fromTelegramId: staffUser?.id ?? null,
-      fromUsername: usernameOf(staffUser),
-      senderType: "STAFF",
-      senderDisplayName: staffUser ? displayTelegramUser(staffUser) : "Support",
-      senderUsername: usernameOf(staffUser),
-      text,
-      mediaType: null,
-      filename: null,
-      fileId: null,
-    });
-    return sent.message_id;
-  }
+  const ticketRouting = new TicketRoutingService({
+    db,
+    api: bot.api,
+    installation,
+    staffTicketKeyboard,
+    userTicketKeyboard,
+    bannedText: BANNED_TEXT,
+    supportExpectedResponseTimeSettingKey: SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY,
+    supportTicketReceivedTemplateSettingKey: SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY,
+  });
 
   const ticketBatchRuntime = new TicketBatchRuntime({
     db,
@@ -462,13 +417,12 @@ export function createBot(
     installation,
     backgroundTasks,
     runStaffChatOperation,
-    deliverUserReply: deliverAndRecordStaffTextReply,
+    deliverUserReply: ticketRouting.deliverAndRecordStaffTextReply.bind(ticketRouting),
     closeTicket: async (ticketId, options, staffChatId) => {
-      await closeTicket(db, bot.api, installation, ticketId, options, staffChatId);
+      await ticketRouting.closeTicket(ticketId, options, staffChatId);
     },
     staffActor,
-    refreshTicket: (ticketId, staffChatId) =>
-      refreshStaffTicketMessage(db, bot.api, installation, ticketId, staffChatId),
+    refreshTicket: (ticketId, staffChatId) => ticketRouting.refreshTicket(ticketId, staffChatId),
   });
 
   function quickRepliesCategoryKeyboard(ticketId: number): InlineKeyboard {
@@ -657,10 +611,10 @@ export function createBot(
       }
 
       try {
-        await deliverAndRecordStaffTextReply(target.ticket, template.text, ctx.from);
+        await ticketRouting.deliverAndRecordStaffTextReply(target.ticket, template.text, ctx.from);
       } catch (error) {
         logger.error({ err: error, ticketId: target.ticket.id }, "Could not deliver Quick Reply to user");
-        await sendStaffTopicNotice(
+        await ticketRouting.sendStaffTopicNotice(
           ctx.api,
           requireStaffChatId(),
           target.ticket,
@@ -676,7 +630,7 @@ export function createBot(
       if (target.ticket.status === "OPEN") {
         try {
           db.updateTicketStatus(target.ticket.id, "IN_PROGRESS");
-          await refreshStaffTicketMessage(db, ctx.api, installation, target.ticket.id);
+          await ticketRouting.refreshTicket(target.ticket.id);
         } catch (error) {
           logger.warn({ err: error, ticketId: target.ticket.id }, "Could not refresh ticket after Quick Reply");
         }
@@ -1971,7 +1925,7 @@ export function createBot(
       return;
     }
 
-    const result = await closeTicket(db, ctx.api, installation, ticketId, {
+    const result = await ticketRouting.closeTicket(ticketId, {
       notifyUser: true,
       staffNotice: "Ticket closed by staff.",
       closedBy: staffActor(ctx.from),
@@ -1994,7 +1948,7 @@ export function createBot(
       return;
     }
 
-    await banUserById(db, ctx.api, installation, command.userId, command.reason, staffActor(ctx.from));
+    await ticketRouting.banUserById(command.userId, command.reason, staffActor(ctx.from));
     await notifyStaff(ctx.api, requireStaffChatId(), `User ${command.userId} has been banned.`);
   });
 
@@ -2280,7 +2234,7 @@ export function createBot(
     }
 
     if (namespace === "user") {
-      await handleUserCallback(db, ctx, installation, data, async (ticketId) => {
+      await handleUserCallback(db, ctx, installation, ticketRouting, data, async (ticketId) => {
         if (!ctx.from || staffTestTicketId(ctx.from.id) !== ticketId) return;
         setStaffTestTicketId(ctx.from.id, undefined);
         await showDashboardAfterStaffTestTicketClose(ctx);
@@ -2289,7 +2243,7 @@ export function createBot(
     }
 
     if (namespace === "ticket") {
-      await handleStaffCallback(db, ctx, installation, data);
+      await handleStaffCallback(db, ctx, installation, ticketRouting, data);
       return;
     }
 
@@ -2510,7 +2464,7 @@ export function createBot(
         await handleTicketAnswerPackageUpload(ctx);
         return;
       }
-      await handleStaffGroupMessage(db, ctx, installation, deliverAndRecordStaffTextReply);
+      await ticketRouting.handleStaffGroupMessage(ctx, () => hasApplicationPermission(ctx, "REPLY_TO_TICKETS"));
       return;
     }
 
@@ -2626,7 +2580,7 @@ export function createBot(
     }
 
     if (staffTestTicketMode) await retireTrackedPrivateScreens(ctx);
-    await handlePrivateUserMessage(db, ctx, installation);
+    await ticketRouting.handlePrivateUserMessage(ctx);
     if (staffTestTicketMode && ctx.from) {
       const activeTicket = db.findActiveTicketForUser(ctx.from.id, requireStaffChatId());
       if (activeTicket) {
@@ -3042,315 +2996,11 @@ export async function sendStaffOnboardingIfNeeded(
   }
 }
 
-async function handlePrivateUserMessage(
-  db: SupportDatabase,
-  ctx: Context,
-  installation: InstallationService
-): Promise<void> {
-  if (!ctx.from || !ctx.chat || !ctx.message) {
-    return;
-  }
-
-  if (!messageHasTextOrSupportedMedia(ctx.message)) {
-    await ctx.reply("Please send your issue as text, photo, screenshot, or document.");
-    return;
-  }
-
-  persistUserFromContext(db, ctx);
-
-  const activeTicket = db.findActiveTicketForUser(ctx.from.id, installation.requireStaffChatId());
-  if (activeTicket) {
-    await appendToExistingTicket(db, ctx, installation, activeTicket);
-    return;
-  }
-
-  await createFreshTicketFromUserMessage(db, ctx, installation);
-}
-
-async function createFreshTicketFromUserMessage(
-  db: SupportDatabase,
-  ctx: Context,
-  installation: InstallationService
-): Promise<void> {
-  if (!ctx.from || !ctx.chat || !ctx.message) {
-    return;
-  }
-
-  const acknowledgement = validateRenderedSupportAcknowledgement(
-    db.getSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE,
-    db.getSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME
-  );
-  if (acknowledgement.error) {
-    logger.error({ userId: ctx.from.id }, "Support acknowledgement settings exceed Telegram's message limit");
-    await ctx.reply("Sorry, support acknowledgement settings need attention. Please try again later.");
-    return;
-  }
-
-  let ticket: TicketRecord;
-  try {
-    ticket = db.createTicket(ctx.from.id, installation.requireStaffChatId());
-  } catch (error) {
-    if (isSqliteConstraint(error)) {
-      const activeTicket = db.findActiveTicketForUser(ctx.from.id, installation.requireStaffChatId());
-      if (activeTicket) {
-        await appendToExistingTicket(db, ctx, installation, activeTicket);
-        return;
-      }
-    }
-
-    throw error;
-  }
-
-  const content = getMessageContent(ctx.message);
-
-  db.addMessage({
-    ticketId: ticket.id,
-    direction: "USER_TO_STAFF",
-    sourceChatId: ctx.chat.id,
-    sourceMessageId: ctx.message.message_id,
-    fromTelegramId: ctx.from.id,
-    fromUsername: usernameOf(ctx.from),
-    senderType: "USER",
-    senderDisplayName: displayTelegramUser(ctx.from),
-    senderUsername: usernameOf(ctx.from),
-    text: content.text,
-    mediaType: content.mediaType,
-    filename: content.filename,
-    fileId: content.fileId,
-  });
-
-  let messageThreadId: number;
-  try {
-    const topic = await ctx.api.createForumTopic(installation.requireStaffChatId(), topicName(ticket.id, ctx.from));
-    messageThreadId = topic.message_thread_id;
-    db.updateTicketForumTopic(ticket.id, installation.requireStaffChatId(), messageThreadId);
-  } catch (error) {
-    logger.error({ err: error, ticketId: ticket.id }, "Could not create staff forum topic");
-    db.updateTicketStatus(ticket.id, "CLOSED");
-    db.deleteMessagesForTicket(ticket.id);
-    await ctx.reply("Sorry, we could not create a support topic. Please try again later.");
-    return;
-  }
-
-  const ticketWithTopic = db.getTicketWithUser(ticket.id);
-  if (!ticketWithTopic?.message_thread_id) {
-    db.updateTicketStatus(ticket.id, "CLOSED");
-    db.deleteMessagesForTicket(ticket.id);
-    await ctx.reply("Sorry, we could not route your request to support. Please try again later.");
-    return;
-  }
-
-  try {
-    const summary = await ctx.api.sendMessage(
-      installation.requireStaffChatId(),
-      formatPinnedTicketSummary(ticketWithTopic),
-      {
-        message_thread_id: messageThreadId,
-        reply_markup: staffTicketKeyboard(ticket.id),
-      }
-    );
-    db.updateTicketStaffMessage(ticket.id, summary.chat.id, summary.message_id);
-    await pinMessageSafely(ctx.api, summary.chat.id, summary.message_id, ticket.id);
-
-    await ctx.api.sendMessage(installation.requireStaffChatId(), formatTicketPost(ticketWithTopic, content.text), {
-      message_thread_id: messageThreadId,
-    });
-  } catch (error) {
-    logger.error({ err: error, ticketId: ticket.id }, "Could not send ticket intro to staff topic");
-    db.updateTicketStatus(ticket.id, "CLOSED");
-    db.deleteMessagesForTicket(ticket.id);
-    await closeForumTopicSafely(ctx.api, ticketWithTopic);
-    await ctx.reply("Sorry, we could not route your request to support. Please try again later.");
-    return;
-  }
-
-  db.closeOtherActiveTicketsForUserInStaffChat(ctx.from.id, installation.requireStaffChatId(), ticket.id);
-  await maybeCopyOriginalMessageToStaff(db, ctx, installation, ticketWithTopic, content.shouldCopyOriginal);
-  await ctx.reply(acknowledgement.rendered, {
-    reply_markup: userTicketKeyboard(ticket.id),
-  });
-}
-
-async function appendToExistingTicket(
-  db: SupportDatabase,
-  ctx: Context,
-  installation: InstallationService,
-  activeTicket: TicketRecord
-): Promise<void> {
-  if (!ctx.from || !ctx.chat || !ctx.message) {
-    return;
-  }
-
-  if (activeTicket.staff_chat_id !== installation.requireStaffChatId() || activeTicket.message_thread_id === null) {
-    const readyTicket = await waitForTicketTopic(db, activeTicket.id);
-    if (readyTicket && readyTicket.status !== "CLOSED") {
-      await appendToExistingTicket(db, ctx, installation, readyTicket);
-      return;
-    }
-
-    logger.warn({ ticketId: activeTicket.id }, "Active ticket topic was not created in time");
-    if (readyTicket?.status !== "CLOSED") {
-      db.closeTicketRecord(activeTicket.id, systemActor());
-      await archiveTicketIfPossible(ctx.api, db, installation.requireStaffChatId(), activeTicket.id);
-    }
-    await createFreshTicketFromUserMessage(db, ctx, installation);
-    return;
-  }
-
-  const content = getMessageContent(ctx.message);
-
-  try {
-    await ctx.api.sendMessage(
-      installation.requireStaffChatId(),
-      formatTicketUpdate(ctx.from, content.text, content.mediaType, content.filename),
-      {
-        message_thread_id: activeTicket.message_thread_id,
-      }
-    );
-
-    db.addMessage({
-      ticketId: activeTicket.id,
-      direction: "USER_TO_STAFF",
-      sourceChatId: ctx.chat.id,
-      sourceMessageId: ctx.message.message_id,
-      fromTelegramId: ctx.from.id,
-      fromUsername: usernameOf(ctx.from),
-      senderType: "USER",
-      senderDisplayName: displayTelegramUser(ctx.from),
-      senderUsername: usernameOf(ctx.from),
-      text: content.text,
-      mediaType: content.mediaType,
-      filename: content.filename,
-      fileId: content.fileId,
-    });
-
-    if (activeTicket.status === "WAITING_USER") {
-      db.clearWaitingUserFollowUp(activeTicket.id);
-      db.updateTicketStatus(activeTicket.id, "IN_PROGRESS");
-    }
-
-    const ticketWithUser = db.getTicketWithUser(activeTicket.id);
-    if (ticketWithUser) {
-      await maybeCopyOriginalMessageToStaff(db, ctx, installation, ticketWithUser, content.shouldCopyOriginal);
-      await refreshStaffTicketMessage(db, ctx.api, installation, activeTicket.id);
-    }
-
-    db.closeOtherActiveTicketsForUserInStaffChat(ctx.from.id, installation.requireStaffChatId(), activeTicket.id);
-  } catch (error) {
-    if (isForumTopicUnavailable(error)) {
-      logger.warn(
-        { err: error, ticketId: activeTicket.id, messageThreadId: activeTicket.message_thread_id },
-        "Staff forum topic is unavailable; creating a fresh ticket"
-      );
-      db.closeTicketRecord(activeTicket.id, systemActor());
-      await archiveTicketIfPossible(ctx.api, db, installation.requireStaffChatId(), activeTicket.id);
-      await createFreshTicketFromUserMessage(db, ctx, installation);
-      return;
-    }
-
-    logger.error({ err: error, ticketId: activeTicket.id }, "Could not notify staff about user update");
-    await ctx.reply("Sorry, we could not route your update to support. Please try again later.");
-    return;
-  }
-}
-
-async function handleStaffGroupMessage(
-  db: SupportDatabase,
-  ctx: Context,
-  installation: InstallationService,
-  deliverAndRecordStaffTextReply: DeliverAndRecordStaffTextReply
-): Promise<void> {
-  if (!ctx.message || !ctx.chat) {
-    return;
-  }
-
-  if ("text" in ctx.message && isCommandText(ctx.message.text)) {
-    return;
-  }
-
-  const messageThreadId = ctx.message.message_thread_id;
-  if (typeof messageThreadId !== "number") {
-    return;
-  }
-
-  const ticket = db.findTicketByStaffThread(ctx.chat.id, messageThreadId);
-  if (!ticket) {
-    return;
-  }
-
-  if (!hasApplicationPermission(ctx, installation, "REPLY_TO_TICKETS")) {
-    await ctx.reply("Your application role does not allow ticket replies.", { message_thread_id: messageThreadId });
-    return;
-  }
-
-  if (!messageHasTextOrSupportedMedia(ctx.message)) {
-    return;
-  }
-
-  if (ticket.status === "CLOSED") {
-    await sendStaffTopicNotice(
-      ctx.api,
-      installation.requireStaffChatId(),
-      ticket,
-      `Ticket #${ticket.id} is closed. The reply was not sent to the user.`
-    );
-    return;
-  }
-
-  const content = getMessageContent(ctx.message);
-
-  try {
-    if (content.mediaType) {
-      const delivered = await deliverStaffMediaReplyToUser(
-        ctx.api,
-        installation.requireStaffChatId(),
-        ticket,
-        ctx.message.message_id
-      );
-
-      db.addMessage({
-        ticketId: ticket.id,
-        direction: "STAFF_TO_USER",
-        sourceChatId: ctx.chat.id,
-        sourceMessageId: ctx.message.message_id,
-        deliveryChatId: ticket.user_telegram_id,
-        deliveryMessageId: delivered,
-        fromTelegramId: ctx.from?.id ?? null,
-        fromUsername: usernameOf(ctx.from),
-        senderType: "STAFF",
-        senderDisplayName: ctx.from ? displayTelegramUser(ctx.from) : "Support",
-        senderUsername: usernameOf(ctx.from),
-        text: content.text,
-        mediaType: content.mediaType,
-        filename: content.filename,
-        fileId: content.fileId,
-      });
-    } else {
-      await deliverAndRecordStaffTextReply(ticket, content.text ?? "", ctx.from, {
-        chatId: ctx.chat.id,
-        messageId: ctx.message.message_id,
-      });
-    }
-
-    if (ticket.status === "OPEN") {
-      db.updateTicketStatus(ticket.id, "IN_PROGRESS");
-      await refreshStaffTicketMessage(db, ctx.api, installation, ticket.id);
-    }
-  } catch (error) {
-    logger.error({ err: error, ticketId: ticket.id }, "Could not deliver staff reply to user");
-    await sendStaffTopicNotice(
-      ctx.api,
-      installation.requireStaffChatId(),
-      ticket,
-      `Could not deliver staff reply for ticket #${ticket.id} to user ${ticket.user_telegram_id}: ${describeError(error)}`
-    );
-  }
-}
-
 async function handleUserCallback(
   db: SupportDatabase,
   ctx: Context,
   installation: InstallationService,
+  ticketRouting: TicketRoutingService,
   data: string,
   onStaffTestTicketClosed?: (ticketId: number) => Promise<void>
 ): Promise<void> {
@@ -3380,10 +3030,7 @@ async function handleUserCallback(
     ticket.user_telegram_id !== ctx.from.id ||
     ticket.staff_chat_id !== installation.requireStaffChatId()
   ) {
-    await ctx.answerCallbackQuery({
-      text: "Ticket not found.",
-      show_alert: true,
-    });
+    await ctx.answerCallbackQuery({ text: "Ticket not found.", show_alert: true });
     return;
   }
 
@@ -3392,12 +3039,11 @@ async function handleUserCallback(
     return;
   }
 
-  await closeTicket(db, ctx.api, installation, ticket.id, {
+  await ticketRouting.closeTicket(ticket.id, {
     notifyUser: false,
     staffNotice: "User closed this ticket.",
     closedBy: userActor(ctx.from),
   });
-
   await ctx.answerCallbackQuery({ text: "Ticket closed." });
   await ctx.reply(CLOSED_TEXT);
   await onStaffTestTicketClosed?.(ticket.id);
@@ -3407,9 +3053,7 @@ async function warnThrottledCustomerIngress(
   ctx: Context,
   decision: Extract<SupportIngressDecision, { allowed: false }>
 ): Promise<void> {
-  if (!decision.shouldWarn || !ctx.from) {
-    return;
-  }
+  if (!decision.shouldWarn || !ctx.from) return;
 
   logger.warn(
     {
@@ -3433,13 +3077,11 @@ async function handleStaffCallback(
   db: SupportDatabase,
   ctx: Context,
   installation: InstallationService,
+  ticketRouting: TicketRoutingService,
   data: string
 ): Promise<void> {
   if (!isStaffChat(ctx, installation)) {
-    await ctx.answerCallbackQuery({
-      text: "Staff only.",
-      show_alert: true,
-    });
+    await ctx.answerCallbackQuery({ text: "Staff only.", show_alert: true });
     return;
   }
 
@@ -3461,7 +3103,7 @@ async function handleStaffCallback(
       await ctx.answerCallbackQuery({ text: "Your application role cannot close tickets.", show_alert: true });
       return;
     }
-    const result = await closeTicket(db, ctx.api, installation, ticket.id, {
+    const result = await ticketRouting.closeTicket(ticket.id, {
       notifyUser: true,
       staffNotice: "Ticket closed by staff.",
       closedBy: staffActor(ctx.from),
@@ -3481,8 +3123,8 @@ async function handleStaffCallback(
     }
 
     db.updateTicketStatus(ticket.id, rawStatus);
-    await refreshStaffTicketMessage(db, ctx.api, installation, ticket.id);
-    await sendStaffTopicNotice(
+    await ticketRouting.refreshTicket(ticket.id);
+    await ticketRouting.sendStaffTopicNotice(
       ctx.api,
       installation.requireStaffChatId(),
       ticket,
@@ -3497,255 +3139,12 @@ async function handleStaffCallback(
       await ctx.answerCallbackQuery({ text: "Your role cannot ban users.", show_alert: true });
       return;
     }
-    await banUserForTicket(db, ctx.api, installation, ticket, staffActor(ctx.from), `Banned from ticket #${ticket.id}`);
+    await ticketRouting.banUserForTicket(ticket, staffActor(ctx.from), `Banned from ticket #${ticket.id}`);
     await ctx.answerCallbackQuery({ text: `User ${ticket.user_telegram_id} banned.` });
     return;
   }
 
   await ctx.answerCallbackQuery({ text: "Unknown action." });
-}
-
-async function banUserById(
-  db: SupportDatabase,
-  api: BotApi,
-  installation: InstallationService,
-  userId: number,
-  reason: string,
-  actor: ArchiveActor
-): Promise<void> {
-  const user = db.getUser(userId);
-  db.banUser({
-    userTelegramId: userId,
-    username: user?.username ?? null,
-    reason,
-    bannedBy: actor.telegramId,
-  });
-
-  await logBanEvent(api, db, installation.requireStaffChatId(), {
-    action: "BANNED",
-    userTelegramId: userId,
-    username: user?.username ?? null,
-    reason,
-    performedBy: actor,
-  });
-
-  const activeTicket = db.findActiveTicketForUser(userId, installation.requireStaffChatId());
-  if (activeTicket) {
-    const ticket = db.getTicketWithUser(activeTicket.id);
-    if (ticket) {
-      await closeTicket(db, api, installation, ticket.id, {
-        notifyUser: true,
-        userText: BANNED_TEXT,
-        staffNotice: `User ${userId} was banned. Reason: ${reason}`,
-        closedBy: actor,
-      });
-      db.closeOtherActiveTicketsForUserInStaffChat(userId, installation.requireStaffChatId(), ticket.id);
-      return;
-    }
-  }
-
-  await notifyUserOrStaff(
-    api,
-    installation.requireStaffChatId(),
-    userId,
-    BANNED_TEXT,
-    activeTicket?.message_thread_id ?? null
-  );
-}
-
-async function banUserForTicket(
-  db: SupportDatabase,
-  api: BotApi,
-  installation: InstallationService,
-  ticket: TicketWithUser,
-  actor: ArchiveActor,
-  reason: string
-): Promise<void> {
-  db.banUser({
-    userTelegramId: ticket.user_telegram_id,
-    username: ticket.username,
-    reason,
-    bannedBy: actor.telegramId,
-  });
-
-  await logBanEvent(api, db, installation.requireStaffChatId(), {
-    action: "BANNED",
-    userTelegramId: ticket.user_telegram_id,
-    username: ticket.username,
-    reason,
-    performedBy: actor,
-  });
-
-  await closeTicket(db, api, installation, ticket.id, {
-    notifyUser: true,
-    userText: BANNED_TEXT,
-    staffNotice: `User ${ticket.user_telegram_id} has been banned. Reason: ${reason}`,
-    closedBy: actor,
-  });
-  db.closeOtherActiveTicketsForUserInStaffChat(ticket.user_telegram_id, installation.requireStaffChatId(), ticket.id);
-}
-
-async function closeTicket(
-  db: SupportDatabase,
-  api: BotApi,
-  installation: InstallationService,
-  ticketId: number,
-  options: CloseTicketOptions = {},
-  staffChatId = installation.requireStaffChatId()
-): Promise<string> {
-  const ticket = db.getTicketWithUser(ticketId);
-  if (!ticket || ticket.staff_chat_id !== staffChatId) {
-    return `Ticket #${ticketId} was not found in this staff chat.`;
-  }
-
-  if (ticket.status === "CLOSED") {
-    const archived = await archiveTicketIfPossible(api, db, staffChatId, ticketId, {
-      onFailure: options.onArchiveFailure,
-    });
-    return archived
-      ? `Ticket #${ticketId} is already closed and archived.`
-      : `Ticket #${ticketId} is already closed. Transcript archive is pending retry.`;
-  }
-
-  const closedTicket = db.closeTicketRecord(ticketId, options.closedBy ?? systemActor());
-  await refreshStaffTicketMessage(db, api, installation, ticketId, staffChatId);
-
-  if (options.staffNotice) {
-    await sendStaffTopicNotice(api, staffChatId, ticket, options.staffNotice);
-  }
-
-  if (options.notifyUser) {
-    await notifyUserOrStaff(
-      api,
-      staffChatId,
-      ticket.user_telegram_id,
-      options.userText ?? CLOSED_TEXT,
-      ticket.message_thread_id
-    );
-  }
-
-  const archived = await archiveTicketIfPossible(api, db, staffChatId, ticketId, {
-    onFailure: options.onArchiveFailure,
-  });
-
-  return archived
-    ? `Ticket #${closedTicket?.id ?? ticketId} closed and archived.`
-    : `Ticket #${closedTicket?.id ?? ticketId} closed. Transcript archive is pending retry.`;
-}
-
-async function refreshStaffTicketMessage(
-  db: SupportDatabase,
-  api: BotApi,
-  installation: InstallationService,
-  ticketId: number,
-  staffChatId = installation.requireStaffChatId()
-): Promise<void> {
-  const ticket = db.getTicketWithUser(ticketId);
-  if (!ticket?.staff_chat_id || ticket.staff_chat_id !== staffChatId || !ticket.staff_message_id) {
-    return;
-  }
-
-  try {
-    await api.editMessageText(ticket.staff_chat_id, ticket.staff_message_id, formatPinnedTicketSummary(ticket), {
-      reply_markup: ticket.status === "CLOSED" ? undefined : staffTicketKeyboard(ticket.id),
-    });
-  } catch (error) {
-    if (error instanceof GrammyError && error.description.includes("message is not modified")) {
-      return;
-    }
-
-    logger.warn({ err: error, ticketId }, "Could not refresh staff ticket intro");
-  }
-}
-
-async function maybeCopyOriginalMessageToStaff(
-  db: SupportDatabase,
-  ctx: Context,
-  installation: InstallationService,
-  ticket: TicketWithUser,
-  shouldCopyOriginal: boolean
-): Promise<void> {
-  if (!shouldCopyOriginal || !ctx.chat || !ctx.message || !ticket.message_thread_id) {
-    return;
-  }
-
-  try {
-    await ctx.api.copyMessage(installation.requireStaffChatId(), ctx.chat.id, ctx.message.message_id, {
-      message_thread_id: ticket.message_thread_id,
-    });
-  } catch (error) {
-    logger.error({ err: error, ticketId: ticket.id }, "Could not copy original user message to staff topic");
-    await sendStaffTopicNotice(
-      ctx.api,
-      installation.requireStaffChatId(),
-      ticket,
-      `Ticket #${ticket.id} was created, but the attachment could not be copied: ${describeError(error)}`
-    );
-  }
-}
-
-async function deliverStaffMediaReplyToUser(
-  api: BotApi,
-  staffChatId: number,
-  ticket: TicketWithUser,
-  sourceMessageId: number
-): Promise<number> {
-  const sourceChatId = ticket.staff_chat_id ?? staffChatId;
-  const copied = await api.copyMessage(ticket.user_telegram_id, sourceChatId, sourceMessageId);
-  return copied.message_id;
-}
-
-async function pinMessageSafely(api: BotApi, chatId: number, messageId: number, ticketId: number): Promise<void> {
-  try {
-    await api.pinChatMessage(chatId, messageId, {
-      disable_notification: true,
-    });
-  } catch (error) {
-    logger.warn({ err: error, ticketId }, "Could not pin ticket summary");
-  }
-}
-
-async function waitForTicketTopic(
-  db: SupportDatabase,
-  ticketId: number,
-  attempts = 10
-): Promise<TicketRecord | undefined> {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const ticket = db.getTicket(ticketId);
-    if (!ticket || ticket.status === "CLOSED" || ticket.message_thread_id !== null) {
-      return ticket;
-    }
-
-    await sleep(250);
-  }
-
-  return db.getTicket(ticketId);
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
-}
-
-async function sendStaffTopicNotice(
-  api: BotApi,
-  staffChatId: number,
-  ticket: TicketRecord,
-  text: string
-): Promise<void> {
-  if (!ticket.staff_chat_id || !ticket.message_thread_id) {
-    await notifyStaff(api, staffChatId, text);
-    return;
-  }
-
-  try {
-    await api.sendMessage(ticket.staff_chat_id, truncate(text, 3500), {
-      message_thread_id: ticket.message_thread_id,
-    });
-  } catch (error) {
-    logger.error({ err: error, ticketId: ticket.id }, "Could not send staff topic notice");
-  }
 }
 
 async function notifyStaff(
@@ -3762,39 +3161,6 @@ async function notifyStaff(
     logger.error({ err: error }, "Could not send log message to staff chat");
   }
 }
-
-async function notifyUserOrStaff(
-  api: BotApi,
-  staffChatId: number,
-  userTelegramId: number,
-  text: string,
-  messageThreadId?: number | null
-): Promise<void> {
-  try {
-    await api.sendMessage(userTelegramId, text);
-  } catch (error) {
-    logger.error({ err: error, userTelegramId }, "Could not message user");
-    await notifyStaff(
-      api,
-      staffChatId,
-      `Could not message user ${userTelegramId}: ${describeError(error)}`,
-      messageThreadId
-    );
-  }
-}
-
-async function closeForumTopicSafely(api: BotApi, ticket: TicketRecord): Promise<void> {
-  if (!ticket.staff_chat_id || !ticket.message_thread_id) {
-    return;
-  }
-
-  try {
-    await api.closeForumTopic(ticket.staff_chat_id, ticket.message_thread_id);
-  } catch (error) {
-    logger.warn({ err: error, ticketId: ticket.id }, "Could not close forum topic");
-  }
-}
-
 function staffTicketKeyboard(ticketId: number): InlineKeyboard {
   return new InlineKeyboard()
     .text("Close ticket", `ticket:close:${ticketId}`)
@@ -3948,11 +3314,6 @@ function formatSupportLogsTopicInfo(topic: SupportLogsTopicInfo, staffChatId: nu
 
 function staffHelpSentSettingKey(staffChatId: number): string {
   return `${STAFF_HELP_SENT_SETTING_PREFIX}:${staffChatId}`;
-}
-
-function topicName(ticketId: number, user: { id: number; username?: string }): string {
-  const userLabel = user.username ? `@${user.username}` : `user_${user.id}`;
-  return truncate(`#${ticketId} | ${userLabel}`, 128);
 }
 
 function staffActor(user: Context["from"]): ArchiveActor {
@@ -4604,34 +3965,4 @@ function describeError(error: unknown): string {
   }
 
   return String(error);
-}
-
-function isForumTopicUnavailable(error: unknown): boolean {
-  const message = describeError(error).toLowerCase();
-  return (
-    message.includes("message thread not found") ||
-    message.includes("message_thread_id") ||
-    message.includes("topic not found") ||
-    message.includes("message to be replied not found") ||
-    message.includes("reply message not found") ||
-    message.includes("replied message not found")
-  );
-}
-
-function isSqliteConstraint(error: unknown): error is ErrorWithCode {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    typeof (error as ErrorWithCode).code === "string" &&
-    (error as ErrorWithCode).code === "SQLITE_CONSTRAINT_UNIQUE"
-  );
-}
-
-function messageHasTextOrSupportedMedia(message: Message | undefined): boolean {
-  if (!message) {
-    return false;
-  }
-
-  const content = getMessageContent(message);
-  return Boolean(content.text || content.mediaType);
 }
