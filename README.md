@@ -19,7 +19,7 @@ Users contact the bot in private chat, while staff work entirely in a dedicated 
 - One ticket equals one Telegram forum topic.
 - Bidirectional user and staff routing, including common Telegram media types.
 - JSON-configured Quick Replies with categories, pagination, and transcript recording.
-- Deterministic ticket-batch export and idempotent answer-package Apply workflow.
+- Deterministic ticket-batch export and idempotent answer-package Apply workflow, including `silent_close`.
 - Configurable English-only public-chat moderation with persistent sanction recovery.
 - Generic entity-notification interface for authoritative event providers.
 - Persistent ticket lifecycle, bans, settings, and idempotent SQLite migrations.
@@ -131,7 +131,7 @@ Operator workflow:
 4. Review the single paginated preview message. Previous and Next edit that same Telegram message; no per-ticket preview messages are created.
 5. Press Apply to delete the preview and run the validated instructions, or Cancel to delete it without ticket changes.
 
-Answer packages must contain every exported ticket exactly once. Apply blocks stale tickets and supports `reply_keep_open` and `reply_and_close`, reusing the normal delivery, transcript, close, archive, and Support Logs paths. Apply produces at most one aggregate staff summary, not per-ticket progress messages. Staff-only topic events and final summaries are coordinated per staff chat, persist retry state after Telegram rate limits, and recover after restart without retrying user-facing delivery. The summary counts requested `no_action` answers independently from staff-topic synchronization and reports pending or terminal staff-sync failures separately. Undelivered batch replies retain sanitized delivery diagnostics; permanent and unknown outcomes are never resent automatically.
+Answer packages must contain every exported ticket exactly once. Apply blocks stale tickets and supports `reply_keep_open`, `reply_and_close`, and `silent_close`, reusing the normal delivery, transcript, close, archive, and Support Logs paths. Apply produces at most one aggregate staff summary, not per-ticket progress messages. Staff-only topic events and final summaries are coordinated per staff chat, persist retry state after Telegram rate limits, and recover after restart without retrying user-facing delivery. The summary counts requested `no_action` answers independently from staff-topic synchronization and reports pending or terminal staff-sync failures separately. Undelivered batch replies retain sanitized delivery diagnostics; permanent and unknown outcomes are never resent automatically.
 
 ### Follow-up Context
 
@@ -298,7 +298,9 @@ src/                         grammY composition, ticket/customer/staff routing, 
 src/privateControlPlane.ts   Private operator dashboard, navigation, configuration, and ephemeral UI state
 src/db.ts                    SQLite connection, migrations, backup/ping lifecycle, and compatibility facade
 src/persistence/             Ticket, Batch, installation, moderation, and Quick Reply persistence repositories
-src/ticketBatch.ts           Ticket export and answer-package validation/apply workflow
+src/ticketRouting.ts         Customer/staff ticket routing, transcript, close/archive, and support-ban lifecycle
+src/ticketBatch.ts           Ticket export and answer-package validation
+src/ticketBatchRuntime.ts    Durable Batch Apply, recovery, and staff synchronization runtime
 src/languageModeration.ts    Public English-only moderation and recovery logic
 src/entityNotifications.ts   Generic created-event validation, rendering, and publication state
 src/installation.ts          Setup state, workspaces, OWNER pairing, team roles, invitations, and authorization

@@ -8,6 +8,10 @@ All notable changes to this project are documented in this file. This project fo
 
 - Instance-owned runtime health telemetry, polling-aware readiness, low-cardinality Prometheus metrics, and bounded staff-workspace alerts for database, polling, and backup degradation and recovery.
 
+### Changed
+
+- Extracted durable Ticket Batch runtime and recovery orchestration, plus ticket routing and close/archive lifecycle, behind focused instance-owned services while preserving existing bot behavior and persistence contracts.
+
 ## [1.4.0] - 2026-08-15
 
 ### Added

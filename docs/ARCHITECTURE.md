@@ -32,20 +32,29 @@ flowchart TD
 
 The repositories are persistence-only modules. They share the connection owned by the facade, do not import Telegram libraries, and do not close the database. This is an incremental boundary: application code still uses `SupportDatabase` directly until narrower repository interfaces are justified by a later change.
 
-`src/bot.ts` remains the grammY composition root and routes four distinct update paths: customer ticket ingress, the staff workspace, managed public-chat moderation, and private operator control. `PrivateControlPlane` owns private operator dashboard/navigation rendering, authoritative-screen lifecycle, stale callback rejection, editor and picker sessions, and callback/input dispatch for Team, public chats, moderation, Support settings, and Quick Replies. It deliberately remains grammY-aware because it is the Telegram adapter for OWNER and staff administration, while installation, Quick Reply, moderation, and Batch services retain their business state.
+`src/bot.ts` is the grammY composition root: it wires middleware, command and callback registration, operator UI, and the application's services. It delegates customer-to-ticket and staff-topic-to-customer routing to `TicketRoutingService`, and delegates durable Batch Apply and recovery orchestration to `TicketBatchRuntime`. `PrivateControlPlane` owns private operator dashboard/navigation rendering, authoritative-screen lifecycle, stale callback rejection, editor and picker sessions, and callback/input dispatch for Team, public chats, moderation, Support settings, and Quick Replies. It deliberately remains grammY-aware because it is the Telegram adapter for OWNER and staff administration, while installation, Quick Reply, moderation, and Batch services retain their business state.
 
 ```mermaid
 flowchart TD
   T[Telegram update] --> B[bot composition and routing]
-  B --> C[Customer ticket path]
-  B --> W[Staff workspace path]
+  B --> R[TicketRoutingService]
+  R --> C[Customer ticket path]
+  R --> W[Staff workspace path]
   B --> M[Public moderation path]
   B --> P[PrivateControlPlane]
+  B --> BR[TicketBatchRuntime]
+  R -. narrow routing callbacks .-> BR
   P --> I[InstallationService]
   P --> D[(SupportDatabase)]
   P --> Q[Quick Replies registry]
-  P --> BS[Batch status and domain services]
+  BR --> BS[Durable Batch state and recovery]
 ```
+
+`TicketRoutingService` owns customer ticket creation and continuation, staff-topic replies, transcript persistence, close/archive lifecycle, and the tightly coupled support-ban lifecycle. It reads the active staff workspace dynamically from `InstallationService`; Batch recovery passes an explicit workspace binding where an operation must remain attached to the workspace that created it.
+
+`TicketBatchRuntime` owns the persisted Batch Apply state machine, retry scheduling, delivery and `UNKNOWN_DELIVERY` handling, `silent_close`, staff-topic echoes and failures, archive continuation, and final-summary recovery. Its timers, queues, and export locks are instance-owned. It receives narrow callbacks from `TicketRoutingService` for user delivery, ticket refresh, and close/archive work; `TicketRoutingService` does not depend on `TicketBatchRuntime`.
+
+`InstallationService` is the runtime source of truth for installation state, the active workspace, and RBAC. Background-task ownership and runtime observability are process-instance concerns: `BackgroundTaskRegistry` tracks detached durable work for lifecycle draining, and the runtime health components expose aggregate readiness, metrics, and bounded operational alerts without using process-global runtime state.
 
 ## Ticket Lifecycle
 
