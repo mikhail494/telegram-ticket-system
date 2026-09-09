@@ -1163,6 +1163,7 @@ export class PrivateControlPlane {
       can_edit_messages: false,
       can_pin_messages: false,
       can_manage_topics: false,
+      can_send_welcome_messages: false,
     };
     const keyboard = new Keyboard()
       .requestChat("Select public supergroup", 1400, {

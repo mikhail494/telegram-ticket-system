@@ -4,11 +4,11 @@ A Telegram-native support desk that turns private user messages into structured 
 
 [![CI](https://github.com/mikhail494/telegram-ticket-system/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mikhail494/telegram-ticket-system/actions/workflows/ci.yml)
 [![Latest Release](https://img.shields.io/github/v/release/mikhail494/telegram-ticket-system)](https://github.com/mikhail494/telegram-ticket-system/releases/latest)
-[![Node.js 20](https://img.shields.io/badge/Node.js-20-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node.js 24 LTS](https://img.shields.io/badge/Node.js-24%20LTS-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-7A3E9D.svg)](LICENSE)
 
-Version: `1.4.0`
+Source version: `2.0.0` (unreleased)
 
 [Architecture](docs/ARCHITECTURE.md) · [Operations](docs/OPERATIONS.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [Latest release](https://github.com/mikhail494/telegram-ticket-system/releases/latest)
 
@@ -42,10 +42,12 @@ flowchart LR
 
 ## Quick Start
 
+Requires Node.js 24 LTS.
+
 ```bash
 git clone https://github.com/mikhail494/telegram-ticket-system.git
 cd telegram-ticket-system
-npm install
+npm ci
 npm run setup
 npm run dev
 ```
@@ -418,7 +420,7 @@ Use `DATABASE_URL=file:/data/support.db` with a persistent volume mounted at `/d
 
 ## Release
 
-Latest stable release: [v1.4.0](https://github.com/mikhail494/telegram-ticket-system/releases/tag/v1.4.0).
+Source version `2.0.0` is not tagged or released yet. Latest stable GitHub Release: [v1.4.0](https://github.com/mikhail494/telegram-ticket-system/releases/tag/v1.4.0).
 
 See [CHANGELOG.md](CHANGELOG.md) for release history and [LICENSE](LICENSE) for licensing terms.
 

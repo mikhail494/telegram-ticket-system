@@ -4,13 +4,33 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+## [2.0.0] - Unreleased
+
+### Breaking compatibility
+
+- Node.js 20 is no longer supported. Node.js 24 LTS is now the supported runtime baseline.
+
 ### Added
 
 - Instance-owned runtime health telemetry, polling-aware readiness, low-cardinality Prometheus metrics, and bounded staff-workspace alerts for database, polling, and backup degradation and recovery.
+- OWNER manual moderation strikes through configured public-chat reactions, durable message-author resolution, and idempotent reuse of the existing sanction ladder.
+- Adaptive per-chat moderation feedback with bounded hash-only learning evidence and conservative Indonesian/Malay short-chat recognition.
+- Repository quality gates for formatting, typed linting, coverage, security auditing, Dependabot maintenance, pinned GitHub Actions, contribution guidance, issue forms, and pull-request review scope.
 
 ### Changed
 
 - Extracted durable Ticket Batch runtime and recovery orchestration, plus ticket routing and close/archive lifecycle, behind focused instance-owned services while preserving existing bot behavior and persistence contracts.
+- Added the idempotent Batch `silent_close` action without changing reply delivery or recovery semantics.
+- Hardened lifecycle ownership, tracked background work, filesystem permissions, backup validation, runtime observability, and container safety while preserving the existing support workflow.
+- Upgraded `better-sqlite3` from the v11 line to 13.0.3 for the Node.js 24 runtime, moving to its current N-API-based native binding.
+- Updated grammY to 1.46.0 for Telegram Bot API 10.3 compatibility, including the unchanged picker permission set.
+- Updated the Docker and CI runtime baseline to Node.js 24 LTS.
+
+### Database
+
+- Added migration 22 for persistent Quick Reply categories and templates.
+- Added migration 23 for managed-public-message author mapping used by OWNER manual moderation.
+- Added migration 24 for adaptive moderation feedback and per-chat manual-strike configuration.
 
 ## [1.4.0] - 2026-08-15
 
