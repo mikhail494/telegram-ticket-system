@@ -15,7 +15,6 @@ import {
 import { config, hostConfig } from "./config.js";
 import {
   SupportDatabase,
-  type TicketBatchAnswerItemRecord,
   type TicketRecord,
   type TicketStatus,
   type TicketWithUser,
@@ -30,8 +29,6 @@ import {
   formatTicketReceived,
   START_TEXT,
   formatPinnedTicketSummary,
-  formatFollowUpState,
-  formatEscalationTarget,
   formatStatus,
   formatTicketDetails,
   formatTicketPost,
@@ -68,11 +65,7 @@ import {
   type ModerationCleanupScheduler,
 } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
-import {
-  formatDeliveryFailureCategory,
-  normalizeTelegramDeliveryError,
-  type NormalizedDeliveryError,
-} from "./deliveryDiagnostics.js";
+import { normalizeTelegramDeliveryError, type NormalizedDeliveryError } from "./deliveryDiagnostics.js";
 import { StaffChatDeliveryCoordinator, type StaffChatDeliveryOptions } from "./staffChatDelivery.js";
 import { InstallationService, type Permission } from "./installation.js";
 import { BackgroundTaskRegistry, type BackgroundTaskTracker } from "./lifecycle.js";
@@ -87,6 +80,11 @@ import {
 import { formatPublicChatPermissionChecklist, validatePublicModerationChat } from "./publicChatModeration.js";
 import { PrivateControlPlane, type PublicChatConfigurationField } from "./privateControlPlane.js";
 import type { RuntimeHealthRegistry, UpdateErrorCategory } from "./runtimeObservability.js";
+import {
+  TicketBatchExportInProgressError,
+  TicketBatchRuntime,
+  TicketBatchStaffOperationError,
+} from "./ticketBatchRuntime.js";
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
@@ -97,7 +95,6 @@ const STAFF_HELP_SENT_SETTING_PREFIX = "staff_help_sent";
 const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
 const MODERATION_SETTING_PREFIX = "language_moderation";
 const ENTITY_NOTIFICATION_SETTING_PREFIX = "entity_notifications";
-const STAFF_OPERATION_NO_RETRY_AT = "9999-12-31T23:59:59.999Z";
 const SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY = "support_expected_response_time";
 const SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY = "support_ticket_received_template";
 const STAFF_TEST_TICKET_MODE_SETTING_PREFIX = "staff_test_ticket_mode:";
@@ -301,13 +298,9 @@ export function createBot(
     runtime.scheduleModerationCleanup ??
     createModerationCleanupScheduler(() => installation.getStaffChatId(), { backgroundTasks });
   const entityNotificationProviders = runtime.entityNotificationProviders ?? new Map();
-  const runningTicketBatchExports = new Set<number>();
   const staffChatDelivery = new StaffChatDeliveryCoordinator(runtime.staffChatDelivery);
   const quickRepliesManager = createQuickRepliesManager(db, quickRepliesRegistry);
   const privateControlPlane = new PrivateControlPlane(installation);
-  let ticketBatchRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
-  let ticketBatchRecoveryTimerAt: number | undefined;
-  let ticketBatchRecoveryQueue: Promise<void> = Promise.resolve();
   const pendingWarnings = runtime.pendingWarningScheduler ?? new PendingWarningScheduler(backgroundTasks);
 
   const requireStaffChatId = (): number => installation.requireStaffChatId();
@@ -426,19 +419,10 @@ export function createBot(
     botId: () => bot.botInfo?.id,
   });
 
-  class StaffOnlyDeliveryError extends Error {
-    constructor(
-      readonly diagnostic: NormalizedDeliveryError,
-      readonly retryAt: string | null
-    ) {
-      super(diagnostic.category);
-    }
-  }
-
   async function runStaffChatOperation<T>(operation: () => Promise<T>, chatId = requireStaffChatId()): Promise<T> {
     const outcome = await staffChatDelivery.run(chatId, operation);
     if (outcome.value !== undefined) return outcome.value;
-    throw new StaffOnlyDeliveryError(
+    throw new TicketBatchStaffOperationError(
       outcome.diagnostic ?? normalizeTelegramDeliveryError(new Error("Staff operation failed")),
       outcome.retryAt
     );
@@ -472,157 +456,20 @@ export function createBot(
     return sent.message_id;
   }
 
-  async function sendTicketBatchTopicEcho(
-    ticket: TicketWithUser,
-    item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]
-  ): Promise<void> {
-    if (
-      item.topic_echo_state === "SENT" ||
-      item.topic_echo_state === "NOT_REQUIRED" ||
-      item.topic_echo_state === "TERMINAL_FAILED"
-    )
-      return;
-    if (item.action === "silent_close") {
-      db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
-      return;
-    }
-    if (ticket.staff_chat_id !== requireStaffChatId() || ticket.message_thread_id === null) {
-      throw new Error("Ticket topic is unavailable for batch echo.");
-    }
-    const threadId = ticket.message_thread_id;
-    const staffChatId = ticket.staff_chat_id;
-    const hasContext = hasBatchFollowUpContext(item);
-    if (item.action === "no_action" && !hasContext) {
-      db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
-      return;
-    }
-    const persistedItem =
-      db
-        .listTicketBatchAnswerItems(item.answer_package_id)
-        .find((candidate) => candidate.ticket_id === item.ticket_id) ?? item;
-    if (item.action !== "no_action" && !isConfirmedBatchReply(persistedItem)) {
-      db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED", {
-        lastError: "Success echo is not applicable after an unconfirmed user delivery.",
-      });
-      logger.warn(
-        { answerPackageId: item.answer_package_id, ticketId: item.ticket_id },
-        "Skipped contradictory ticket batch success echo"
-      );
-      return;
-    }
-    const lines = [
-      item.action === "no_action" ? "ℹ️ Batch follow-up updated — no user message sent" : "✅ Batch reply sent to user",
-    ];
-    if (item.action !== "no_action" && item.reply_text) lines.push("", item.reply_text);
-    if (item.follow_up_state !== "NONE") lines.push("", `Follow-up: ${formatFollowUpState(item.follow_up_state)}`);
-    if (item.escalation_target !== "NONE") lines.push(`Escalation: ${formatEscalationTarget(item.escalation_target)}`);
-    if (item.internal_note) lines.push(`Internal note: ${item.internal_note}`);
-    let echoed: Awaited<ReturnType<typeof bot.api.sendMessage>>;
-    try {
-      echoed = await runStaffChatOperation(() =>
-        bot.api.sendMessage(staffChatId, truncate(lines.join("\n"), 3500), { message_thread_id: threadId })
-      );
-    } catch (error) {
-      throw error;
-    }
-    db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "SENT", {
-      chatId: staffChatId,
-      threadId,
-      messageId: echoed.message_id,
-    });
-  }
-
-  async function sendTicketBatchDeliveryFailureEvent(
-    ticket: TicketWithUser,
-    item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number],
-    diagnostic: NormalizedDeliveryError
-  ): Promise<void> {
-    if (item.delivery_failure_event_state === "SENT") return;
-    if (
-      item.action === "no_action" ||
-      item.action === "silent_close" ||
-      item.delivery_message_id !== null ||
-      item.delivery_error_category === null
-    ) {
-      db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
-      return;
-    }
-    if (ticket.staff_chat_id !== requireStaffChatId() || ticket.message_thread_id === null) {
-      throw new Error("Ticket topic is unavailable for batch delivery failure event.");
-    }
-    const threadId = ticket.message_thread_id;
-    const staffChatId = ticket.staff_chat_id;
-    const lines = [
-      diagnostic.permanence === "UNKNOWN_DELIVERY"
-        ? "⚠️ Batch delivery outcome is unknown"
-        : "⚠️ Batch reply was not delivered",
-      "",
-      `Category: ${formatDeliveryFailureCategory(diagnostic.category)}`,
-    ];
-    if (diagnostic.telegramErrorCode !== null) lines.push(`Telegram code: ${diagnostic.telegramErrorCode}`);
-    if (diagnostic.retryAfterSeconds !== null) lines.push(`Retry after: ${diagnostic.retryAfterSeconds}s`);
-    lines.push("Action: Ticket remains open");
-    lines.push(
-      diagnostic.category === "USER_BLOCKED_BOT" || diagnostic.category === "USER_DEACTIVATED"
-        ? "Next step: Contact is not possible until the user restores bot access."
-        : diagnostic.category === "CHAT_UNAVAILABLE"
-          ? "Next step: Verify that the user can receive bot messages before a controlled retry."
-          : diagnostic.permanence === "PERMANENT"
-            ? "Next step: Manual review required before a controlled retry."
-            : diagnostic.permanence === "TEMPORARY"
-              ? "Next step: Prepare a controlled retry later."
-              : "Next step: Do not resend automatically; manual review required."
-    );
-    let sent: Awaited<ReturnType<typeof bot.api.sendMessage>>;
-    try {
-      sent = await runStaffChatOperation(() =>
-        bot.api.sendMessage(staffChatId, lines.join("\n"), {
-          message_thread_id: threadId,
-        })
-      );
-    } catch (error) {
-      const failure = batchStaffFailure(error);
-      db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "FAILED", null, {
-        nextRetryAt: staffNextRetryAt(error),
-        incrementAttempt: true,
-      });
-      scheduleTicketBatchStaffRecovery(failure.retryAt);
-      throw error;
-    }
-    db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "SENT", sent.message_id, {
-      incrementAttempt: true,
-    });
-  }
-
-  function persistBatchFollowUp(
-    ticket: TicketWithUser,
-    item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]
-  ): void {
-    db.setTicketFollowUpContext(ticket.id, {
-      followUpState: item.follow_up_state,
-      internalNote: item.internal_note,
-      escalationTarget: item.escalation_target,
-      sourceAnswerPackageId: item.answer_package_id,
-    });
-    if (item.follow_up_state === "WAITING_USER") db.updateTicketStatus(ticket.id, "WAITING_USER");
-    else if (item.follow_up_state !== "NONE" && ticket.status !== "CLOSED")
-      db.updateTicketStatus(ticket.id, "IN_PROGRESS");
-    else if (item.action !== "no_action" && ticket.status === "OPEN") db.updateTicketStatus(ticket.id, "IN_PROGRESS");
-  }
-
-  function hasBatchFollowUpContext(item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]): boolean {
-    return item.follow_up_state !== "NONE" || item.internal_note !== null || item.escalation_target !== "NONE";
-  }
-
-  function isConfirmedBatchReply(item: ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number]): boolean {
-    return (
-      (item.action === "reply_keep_open" || item.action === "reply_and_close") &&
-      item.delivery_message_id !== null &&
-      item.delivery_error_category === null &&
-      item.delivery_error_permanence === null &&
-      item.delivery_failure_event_state !== "SENT"
-    );
-  }
+  const ticketBatchRuntime = new TicketBatchRuntime({
+    db,
+    api: bot.api,
+    installation,
+    backgroundTasks,
+    runStaffChatOperation,
+    deliverUserReply: deliverAndRecordStaffTextReply,
+    closeTicket: async (ticketId, options, staffChatId) => {
+      await closeTicket(db, bot.api, installation, ticketId, options, staffChatId);
+    },
+    staffActor,
+    refreshTicket: (ticketId, staffChatId) =>
+      refreshStaffTicketMessage(db, bot.api, installation, ticketId, staffChatId),
+  });
 
   function quickRepliesCategoryKeyboard(ticketId: number): InlineKeyboard {
     const keyboard = new InlineKeyboard();
@@ -1670,117 +1517,129 @@ export function createBot(
   });
 
   async function exportActiveTickets(ctx: Context, destinationChatId: number): Promise<string | undefined> {
-    if (runningTicketBatchExports.has(requireStaffChatId())) {
+    const staffChatId = requireStaffChatId();
+    try {
+      return await ticketBatchRuntime.runExport(staffChatId, async () => {
+        let zip: Awaited<ReturnType<typeof createTicketBatchZip>> | undefined;
+        let exportId: string | undefined;
+        let deliveryAttempted = false;
+        try {
+          const tickets = db.listActiveTicketsForStaffChat(requireStaffChatId()).map((ticket) => ({
+            ticket,
+            messages: db.listMessagesChronological(ticket.id),
+            followUpHistory: db.listTicketFollowUpHistory(ticket.id),
+            deliveryFailure: db.getLatestTicketBatchDeliveryFailure(ticket.id, requireStaffChatId()),
+            staffSync: db.getLatestTicketBatchStaffSyncContext(ticket.id, requireStaffChatId()),
+          }));
+          if (!tickets.length) {
+            await ctx.reply("There are no active tickets to export.");
+            return undefined;
+          }
+
+          exportId = `export_${randomUUID().replace(/-/g, "")}`;
+          const createdAt = new Date().toISOString();
+          const snapshot = buildTicketBatchExportSnapshot({
+            exportId,
+            createdAt,
+            staffChatId: requireStaffChatId(),
+            tickets,
+          });
+          zip = await createTicketBatchZip(
+            snapshot,
+            async (attachment): Promise<TicketBatchAttachmentDownloadResult> => {
+              if (!attachment.fileId) {
+                throw new TicketBatchValidationError(
+                  `Ticket #${attachment.ticketId} message ${attachment.messageId} has no downloadable media reference.`
+                );
+              }
+              let file;
+              try {
+                file = await ctx.api.getFile(attachment.fileId);
+              } catch (error) {
+                if (isHostedTelegramFileTooLargeError(error)) {
+                  return {
+                    unavailable: true,
+                    failureCategory: "TELEGRAM_FILE_TOO_LARGE",
+                    failureReason: "Attachment exceeds the hosted Telegram Bot API download limit.",
+                  };
+                }
+                throw error;
+              }
+              if (!file.file_path) {
+                throw new TicketBatchValidationError(
+                  `Ticket #${attachment.ticketId} message ${attachment.messageId} attachment could not be retrieved.`
+                );
+              }
+              const response = await fetchImpl(`https://api.telegram.org/file/bot${config.botToken}/${file.file_path}`);
+              if (!response.ok) {
+                throw new TicketBatchValidationError(
+                  `Ticket #${attachment.ticketId} message ${attachment.messageId} attachment could not be downloaded.`
+                );
+              }
+              return { bytes: new Uint8Array(await response.arrayBuffer()), telegramFilePath: file.file_path };
+            }
+          );
+          db.createTicketBatchExport({
+            exportId,
+            staffChatId: requireStaffChatId(),
+            createdAt,
+            selectionMode: "all_active",
+            ticketCount: snapshot.records.length,
+            items: snapshot.records.map((record) => ({
+              ticketId: record.ticket.id,
+              snapshotToken: record.snapshot_token,
+            })),
+            deliveryState: "PREPARING",
+          });
+          deliveryAttempted = true;
+          const delivered = await ctx.api.sendDocument(destinationChatId, new InputFile(zip.filePath, zip.filename), {
+            caption: formatTicketBatchExportCaption(exportId, zip),
+          });
+          try {
+            db.markTicketBatchExportDelivered(exportId, requireStaffChatId(), delivered.message_id);
+          } catch (error) {
+            logger.error({ err: error, exportId }, "Ticket batch export delivery could not be persisted");
+            await ctx.reply("Export delivery could not be confirmed. Do not upload an answer package for it.");
+            return undefined;
+          }
+          return exportId;
+        } catch (error) {
+          logger.error({ err: error, exportId }, "Could not send ticket batch export");
+          if (exportId) {
+            try {
+              if (deliveryAttempted && error instanceof HttpError) {
+                db.markTicketBatchExportUnknownDelivery(
+                  exportId,
+                  requireStaffChatId(),
+                  "Export delivery outcome could not be confirmed."
+                );
+              } else {
+                db.markTicketBatchExportFailed(
+                  exportId,
+                  requireStaffChatId(),
+                  "Export failed before confirmed delivery."
+                );
+              }
+            } catch (persistenceError) {
+              logger.warn({ err: persistenceError, exportId }, "Could not persist failed ticket batch export state");
+            }
+          }
+          await ctx.reply("Export failed before delivery. Nothing was sent.");
+          return undefined;
+        } finally {
+          if (zip) {
+            try {
+              await cleanupTicketBatchZip(zip);
+            } catch (error) {
+              logger.warn({ err: error, exportId }, "Could not clean up ticket batch export files");
+            }
+          }
+        }
+      });
+    } catch (error) {
+      if (!(error instanceof TicketBatchExportInProgressError)) throw error;
       await ctx.reply("An export is already running for this staff chat.");
       return undefined;
-    }
-
-    runningTicketBatchExports.add(requireStaffChatId());
-    let zip: Awaited<ReturnType<typeof createTicketBatchZip>> | undefined;
-    let exportId: string | undefined;
-    let deliveryAttempted = false;
-    try {
-      const tickets = db.listActiveTicketsForStaffChat(requireStaffChatId()).map((ticket) => ({
-        ticket,
-        messages: db.listMessagesChronological(ticket.id),
-        followUpHistory: db.listTicketFollowUpHistory(ticket.id),
-        deliveryFailure: db.getLatestTicketBatchDeliveryFailure(ticket.id, requireStaffChatId()),
-        staffSync: db.getLatestTicketBatchStaffSyncContext(ticket.id, requireStaffChatId()),
-      }));
-      if (!tickets.length) {
-        await ctx.reply("There are no active tickets to export.");
-        return undefined;
-      }
-
-      exportId = `export_${randomUUID().replace(/-/g, "")}`;
-      const createdAt = new Date().toISOString();
-      const snapshot = buildTicketBatchExportSnapshot({
-        exportId,
-        createdAt,
-        staffChatId: requireStaffChatId(),
-        tickets,
-      });
-      zip = await createTicketBatchZip(snapshot, async (attachment): Promise<TicketBatchAttachmentDownloadResult> => {
-        if (!attachment.fileId) {
-          throw new TicketBatchValidationError(
-            `Ticket #${attachment.ticketId} message ${attachment.messageId} has no downloadable media reference.`
-          );
-        }
-        let file;
-        try {
-          file = await ctx.api.getFile(attachment.fileId);
-        } catch (error) {
-          if (isHostedTelegramFileTooLargeError(error)) {
-            return {
-              unavailable: true,
-              failureCategory: "TELEGRAM_FILE_TOO_LARGE",
-              failureReason: "Attachment exceeds the hosted Telegram Bot API download limit.",
-            };
-          }
-          throw error;
-        }
-        if (!file.file_path) {
-          throw new TicketBatchValidationError(
-            `Ticket #${attachment.ticketId} message ${attachment.messageId} attachment could not be retrieved.`
-          );
-        }
-        const response = await fetchImpl(`https://api.telegram.org/file/bot${config.botToken}/${file.file_path}`);
-        if (!response.ok) {
-          throw new TicketBatchValidationError(
-            `Ticket #${attachment.ticketId} message ${attachment.messageId} attachment could not be downloaded.`
-          );
-        }
-        return { bytes: new Uint8Array(await response.arrayBuffer()), telegramFilePath: file.file_path };
-      });
-      db.createTicketBatchExport({
-        exportId,
-        staffChatId: requireStaffChatId(),
-        createdAt,
-        selectionMode: "all_active",
-        ticketCount: snapshot.records.length,
-        items: snapshot.records.map((record) => ({ ticketId: record.ticket.id, snapshotToken: record.snapshot_token })),
-        deliveryState: "PREPARING",
-      });
-      deliveryAttempted = true;
-      const delivered = await ctx.api.sendDocument(destinationChatId, new InputFile(zip.filePath, zip.filename), {
-        caption: formatTicketBatchExportCaption(exportId, zip),
-      });
-      try {
-        db.markTicketBatchExportDelivered(exportId, requireStaffChatId(), delivered.message_id);
-      } catch (error) {
-        logger.error({ err: error, exportId }, "Ticket batch export delivery could not be persisted");
-        await ctx.reply("Export delivery could not be confirmed. Do not upload an answer package for it.");
-        return undefined;
-      }
-      return exportId;
-    } catch (error) {
-      logger.error({ err: error, exportId }, "Could not send ticket batch export");
-      if (exportId) {
-        try {
-          if (deliveryAttempted && error instanceof HttpError) {
-            db.markTicketBatchExportUnknownDelivery(
-              exportId,
-              requireStaffChatId(),
-              "Export delivery outcome could not be confirmed."
-            );
-          } else {
-            db.markTicketBatchExportFailed(exportId, requireStaffChatId(), "Export failed before confirmed delivery.");
-          }
-        } catch (persistenceError) {
-          logger.warn({ err: persistenceError, exportId }, "Could not persist failed ticket batch export state");
-        }
-      }
-      await ctx.reply("Export failed before delivery. Nothing was sent.");
-      return undefined;
-    } finally {
-      if (zip) {
-        try {
-          await cleanupTicketBatchZip(zip);
-        } catch (error) {
-          logger.warn({ err: error, exportId }, "Could not clean up ticket batch export files");
-        }
-      }
-      runningTicketBatchExports.delete(requireStaffChatId());
     }
   }
 
@@ -2998,14 +2857,14 @@ export function createBot(
     db.clearTicketBatchAnswerPackagePreview(claimed.answer_package_id, requireStaffChatId());
     await ctx.answerCallbackQuery({ text: "Applying answer package..." });
     await neutralizeTicketBatchPreview(claimed, "Applying...");
-    const summary = await applyTicketBatchAnswerPackage(claimed.answer_package_id, ctx.from);
+    const summary = await ticketBatchRuntime.applyAnswerPackage(claimed.answer_package_id, ctx.from);
     db.queueTicketBatchFinalSummary(claimed.answer_package_id, requireStaffChatId(), {
       text: summary,
       chatId: ctx.chat?.id ?? requireStaffChatId(),
       originChatId: claimed.preview_chat_id,
       originMessageId: claimed.preview_message_id,
     });
-    await recoverTicketBatchStaffOperations(claimed.answer_package_id);
+    await ticketBatchRuntime.recoverPendingStaffOperations(claimed.answer_package_id);
   }
 
   function buildStoredTicketBatchPreviewPages(
@@ -3095,797 +2954,12 @@ export function createBot(
         previewChatId
       );
     } catch (error) {
-      const failure = batchStaffFailure(error);
-      scheduleTicketBatchStaffRecovery(failure.retryAt);
+      const failure = ticketBatchRuntime.scheduleRecoveryForStaffOperation(error);
       logger.warn(
         { answerPackageId: packageRecord.answer_package_id, category: failure.category },
         "Could not neutralize active ticket batch preview"
       );
     }
-  }
-
-  async function applyTicketBatchAnswerPackage(answerPackageId: string, staffUser: User | undefined): Promise<string> {
-    const packageRecord = db.getTicketBatchAnswerPackage(answerPackageId, requireStaffChatId());
-    if (!packageRecord) return "Answer package not found.";
-    const exportItems = db.listTicketBatchExportItems(packageRecord.export_id);
-    const exportTokens = new Map(exportItems.map((item) => [item.ticket_id, item.snapshot_token]));
-    const items = db.listTicketBatchAnswerItems(answerPackageId);
-    const totals = {
-      keep: 0,
-      close: 0,
-      silentClose: 0,
-      noAction: 0,
-      stale: 0,
-      inactive: 0,
-      unknown: 0,
-      replySent: 0,
-      staffSync: 0,
-      skipped: 0,
-      permanentFailures: [] as Array<{ ticketId: number; category: string }>,
-      temporaryFailures: [] as Array<{ ticketId: number; category: string; retryAfter: number | null }>,
-    };
-
-    for (const item of items) {
-      if (["COMPLETED", "NO_ACTION", "STALE", "INACTIVE"].includes(item.state)) {
-        totals.skipped += 1;
-        continue;
-      }
-      if (item.action === "silent_close" && item.state === "APPLYING") {
-        const continuation = await resumeSilentClose(item, staffUser);
-        if (continuation === "COMPLETED") totals.silentClose += 1;
-        else if (continuation === "STALE") totals.stale += 1;
-        else if (continuation === "INACTIVE") totals.inactive += 1;
-        continue;
-      }
-      if (item.state === "UNKNOWN_DELIVERY" || item.state === "APPLYING") {
-        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "UNKNOWN_DELIVERY", {
-          lastError: "Delivery outcome requires manual review.",
-        });
-        totals.unknown += 1;
-        continue;
-      }
-      const ticket = db.getTicketWithUser(item.ticket_id);
-      if (item.state === "STAFF_SYNC_PENDING") {
-        if (!ticket || ticket.staff_chat_id !== requireStaffChatId()) {
-          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true });
-          totals.inactive += 1;
-          continue;
-        }
-        if (ticket.status === "CLOSED" && item.action === "reply_and_close" && isConfirmedBatchReply(item)) {
-          db.recordTicketBatchTopicEcho(answerPackageId, item.ticket_id, "NOT_REQUIRED", {
-            lastError: "Staff topic echo is no longer available after ticket closure.",
-          });
-          const continuation = await resumeReplyAndClosePostDelivery(item, staffUser);
-          if (continuation === "COMPLETED") totals.close += 1;
-          else if (continuation === "INACTIVE") totals.inactive += 1;
-          else totals.replySent += 1;
-          continue;
-        }
-        if (ticket.status === "CLOSED") {
-          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true });
-          totals.inactive += 1;
-          continue;
-        }
-        try {
-          await sendTicketBatchTopicEcho(ticket, item);
-          await refreshStaffTicketMessage(db, bot.api, installation, ticket.id);
-          if (item.action === "no_action") {
-            db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "NO_ACTION", { applied: true });
-            totals.noAction += 1;
-          } else if (item.action === "reply_and_close") {
-            const continuation = await resumeReplyAndClosePostDelivery(item, staffUser);
-            if (continuation === "COMPLETED") totals.close += 1;
-            else if (continuation === "INACTIVE") totals.inactive += 1;
-            else totals.replySent += 1;
-          } else {
-            db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "COMPLETED", { applied: true });
-            totals.keep += 1;
-          }
-        } catch (error) {
-          recordTicketBatchTopicEchoFailure(answerPackageId, item.ticket_id, error);
-          totals.staffSync += 1;
-        }
-        continue;
-      }
-      if (item.state === "REPLY_SENT" && item.action === "reply_and_close") {
-        if (!ticket || ticket.staff_chat_id !== requireStaffChatId()) {
-          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true });
-          totals.inactive += 1;
-          continue;
-        }
-
-        if (item.topic_echo_state !== "SENT" && ticket.status === "CLOSED") {
-          db.recordTicketBatchTopicEcho(answerPackageId, item.ticket_id, "NOT_REQUIRED", {
-            lastError: "Staff topic echo is no longer available after ticket closure.",
-          });
-        } else if (item.topic_echo_state !== "SENT") {
-          try {
-            await sendTicketBatchTopicEcho(ticket, item);
-          } catch (error) {
-            recordTicketBatchTopicEchoFailure(answerPackageId, item.ticket_id, error);
-            totals.staffSync += 1;
-            continue;
-          }
-        }
-
-        const continuation = await resumeReplyAndClosePostDelivery(item, staffUser);
-        if (continuation === "COMPLETED") totals.close += 1;
-        else if (continuation === "INACTIVE") totals.inactive += 1;
-        else totals.replySent += 1;
-        continue;
-      }
-      const expectedToken = exportTokens.get(item.ticket_id);
-      if (!ticket || ticket.staff_chat_id !== requireStaffChatId() || ticket.status === "CLOSED") {
-        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true });
-        totals.inactive += 1;
-        continue;
-      }
-      if (
-        !expectedToken ||
-        item.snapshot_token !== expectedToken ||
-        getTicketSnapshotToken(ticket, db.listMessagesChronological(ticket.id)) !== expectedToken
-      ) {
-        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "STALE", { applied: true });
-        totals.stale += 1;
-        continue;
-      }
-      if (!db.claimTicketBatchAnswerItem(answerPackageId, item.ticket_id)) {
-        totals.skipped += 1;
-        continue;
-      }
-      if (item.action === "silent_close") {
-        const continuation = await resumeSilentClose(item, staffUser);
-        if (continuation === "COMPLETED") totals.silentClose += 1;
-        else if (continuation === "STALE") totals.stale += 1;
-        else if (continuation === "INACTIVE") totals.inactive += 1;
-        continue;
-      }
-      if (item.action === "no_action") {
-        try {
-          if (hasBatchFollowUpContext(item)) persistBatchFollowUp(ticket, item);
-          await sendTicketBatchTopicEcho(ticket, item);
-          await refreshStaffTicketMessage(db, bot.api, installation, ticket.id);
-          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "NO_ACTION", { applied: true });
-          totals.noAction += 1;
-        } catch (error) {
-          recordTicketBatchTopicEchoFailure(answerPackageId, item.ticket_id, error);
-          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "STAFF_SYNC_PENDING", {
-            lastError: "Staff topic echo pending retry.",
-          });
-          totals.staffSync += 1;
-        }
-        continue;
-      }
-      let deliveryMessageId: number;
-      try {
-        deliveryMessageId = await deliverAndRecordStaffTextReply(ticket, item.reply_text ?? "", staffUser);
-      } catch (error) {
-        const diagnostic = normalizeTelegramDeliveryError(error);
-        const state = diagnostic.permanence === "UNKNOWN_DELIVERY" ? "UNKNOWN_DELIVERY" : "FAILED";
-        db.recordTicketBatchDeliveryFailure(answerPackageId, item.ticket_id, state, diagnostic);
-        db.recordTicketBatchTopicEcho(answerPackageId, item.ticket_id, "NOT_REQUIRED");
-        logger.warn(
-          {
-            answerPackageId,
-            ticketId: item.ticket_id,
-            category: diagnostic.category,
-            permanence: diagnostic.permanence,
-            method: diagnostic.method,
-            telegramErrorCode: diagnostic.telegramErrorCode,
-            retryAfterSeconds: diagnostic.retryAfterSeconds,
-          },
-          "Ticket batch user delivery failed"
-        );
-        const failedItem = db
-          .listTicketBatchAnswerItems(answerPackageId)
-          .find((candidate) => candidate.ticket_id === item.ticket_id);
-        if (failedItem) {
-          try {
-            await sendTicketBatchDeliveryFailureEvent(ticket, failedItem, diagnostic);
-          } catch {
-            logger.warn(
-              { answerPackageId, ticketId: item.ticket_id, category: diagnostic.category },
-              "Could not post ticket batch delivery failure event"
-            );
-          }
-        }
-        if (diagnostic.permanence === "PERMANENT") {
-          totals.permanentFailures.push({ ticketId: item.ticket_id, category: diagnostic.category });
-        } else if (diagnostic.permanence === "TEMPORARY") {
-          totals.temporaryFailures.push({
-            ticketId: item.ticket_id,
-            category: diagnostic.category,
-            retryAfter: diagnostic.retryAfterSeconds,
-          });
-        } else {
-          totals.unknown += 1;
-        }
-        continue;
-      }
-      let postDeliveryStage = "FOLLOW_UP_PERSISTENCE";
-      try {
-        persistBatchFollowUp(ticket, item);
-        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", {
-          deliveryMessageId,
-          applied: true,
-        });
-        postDeliveryStage = "STAFF_TOPIC_ECHO";
-        try {
-          await sendTicketBatchTopicEcho(ticket, item);
-        } catch (error) {
-          recordTicketBatchTopicEchoFailure(answerPackageId, item.ticket_id, error);
-          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "STAFF_SYNC_PENDING", {
-            deliveryMessageId,
-            lastError: "Staff topic echo pending retry.",
-          });
-          totals.staffSync += 1;
-          continue;
-        }
-        if (item.action === "reply_keep_open") {
-          postDeliveryStage = "STAFF_SUMMARY_REFRESH";
-          db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "COMPLETED", {
-            deliveryMessageId,
-            applied: true,
-          });
-          await refreshStaffTicketMessage(db, bot.api, installation, ticket.id);
-          totals.keep += 1;
-          continue;
-        }
-        postDeliveryStage = "REPLY_AND_CLOSE_CONTINUATION";
-        const continuation = await resumeReplyAndClosePostDelivery(item, staffUser);
-        if (continuation === "COMPLETED") totals.close += 1;
-        else if (continuation === "INACTIVE") totals.inactive += 1;
-        else totals.replySent += 1;
-      } catch (error) {
-        const diagnostic = normalizeTelegramDeliveryError(error);
-        db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", {
-          deliveryMessageId,
-          lastError: "Reply sent; follow-up, staff sync, or close/archive pending.",
-        });
-        logger.warn(
-          {
-            answerPackageId,
-            ticketId: item.ticket_id,
-            stage: postDeliveryStage,
-            category: diagnostic.category,
-            method: diagnostic.method,
-            telegramErrorCode: diagnostic.telegramErrorCode,
-            httpStatus: diagnostic.httpStatus,
-          },
-          "Ticket batch post-delivery apply step remains pending"
-        );
-        totals.replySent += 1;
-      }
-    }
-    db.finalizeTicketBatchAnswerPackage(answerPackageId, requireStaffChatId());
-    return buildPersistedTicketBatchSummary(answerPackageId);
-  }
-
-  async function resumeSilentClose(
-    item: TicketBatchAnswerItemRecord,
-    staffUser: User | undefined
-  ): Promise<"COMPLETED" | "PENDING" | "STALE" | "INACTIVE"> {
-    const persistedItem = db
-      .listTicketBatchAnswerItems(item.answer_package_id)
-      .find((candidate) => candidate.ticket_id === item.ticket_id);
-    if (!persistedItem || persistedItem.action !== "silent_close") return "INACTIVE";
-
-    const ticket = db.getTicketWithUser(item.ticket_id);
-    if (!ticket || ticket.staff_chat_id !== requireStaffChatId()) {
-      db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "INACTIVE", { applied: true });
-      return "INACTIVE";
-    }
-    if (
-      ticket.status !== "CLOSED" &&
-      getTicketSnapshotToken(ticket, db.listMessagesChronological(ticket.id)) !== persistedItem.snapshot_token
-    ) {
-      db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "STALE", { applied: true });
-      return "STALE";
-    }
-
-    db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
-    db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
-    let archiveFailure: NormalizedDeliveryError | undefined;
-    try {
-      await closeTicket(db, bot.api, installation, ticket.id, {
-        notifyUser: false,
-        staffNotice: "Ticket silently closed by batch answer.",
-        closedBy: staffActor(staffUser),
-        onArchiveFailure: (diagnostic) => {
-          archiveFailure = diagnostic;
-        },
-      });
-    } catch (error) {
-      const diagnostic = normalizeTelegramDeliveryError(error);
-      const retryAt = ticketBatchContinuationRetryAt(diagnostic, error);
-      db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "APPLYING", {
-        lastError: "Silent ticket close or archive remains pending.",
-      });
-      db.setTicketBatchPostDeliveryRetry(item.answer_package_id, item.ticket_id, retryAt, diagnostic.category);
-      if (retryAt !== STAFF_OPERATION_NO_RETRY_AT) scheduleTicketBatchStaffRecovery(retryAt);
-      logger.warn(
-        { answerPackageId: item.answer_package_id, ticketId: item.ticket_id, category: diagnostic.category },
-        "Silent batch ticket closure remains pending"
-      );
-      return "PENDING";
-    }
-
-    const reconciledTicket = db.getTicketWithUser(item.ticket_id);
-    if (reconciledTicket?.status === "CLOSED" && reconciledTicket.archived_at !== null) {
-      db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "COMPLETED", { applied: true });
-      db.setTicketBatchPostDeliveryRetry(item.answer_package_id, item.ticket_id, null, null);
-      return "COMPLETED";
-    }
-
-    db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "APPLYING", {
-      lastError: "Silent ticket close completed; transcript archive pending.",
-    });
-    const retryAt = archiveFailure
-      ? ticketBatchContinuationRetryAt(archiveFailure)
-      : new Date(Date.now() + 60_000).toISOString();
-    db.setTicketBatchPostDeliveryRetry(
-      item.answer_package_id,
-      item.ticket_id,
-      retryAt,
-      archiveFailure?.category ?? "ARCHIVE"
-    );
-    if (retryAt !== STAFF_OPERATION_NO_RETRY_AT) scheduleTicketBatchStaffRecovery(retryAt);
-    return "PENDING";
-  }
-
-  async function resumeReplyAndClosePostDelivery(
-    item: TicketBatchAnswerItemRecord,
-    staffUser: User | undefined
-  ): Promise<"COMPLETED" | "PENDING" | "INACTIVE"> {
-    const persistedItem = db
-      .listTicketBatchAnswerItems(item.answer_package_id)
-      .find((candidate) => candidate.ticket_id === item.ticket_id);
-    if (!persistedItem || persistedItem.action !== "reply_and_close") return "INACTIVE";
-    if (!isConfirmedBatchReply(persistedItem)) {
-      logger.warn(
-        { answerPackageId: item.answer_package_id, ticketId: item.ticket_id, stage: "USER_REPLY_DELIVERY" },
-        "Refused reply-and-close continuation without confirmed user delivery"
-      );
-      return "PENDING";
-    }
-    const ticket = db.getTicketWithUser(item.ticket_id);
-    if (!ticket || ticket.staff_chat_id !== requireStaffChatId()) {
-      db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "INACTIVE", { applied: true });
-      return "INACTIVE";
-    }
-    const echoResolved =
-      persistedItem.topic_echo_state === "SENT" ||
-      (persistedItem.topic_echo_state === "NOT_REQUIRED" && ticket.status === "CLOSED");
-    if (!echoResolved) return "PENDING";
-
-    let archiveFailure: NormalizedDeliveryError | undefined;
-    try {
-      await closeTicket(db, bot.api, installation, ticket.id, {
-        notifyUser: true,
-        staffNotice: "Ticket closed by batch answer.",
-        closedBy: staffActor(staffUser),
-        onArchiveFailure: (diagnostic) => {
-          archiveFailure = diagnostic;
-        },
-      });
-    } catch (error) {
-      const diagnostic = normalizeTelegramDeliveryError(error);
-      const retryAt = ticketBatchContinuationRetryAt(diagnostic, error);
-      db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "REPLY_SENT", {
-        lastError: "Reply sent; ticket close or archive pending.",
-      });
-      db.setTicketBatchPostDeliveryRetry(item.answer_package_id, item.ticket_id, retryAt, diagnostic.category);
-      if (retryAt !== STAFF_OPERATION_NO_RETRY_AT) scheduleTicketBatchStaffRecovery(retryAt);
-      logger.warn(
-        {
-          answerPackageId: item.answer_package_id,
-          ticketId: item.ticket_id,
-          stage: "TICKET_CLOSE_OR_ARCHIVE",
-          category: diagnostic.category,
-          method: diagnostic.method,
-          telegramErrorCode: diagnostic.telegramErrorCode,
-          httpStatus: diagnostic.httpStatus,
-        },
-        "Reply-and-close post-delivery continuation remains pending"
-      );
-      return "PENDING";
-    }
-
-    const reconciledTicket = db.getTicketWithUser(item.ticket_id);
-    if (reconciledTicket?.status === "CLOSED" && reconciledTicket.archived_at !== null) {
-      db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "COMPLETED", { applied: true });
-      db.setTicketBatchPostDeliveryRetry(item.answer_package_id, item.ticket_id, null, null);
-      return "COMPLETED";
-    }
-
-    const pendingStage = reconciledTicket?.status === "CLOSED" ? "ARCHIVE" : "SQLITE_CLOSE";
-    db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "REPLY_SENT", {
-      lastError:
-        pendingStage === "ARCHIVE" ? "Reply sent; transcript archive pending." : "Reply sent; ticket closure pending.",
-    });
-    const retryAt = archiveFailure
-      ? ticketBatchContinuationRetryAt(archiveFailure)
-      : new Date(Date.now() + 60_000).toISOString();
-    db.setTicketBatchPostDeliveryRetry(
-      item.answer_package_id,
-      item.ticket_id,
-      retryAt,
-      archiveFailure?.category ?? pendingStage
-    );
-    if (retryAt !== STAFF_OPERATION_NO_RETRY_AT) scheduleTicketBatchStaffRecovery(retryAt);
-    logger.warn(
-      {
-        answerPackageId: item.answer_package_id,
-        ticketId: item.ticket_id,
-        stage: pendingStage,
-        category: archiveFailure?.category,
-        method: archiveFailure?.method,
-        telegramErrorCode: archiveFailure?.telegramErrorCode,
-        httpStatus: archiveFailure?.httpStatus,
-        retryAfterSeconds: archiveFailure?.retryAfterSeconds,
-      },
-      "Reply-and-close post-delivery continuation remains pending"
-    );
-    return "PENDING";
-  }
-
-  function ticketBatchContinuationRetryAt(diagnostic: NormalizedDeliveryError, error?: unknown): string {
-    if (error instanceof StaffOnlyDeliveryError && error.retryAt !== null) return error.retryAt;
-    if (diagnostic.category === "RATE_LIMITED") {
-      return new Date(Date.now() + (diagnostic.retryAfterSeconds ?? 1) * 1_000 + 250).toISOString();
-    }
-    if (
-      diagnostic.permanence === "TEMPORARY" ||
-      (error !== undefined && !(error instanceof GrammyError) && !(error instanceof HttpError))
-    ) {
-      return new Date(Date.now() + 60_000).toISOString();
-    }
-    return STAFF_OPERATION_NO_RETRY_AT;
-  }
-
-  function batchStaffFailure(error: unknown): { category: string; retryAt: string | null } {
-    if (error instanceof StaffOnlyDeliveryError) return { category: error.diagnostic.category, retryAt: error.retryAt };
-    return { category: normalizeTelegramDeliveryError(error).category, retryAt: null };
-  }
-
-  function staffNextRetryAt(error: unknown): string | null {
-    if (error instanceof StaffOnlyDeliveryError) {
-      return error.diagnostic.permanence === "TEMPORARY" ? error.retryAt : STAFF_OPERATION_NO_RETRY_AT;
-    }
-    return STAFF_OPERATION_NO_RETRY_AT;
-  }
-
-  function recordTicketBatchTopicEchoFailure(answerPackageId: string, ticketId: number, error: unknown): void {
-    const diagnostic =
-      error instanceof StaffOnlyDeliveryError ? error.diagnostic : normalizeTelegramDeliveryError(error);
-    const retryAt = diagnostic.permanence === "TEMPORARY" ? staffNextRetryAt(error) : null;
-    const state = diagnostic.permanence === "TEMPORARY" ? "FAILED" : "TERMINAL_FAILED";
-    db.recordTicketBatchTopicEcho(answerPackageId, ticketId, state, {
-      lastError: diagnostic.category,
-      nextRetryAt: retryAt,
-      incrementAttempt: true,
-      diagnostic,
-    });
-    if (retryAt !== null) scheduleTicketBatchStaffRecovery(retryAt);
-    logger.warn(
-      {
-        answerPackageId,
-        ticketId,
-        category: diagnostic.category,
-        method: diagnostic.method,
-        telegramErrorCode: diagnostic.telegramErrorCode,
-        httpStatus: diagnostic.httpStatus,
-        description: diagnostic.description,
-      },
-      "Ticket batch staff topic event failed"
-    );
-  }
-
-  function buildPersistedTicketBatchSummary(answerPackageId: string): string {
-    const items = db.listTicketBatchAnswerItems(answerPackageId);
-    const delivered = items.filter((item) => item.delivery_message_id !== null).length;
-    const noAction = items.filter((item) => item.action === "no_action").length;
-    const silentCloseItems = items.filter(
-      (item) => item.action === "silent_close" && (item.state === "APPLYING" || item.state === "COMPLETED")
-    );
-    const permanent = items.filter((item) => item.delivery_error_permanence === "PERMANENT");
-    const temporary = items.filter((item) => item.delivery_error_permanence === "TEMPORARY");
-    const unknown = items.filter(
-      (item) => item.delivery_error_permanence === "UNKNOWN_DELIVERY" || item.state === "UNKNOWN_DELIVERY"
-    ).length;
-    const requiresStaffTopicEvent = (item: (typeof items)[number]): boolean =>
-      item.action === "no_action" ? hasBatchFollowUpContext(item) : isConfirmedBatchReply(item);
-    const staffPending = items.filter(
-      (item) =>
-        (item.topic_echo_state === "PENDING" || item.topic_echo_state === "FAILED") && requiresStaffTopicEvent(item)
-    ).length;
-    const terminalStaffFailures = items.filter(
-      (item) => item.topic_echo_state === "TERMINAL_FAILED" && requiresStaffTopicEvent(item)
-    );
-    const closeItems = [
-      ...items.filter((item) => item.action === "reply_and_close" && isConfirmedBatchReply(item)),
-      ...silentCloseItems,
-    ];
-    const closeTickets = closeItems.map((item) => ({
-      item,
-      ticket: db.getTicketWithUser(item.ticket_id),
-    }));
-    const ticketsClosed = closeTickets.filter(({ ticket }) => ticket?.status === "CLOSED").length;
-    const silentClosed = silentCloseItems.filter((item) => db.getTicket(item.ticket_id)?.status === "CLOSED").length;
-    const ticketClosuresPending = closeItems.length - ticketsClosed;
-    const archivesCompleted = closeTickets.filter(
-      ({ ticket }) => ticket?.archived_at !== null && ticket?.archived_at !== undefined
-    ).length;
-    const archivesPending = closeItems.length - archivesCompleted;
-    const topicClosuresUnconfirmed = archivesCompleted;
-    const hasIssues =
-      permanent.length ||
-      temporary.length ||
-      unknown ||
-      staffPending ||
-      terminalStaffFailures.length ||
-      ticketClosuresPending ||
-      archivesPending;
-    return [
-      hasIssues ? "Ticket batch applied with issues." : "Answer package applied.",
-      "",
-      `Delivered replies: ${delivered}`,
-      `No action: ${noAction}`,
-      `Silent closed: ${silentClosed}`,
-      `Permanent user-delivery failures: ${permanent.length}`,
-      `Temporary user-delivery failures: ${temporary.length}`,
-      `Unknown user delivery: ${unknown}`,
-      `Staff echoes pending/failed: ${staffPending}`,
-      `Staff echoes terminal failures: ${terminalStaffFailures.length}`,
-      `Tickets closed: ${ticketsClosed}`,
-      `Ticket closures pending/failed: ${ticketClosuresPending}`,
-      `Archives completed: ${archivesCompleted}`,
-      `Archives pending/failed: ${archivesPending}`,
-      `Topic closures unconfirmed: ${topicClosuresUnconfirmed}`,
-      `Stale: ${items.filter((item) => item.state === "STALE").length}`,
-      `Inactive: ${items.filter((item) => item.state === "INACTIVE").length}`,
-      ...(permanent.length || temporary.length || unknown
-        ? [
-            "",
-            "User delivery failures:",
-            ...[
-              ...permanent,
-              ...temporary,
-              ...items.filter(
-                (item) => item.delivery_error_permanence === "UNKNOWN_DELIVERY" || item.state === "UNKNOWN_DELIVERY"
-              ),
-            ].map((item) => `- #${item.ticket_id} — ${item.delivery_error_category ?? "UNKNOWN"}`),
-          ]
-        : []),
-      ...(terminalStaffFailures.length
-        ? [
-            "",
-            "Staff sync failures:",
-            ...terminalStaffFailures.map(
-              (item) =>
-                `- #${item.ticket_id} — ${item.topic_echo_error_category ?? item.topic_echo_last_error ?? "UNKNOWN"}`
-            ),
-          ]
-        : []),
-    ].join("\n");
-  }
-
-  function recoverTicketBatchStaffOperations(answerPackageId?: string): Promise<void> {
-    const queued = ticketBatchRecoveryQueue.then(() => runTicketBatchStaffRecovery(answerPackageId));
-    ticketBatchRecoveryQueue = queued.catch(() => undefined);
-    return queued;
-  }
-
-  async function runTicketBatchStaffRecovery(answerPackageId?: string): Promise<void> {
-    const at = new Date().toISOString();
-    const packagesToFinalize = new Set<string>();
-    const packagesToRefresh = new Set<string>();
-    const invalidSuccessEchoes = db
-      .listInvalidTicketBatchSuccessEchoes(requireStaffChatId(), 20)
-      .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
-    for (const item of invalidSuccessEchoes) {
-      db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED", {
-        lastError: "Success echo is not applicable after an unconfirmed user delivery.",
-      });
-      logger.warn(
-        { answerPackageId: item.answer_package_id, ticketId: item.ticket_id },
-        "Skipped invalid ticket batch success-echo recovery candidate"
-      );
-    }
-    const closedPendingEchoes = db
-      .listClosedTicketBatchReplyAndClosePendingEchoes(requireStaffChatId(), 20)
-      .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
-    for (const item of closedPendingEchoes) {
-      db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED", {
-        lastError: "Staff topic echo is no longer available after ticket closure.",
-      });
-      packagesToFinalize.add(item.answer_package_id);
-    }
-    const failureEvents = db
-      .listPendingTicketBatchFailureEvents(requireStaffChatId(), at, 20)
-      .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
-    for (const item of failureEvents) {
-      const ticket = db.getTicketWithUser(item.ticket_id);
-      if (!ticket || ticket.staff_chat_id !== requireStaffChatId() || ticket.status === "CLOSED") {
-        if (ticket?.status === "CLOSED") {
-          db.recordTicketBatchFailureEvent(item.answer_package_id, item.ticket_id, "NOT_REQUIRED");
-        }
-        continue;
-      }
-      const diagnostic: NormalizedDeliveryError = {
-        category: item.delivery_error_category ?? "UNKNOWN_TELEGRAM_ERROR",
-        permanence: item.delivery_error_permanence ?? "UNKNOWN_DELIVERY",
-        method: item.delivery_error_method,
-        telegramErrorCode: item.delivery_error_code,
-        httpStatus: item.delivery_http_status,
-        retryAfterSeconds: item.delivery_retry_after_seconds,
-        description: item.delivery_error_description,
-        occurredAt: item.delivery_failed_at ?? at,
-      };
-      try {
-        await sendTicketBatchDeliveryFailureEvent(ticket, item, diagnostic);
-      } catch (error) {
-        const failure = batchStaffFailure(error);
-        scheduleTicketBatchStaffRecovery(failure.retryAt);
-      }
-    }
-    const echoes = db
-      .listPendingTicketBatchTopicEchoes(requireStaffChatId(), at, 20)
-      .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
-    for (const item of echoes) {
-      const ticket = db.getTicketWithUser(item.ticket_id);
-      if (!ticket || ticket.staff_chat_id !== requireStaffChatId() || ticket.status === "CLOSED") continue;
-      try {
-        await sendTicketBatchTopicEcho(ticket, item);
-        if (item.action === "no_action")
-          db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "NO_ACTION", { applied: true });
-        else if (item.state === "STAFF_SYNC_PENDING" && item.action === "reply_keep_open")
-          db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "COMPLETED", { applied: true });
-        packagesToFinalize.add(item.answer_package_id);
-        packagesToRefresh.add(item.answer_package_id);
-      } catch (error) {
-        recordTicketBatchTopicEchoFailure(item.answer_package_id, item.ticket_id, error);
-      }
-    }
-
-    const continuations = db
-      .listPendingTicketBatchReplyAndCloseContinuations(requireStaffChatId(), at, 20)
-      .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
-    for (const item of continuations) {
-      const result = await resumeReplyAndClosePostDelivery(item, undefined);
-      packagesToFinalize.add(item.answer_package_id);
-      if (result !== "PENDING") packagesToRefresh.add(item.answer_package_id);
-    }
-    const silentClosures = db
-      .listPendingTicketBatchSilentCloseContinuations(requireStaffChatId(), at, 20)
-      .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
-    for (const item of silentClosures) {
-      const result = await resumeSilentClose(item, undefined);
-      packagesToFinalize.add(item.answer_package_id);
-      if (result !== "PENDING") packagesToRefresh.add(item.answer_package_id);
-    }
-    for (const packageId of packagesToFinalize) {
-      db.finalizeTicketBatchAnswerPackage(packageId, requireStaffChatId());
-    }
-    for (const packageId of packagesToRefresh) {
-      db.queueTicketBatchFinalSummaryRefresh(
-        packageId,
-        requireStaffChatId(),
-        buildPersistedTicketBatchSummary(packageId)
-      );
-    }
-    if (continuations.length === 20 || silentClosures.length === 20) {
-      scheduleTicketBatchStaffRecovery(new Date(Date.now() + 250).toISOString());
-    }
-
-    const summaryAt = new Date().toISOString();
-    const summaries = db
-      .listPendingTicketBatchFinalSummaries(requireStaffChatId(), summaryAt, 20)
-      .filter((item) => answerPackageId === undefined || item.answer_package_id === answerPackageId);
-    for (const item of summaries) {
-      const text = buildPersistedTicketBatchSummary(item.answer_package_id);
-      db.queueTicketBatchFinalSummary(item.answer_package_id, requireStaffChatId(), {
-        text,
-        chatId: item.final_summary_chat_id ?? requireStaffChatId(),
-        originChatId: item.final_summary_origin_chat_id,
-        originMessageId: item.final_summary_origin_message_id,
-      });
-      db.recordTicketBatchFinalSummaryAttempt(item.answer_package_id, requireStaffChatId());
-      try {
-        if (item.final_summary_origin_chat_id !== null && item.final_summary_origin_message_id !== null) {
-          const originChatId = item.final_summary_origin_chat_id;
-          const originMessageId = item.final_summary_origin_message_id;
-          await runStaffChatOperation(
-            () =>
-              bot.api.editMessageText(originChatId, originMessageId, text, {
-                reply_markup:
-                  originChatId > 0 ? new InlineKeyboard().text("Back to dashboard", "dashboard:home") : undefined,
-              }),
-            originChatId
-          );
-          db.recordTicketBatchFinalSummarySent(item.answer_package_id, requireStaffChatId(), originMessageId);
-        } else {
-          const destinationChatId = item.final_summary_chat_id ?? requireStaffChatId();
-          const sent = await runStaffChatOperation(
-            () =>
-              bot.api.sendMessage(destinationChatId, text, {
-                reply_markup:
-                  destinationChatId > 0 ? new InlineKeyboard().text("Back to dashboard", "dashboard:home") : undefined,
-              }),
-            destinationChatId
-          );
-          db.recordTicketBatchFinalSummarySent(item.answer_package_id, requireStaffChatId(), sent.message_id);
-        }
-      } catch (error) {
-        const failure = batchStaffFailure(error);
-        if (failure.retryAt !== null) {
-          db.recordTicketBatchFinalSummaryFailure(
-            item.answer_package_id,
-            requireStaffChatId(),
-            "FAILED",
-            failure.category,
-            failure.retryAt
-          );
-          scheduleTicketBatchStaffRecovery(failure.retryAt);
-        } else if (item.final_summary_origin_message_id !== null) {
-          // The preview cannot be replaced, so a single persisted fallback send can be attempted later.
-          db.queueTicketBatchFinalSummary(item.answer_package_id, requireStaffChatId(), {
-            text,
-            chatId: item.final_summary_chat_id ?? requireStaffChatId(),
-          });
-          const fallbackAt = new Date().toISOString();
-          db.recordTicketBatchFinalSummaryFailure(
-            item.answer_package_id,
-            requireStaffChatId(),
-            "FAILED",
-            failure.category,
-            fallbackAt
-          );
-          scheduleTicketBatchStaffRecovery(fallbackAt);
-        } else {
-          db.recordTicketBatchFinalSummaryFailure(
-            item.answer_package_id,
-            requireStaffChatId(),
-            "UNKNOWN_DELIVERY",
-            failure.category,
-            null
-          );
-        }
-        logger.warn(
-          { answerPackageId: item.answer_package_id, category: failure.category },
-          "Ticket batch final summary remains pending"
-        );
-      }
-    }
-    scheduleTicketBatchStaffRecovery(db.getNextTicketBatchStaffRetryAt(requireStaffChatId()) ?? null);
-  }
-
-  function scheduleTicketBatchStaffRecovery(nextRetryAt: string | null): void {
-    if (!nextRetryAt) return;
-    const target = new Date(nextRetryAt).getTime();
-    if (!Number.isFinite(target)) return;
-    if (ticketBatchRecoveryTimer && ticketBatchRecoveryTimerAt !== undefined && ticketBatchRecoveryTimerAt <= target)
-      return;
-    if (ticketBatchRecoveryTimer) clearTimeout(ticketBatchRecoveryTimer);
-    const delay = Math.max(250, Math.min(2_147_000_000, target - Date.now()));
-    ticketBatchRecoveryTimerAt = target;
-    ticketBatchRecoveryTimer = setTimeout(() => {
-      ticketBatchRecoveryTimer = undefined;
-      ticketBatchRecoveryTimerAt = undefined;
-      const accepted = backgroundTasks.run(async () => {
-        try {
-          await recoverTicketBatchStaffOperations();
-        } catch (error) {
-          logger.warn(
-            { category: normalizeTelegramDeliveryError(error).category },
-            "Ticket batch staff recovery failed"
-          );
-        }
-      });
-      if (!accepted)
-        logger.debug({ operation: "ticket_batch_staff_recovery" }, "Background work was dropped during shutdown");
-    }, delay);
-    ticketBatchRecoveryTimer.unref();
   }
 
   bot.catch(async (error) => {
@@ -3904,11 +2978,9 @@ export function createBot(
   });
 
   const supportBot = bot as SupportBot;
-  supportBot.recoverPendingTicketBatchStaffOperations = () => recoverTicketBatchStaffOperations();
+  supportBot.recoverPendingTicketBatchStaffOperations = () => ticketBatchRuntime.recoverPendingStaffOperations();
   supportBot.stopBackgroundWork = () => {
-    if (ticketBatchRecoveryTimer) clearTimeout(ticketBatchRecoveryTimer);
-    ticketBatchRecoveryTimer = undefined;
-    ticketBatchRecoveryTimerAt = undefined;
+    ticketBatchRuntime.stop();
     pendingWarnings.stop();
   };
   return supportBot;
@@ -4518,15 +3590,16 @@ async function closeTicket(
   api: BotApi,
   installation: InstallationService,
   ticketId: number,
-  options: CloseTicketOptions = {}
+  options: CloseTicketOptions = {},
+  staffChatId = installation.requireStaffChatId()
 ): Promise<string> {
   const ticket = db.getTicketWithUser(ticketId);
-  if (!ticket || ticket.staff_chat_id !== installation.requireStaffChatId()) {
+  if (!ticket || ticket.staff_chat_id !== staffChatId) {
     return `Ticket #${ticketId} was not found in this staff chat.`;
   }
 
   if (ticket.status === "CLOSED") {
-    const archived = await archiveTicketIfPossible(api, db, installation.requireStaffChatId(), ticketId, {
+    const archived = await archiveTicketIfPossible(api, db, staffChatId, ticketId, {
       onFailure: options.onArchiveFailure,
     });
     return archived
@@ -4535,23 +3608,23 @@ async function closeTicket(
   }
 
   const closedTicket = db.closeTicketRecord(ticketId, options.closedBy ?? systemActor());
-  await refreshStaffTicketMessage(db, api, installation, ticketId);
+  await refreshStaffTicketMessage(db, api, installation, ticketId, staffChatId);
 
   if (options.staffNotice) {
-    await sendStaffTopicNotice(api, installation.requireStaffChatId(), ticket, options.staffNotice);
+    await sendStaffTopicNotice(api, staffChatId, ticket, options.staffNotice);
   }
 
   if (options.notifyUser) {
     await notifyUserOrStaff(
       api,
-      installation.requireStaffChatId(),
+      staffChatId,
       ticket.user_telegram_id,
       options.userText ?? CLOSED_TEXT,
       ticket.message_thread_id
     );
   }
 
-  const archived = await archiveTicketIfPossible(api, db, installation.requireStaffChatId(), ticketId, {
+  const archived = await archiveTicketIfPossible(api, db, staffChatId, ticketId, {
     onFailure: options.onArchiveFailure,
   });
 
@@ -4564,14 +3637,11 @@ async function refreshStaffTicketMessage(
   db: SupportDatabase,
   api: BotApi,
   installation: InstallationService,
-  ticketId: number
+  ticketId: number,
+  staffChatId = installation.requireStaffChatId()
 ): Promise<void> {
   const ticket = db.getTicketWithUser(ticketId);
-  if (
-    !ticket?.staff_chat_id ||
-    ticket.staff_chat_id !== installation.requireStaffChatId() ||
-    !ticket.staff_message_id
-  ) {
+  if (!ticket?.staff_chat_id || ticket.staff_chat_id !== staffChatId || !ticket.staff_message_id) {
     return;
   }
 
