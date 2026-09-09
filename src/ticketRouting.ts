@@ -1,5 +1,5 @@
-import { GrammyError, HttpError, InlineKeyboard } from "grammy";
-import type { Context } from "grammy";
+import { GrammyError, HttpError } from "grammy";
+import type { Context, InlineKeyboard } from "grammy";
 import type { Message, User } from "grammy/types";
 import { archiveTicketIfPossible, logBanEvent, type ArchiveActor } from "./archive.js";
 import { type SupportDatabase, type TicketRecord, type TicketWithUser } from "./db.js";
@@ -14,13 +14,13 @@ import {
   truncate,
   validateRenderedSupportAcknowledgement,
 } from "./format.js";
-import { InstallationService } from "./installation.js";
+import type { InstallationService } from "./installation.js";
 import { logger } from "./logger.js";
 import { displayTelegramUser, getMessageContent, isCommandText, usernameOf } from "./telegram.js";
 
 type BotApi = Context["api"];
 
-export interface CloseTicketOptions {
+interface CloseTicketOptions {
   notifyUser?: boolean;
   userText?: string;
   staffNotice?: string;
@@ -28,12 +28,12 @@ export interface CloseTicketOptions {
   onArchiveFailure?: (diagnostic: NormalizedDeliveryError) => void;
 }
 
-export interface StaffTextReplySource {
+interface StaffTextReplySource {
   chatId: number;
   messageId: number;
 }
 
-export interface TicketRoutingServiceDependencies {
+interface TicketRoutingServiceDependencies {
   db: SupportDatabase;
   api: BotApi;
   installation: InstallationService;

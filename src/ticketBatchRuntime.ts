@@ -9,7 +9,7 @@ import {
 } from "./deliveryDiagnostics.js";
 import { type SupportDatabase, type TicketBatchAnswerItemRecord, type TicketWithUser } from "./db.js";
 import { formatEscalationTarget, formatFollowUpState, truncate } from "./format.js";
-import { InstallationService } from "./installation.js";
+import type { InstallationService } from "./installation.js";
 import { type BackgroundTaskTracker } from "./lifecycle.js";
 import { logger } from "./logger.js";
 import { getTicketSnapshotToken } from "./ticketBatch.js";
