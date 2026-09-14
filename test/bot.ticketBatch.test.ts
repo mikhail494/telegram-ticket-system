@@ -475,6 +475,71 @@ describe("ticket batch Telegram workflow", () => {
     );
   });
 
+  it("exports available attachments when Telegram cannot retrieve a historical file ID", async () => {
+    const harness = createHarness();
+    const active = harness.seedTicket();
+    harness.db.addMessage({
+      ticketId: active.id,
+      direction: "USER_TO_STAFF",
+      sourceChatId: active.user_telegram_id,
+      sourceMessageId: 98,
+      mediaType: "photo",
+      fileId: "current",
+    });
+    harness.db.addMessage({
+      ticketId: active.id,
+      direction: "USER_TO_STAFF",
+      sourceChatId: active.user_telegram_id,
+      sourceMessageId: 99,
+      mediaType: "document",
+      fileId: "historical",
+      filename: "historical.pdf",
+    });
+    harness.setFileDownload("current", new Uint8Array([7, 8, 9]), { filePath: "evidence/photo.jpg" });
+    harness.setApiResponseOverride("getFile", (call) =>
+      call.payload.file_id === "historical"
+        ? {
+            ok: false,
+            error_code: 400,
+            description: "Bad Request: wrong file_id or the file is temporarily unavailable",
+          }
+        : undefined
+    );
+
+    await harness.bot.handleUpdate(exportCommand());
+
+    assert.equal(harness.countApiCalls("sendDocument"), 1);
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some((call) => String(call.payload.text).includes("Export failed before delivery")),
+      false
+    );
+    const exportDocument = harness.findApiCalls("sendDocument")[0];
+    assert.match(String(exportDocument?.payload.caption), /Attachments: 1 embedded, 1 unavailable/);
+    const entries = unzipSync(exportDocument!.documentBytes!);
+    const mediaIndex = JSON.parse(strFromU8(entries["media-index.json"]!)) as Array<{
+      embedded: boolean;
+      failure_category?: string;
+      failure_reason?: string;
+    }>;
+    assert.deepEqual(
+      mediaIndex.map((attachment) => [attachment.embedded, attachment.failure_category]),
+      [
+        [true, undefined],
+        [false, "TELEGRAM_FILE_UNAVAILABLE"],
+      ]
+    );
+    assert.match(
+      mediaIndex[1]!.failure_reason ?? "",
+      /could not retrieve this historical attachment with the current bot account/i
+    );
+    assert.equal(
+      Object.keys(entries).some((name) => name.includes("historical.pdf")),
+      false
+    );
+  });
+
   it("keeps other Telegram getFile failures strict", async () => {
     const harness = createHarness();
     const active = harness.seedTicket();

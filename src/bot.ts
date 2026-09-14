@@ -1519,6 +1519,14 @@ export function createBot(
                     failureReason: "Attachment exceeds the hosted Telegram Bot API download limit.",
                   };
                 }
+                if (isUnavailableTelegramFileError(error)) {
+                  return {
+                    unavailable: true,
+                    failureCategory: "TELEGRAM_FILE_UNAVAILABLE",
+                    failureReason:
+                      "Telegram could not retrieve this historical attachment with the current bot account. The stored file_id may belong to a previous bot identity or the file may no longer be available from Telegram.",
+                  };
+                }
                 throw error;
               }
               if (!file.file_path) {
@@ -3287,6 +3295,14 @@ function formatTicketBatchExportCaption(
 
 function isHostedTelegramFileTooLargeError(error: unknown): error is GrammyError {
   return error instanceof GrammyError && error.error_code === 400 && /\bfile is too big\b/i.test(error.description);
+}
+
+function isUnavailableTelegramFileError(error: unknown): error is GrammyError {
+  return (
+    error instanceof GrammyError &&
+    error.error_code === 400 &&
+    /\bwrong file_id or the file is temporarily unavailable\b/i.test(error.description)
+  );
 }
 
 function userTicketKeyboard(ticketId: number): InlineKeyboard {
