@@ -149,10 +149,12 @@ export interface DownloadedTicketBatchAttachment {
   mimeType?: string | null;
 }
 
+export type TicketBatchAttachmentFailureCategory = "TELEGRAM_FILE_TOO_LARGE" | "TELEGRAM_FILE_UNAVAILABLE";
+
 export interface UnavailableTicketBatchAttachment {
   unavailable: true;
-  failureCategory: "TELEGRAM_FILE_TOO_LARGE";
-  failureReason: "Attachment exceeds the hosted Telegram Bot API download limit.";
+  failureCategory: TicketBatchAttachmentFailureCategory;
+  failureReason: string;
 }
 
 export type TicketBatchAttachmentDownloadResult = DownloadedTicketBatchAttachment | UnavailableTicketBatchAttachment;
@@ -187,8 +189,8 @@ export interface TicketBatchUnavailableAttachment {
   mime_type: null;
   original_filename: string | null;
   embedded: false;
-  failure_category: "TELEGRAM_FILE_TOO_LARGE";
-  failure_reason: "Attachment exceeds the hosted Telegram Bot API download limit.";
+  failure_category: TicketBatchAttachmentFailureCategory;
+  failure_reason: string;
 }
 
 export type TicketBatchExportAttachment = TicketBatchEmbeddedAttachment | TicketBatchUnavailableAttachment;
@@ -1041,7 +1043,9 @@ function formatTicketsMarkdown(snapshot: TicketBatchExportSnapshot, records: Arr
             lines.push(
               `- ${titleCase(attachment.media_type)}: ${attachment.original_filename ?? "unnamed attachment"}`,
               "  Status: unavailable",
-              "  Reason: exceeds the hosted Telegram Bot API download limit"
+              attachment.failure_category === "TELEGRAM_FILE_TOO_LARGE"
+                ? "  Reason: exceeds the hosted Telegram Bot API download limit"
+                : `  Reason: ${attachment.failure_reason}`
             );
           }
         }

@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+### Fixed
+
+- Ticket Batch exports no longer fail entirely when Telegram cannot resolve a historical attachment file_id; the attachment is recorded as unavailable instead.
+
 ## [2.0.0] - 2026-09-10
 
 ### Breaking compatibility

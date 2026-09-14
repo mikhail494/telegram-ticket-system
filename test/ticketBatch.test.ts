@@ -420,6 +420,86 @@ describe("ticket batch export contract", () => {
     }
   });
 
+  it("records unavailable historical file IDs without placeholder media", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "USER_TO_STAFF",
+      sourceChatId: ticket.user_telegram_id,
+      sourceMessageId: 100,
+      mediaType: "document",
+      filename: "available.pdf",
+      fileId: "available",
+    });
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "USER_TO_STAFF",
+      sourceChatId: ticket.user_telegram_id,
+      sourceMessageId: 101,
+      mediaType: "photo",
+      filename: "historical.jpg",
+      fileId: "historical",
+    });
+    const messages = harness.db.listMessagesChronological(ticket.id);
+    const snapshot = buildTicketBatchExportSnapshot({
+      exportId: "export_historical_file_id",
+      createdAt: "2026-09-15T00:00:00.000Z",
+      staffChatId: -100900,
+      tickets: [{ ticket: harness.db.getTicketWithUser(ticket.id)!, messages }],
+    });
+    const failureReason =
+      "Telegram could not retrieve this historical attachment with the current bot account. The stored file_id may belong to a previous bot identity or the file may no longer be available from Telegram.";
+
+    const zip = await createTicketBatchZip(snapshot, async (source) =>
+      source.fileId === "historical"
+        ? {
+            unavailable: true,
+            failureCategory: "TELEGRAM_FILE_UNAVAILABLE",
+            failureReason,
+          }
+        : { bytes: new Uint8Array([1, 2, 3]), telegramFilePath: "files/available.pdf" }
+    );
+    try {
+      const entries = unzipSync(await readFile(zip.filePath));
+      const manifest = JSON.parse(strFromU8(entries["manifest.json"]!));
+      const mediaIndex = JSON.parse(strFromU8(entries["media-index.json"]!)) as Array<Record<string, unknown>>;
+      const record = JSON.parse(strFromU8(entries["tickets.jsonl"]!).trim()) as {
+        messages: Array<{ attachments: Array<Record<string, unknown>> }>;
+      };
+      const unavailable = mediaIndex.find((attachment) => attachment.embedded === false);
+
+      assert.equal(manifest.attachment_count, 2);
+      assert.equal(manifest.embedded_attachment_count, 1);
+      assert.equal(manifest.failed_attachment_count, 1);
+      assert.deepEqual(unavailable, {
+        ticket_id: ticket.id,
+        database_message_id: messages[1]!.id,
+        source_telegram_message_id: 101,
+        timestamp: messages[1]!.created_at,
+        direction: "USER_TO_STAFF",
+        media_type: "photo",
+        mime_type: null,
+        original_filename: "historical.jpg",
+        embedded: false,
+        failure_category: "TELEGRAM_FILE_UNAVAILABLE",
+        failure_reason: failureReason,
+      });
+      assert.equal(record.messages[1]?.attachments[0]?.failure_category, "TELEGRAM_FILE_UNAVAILABLE");
+      assert.match(strFromU8(entries["tickets.md"]!), new RegExp(failureReason));
+      assert.equal(
+        Object.keys(entries).some((name) => name.includes("historical.jpg")),
+        false
+      );
+      assert.equal(
+        Object.values(entries).some((value) => value.byteLength === 0),
+        false
+      );
+    } finally {
+      await cleanupTicketBatchZip(zip);
+    }
+  });
+
   it("keeps unexpected attachment download failures strict", async () => {
     const harness = createHarness();
     const ticket = harness.seedTicket();
