@@ -170,4 +170,36 @@ describe("Support Logs topic safety", () => {
     assert.deepEqual(resumed, { processed: 1, hasMore: false, madeProgress: true });
     assert.ok(harness.db.getTicket(second.id)?.archived_at);
   });
+
+  it("keeps a transiently failed final archive candidate queued for continuation", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket({ messageThreadId: 5000 });
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "USER_TO_STAFF",
+      text: "Please help with my account.",
+      senderType: "USER",
+      senderDisplayName: "@test_customer",
+      senderUsername: "test_customer",
+    });
+    harness.db.closeTicketRecord(ticket.id, {
+      type: "STAFF",
+      displayName: "@test_staff",
+      username: "test_staff",
+    });
+    harness.failNextApiCall("sendDocument");
+
+    const failed = await archiveClosedTicketsPendingUpload(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, {
+      budget: new StartupRecoveryBudget({ maxItems: 1 }),
+    });
+
+    assert.deepEqual(failed, { processed: 1, hasMore: true, madeProgress: false });
+    assert.equal(harness.db.getTicket(ticket.id)?.archived_at, null);
+
+    const resumed = await archiveClosedTicketsPendingUpload(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, {
+      budget: new StartupRecoveryBudget({ maxItems: 1 }),
+    });
+    assert.deepEqual(resumed, { processed: 1, hasMore: false, madeProgress: true });
+    assert.ok(harness.db.getTicket(ticket.id)?.archived_at);
+  });
 });

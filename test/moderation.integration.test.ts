@@ -13,7 +13,8 @@ import {
   processModerationCleanupJob,
   processModerationRecovery,
 } from "../src/languageModeration.js";
-import { StartupRecoveryBudget } from "../src/startup.js";
+import { BackgroundTaskRegistry } from "../src/lifecycle.js";
+import { StartupRecoveryBudget, StartupRecoveryContinuation } from "../src/startup.js";
 
 const PUBLIC_CHAT_ID = -100777;
 const FIXED_NOW = new Date("2026-07-31T12:00:00.000Z");
@@ -349,6 +350,58 @@ describe("moderation cleanup and Support Logs recovery", () => {
     assert.deepEqual(result, { processed: 1, hasMore: true, madeProgress: true });
     assert.equal(harness.db.getLanguageModerationCleanupJob(firstJob)?.state, "COMPLETED");
     assert.equal(harness.db.getLanguageModerationCleanupJob(secondJob)?.state, "PENDING");
+  });
+
+  it("keeps a retryable cleanup failure queued without reporting false progress", async () => {
+    const harness = createHarness();
+    const jobId = createDueJob(harness, 42);
+    seedCycleViolation(harness, 42, 402);
+    harness.failNextApiCall("deleteMessage");
+
+    const failed = await processModerationRecovery(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, FIXED_NOW, {
+      budget: new StartupRecoveryBudget({ maxItems: 1 }),
+    });
+
+    assert.deepEqual(failed, { processed: 1, hasMore: true, madeProgress: false });
+    assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "CLEANING");
+
+    const resumed = await processModerationRecovery(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, FIXED_NOW, {
+      budget: new StartupRecoveryBudget({ maxItems: 1 }),
+    });
+    assert.deepEqual(resumed, { processed: 1, hasMore: false, madeProgress: true });
+    assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "COMPLETED");
+  });
+
+  it("uses the continuation backoff after a retryable cleanup failure", async () => {
+    const harness = createHarness();
+    const jobId = createDueJob(harness, 43);
+    seedCycleViolation(harness, 43, 403);
+    harness.failNextApiCall("deleteMessage");
+    const timers: Array<{ callback: () => void; delayMs: number }> = [];
+    const tasks = new BackgroundTaskRegistry();
+    const continuation = new StartupRecoveryContinuation({
+      backgroundTasks: tasks,
+      shouldContinue: () => true,
+      createTimer: (callback, delayMs) => {
+        timers.push({ callback, delayMs });
+        return { unref: () => undefined } as unknown as ReturnType<typeof setTimeout>;
+      },
+      clearTimer: () => undefined,
+    });
+    continuation.enqueue("moderation", () =>
+      processModerationRecovery(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, FIXED_NOW, {
+        budget: new StartupRecoveryBudget({ maxItems: 1 }),
+      })
+    );
+
+    continuation.start();
+    const initialTimer = timers.at(-1);
+    assert.ok(initialTimer);
+    initialTimer.callback();
+    await tasks.drain();
+
+    assert.equal(harness.db.getLanguageModerationCleanupJob(jobId)?.state, "CLEANING");
+    assert.equal(timers.at(-1)?.delayMs, 30_000);
   });
 
   it("deduplicates only identical in-process cleanup job ids without real sleeps", () => {

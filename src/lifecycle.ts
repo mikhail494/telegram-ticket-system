@@ -221,7 +221,6 @@ export class ApplicationLifecycle {
       this.deadlineExpired = true;
       resolve();
     }, delayMs);
-    timer.unref?.();
     return {
       delayMs,
       promise,

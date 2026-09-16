@@ -244,6 +244,7 @@ test("shutdown deadline exits terminally without closing SQLite underneath a hun
   let closes = 0;
   const terminalExitCodes: number[] = [];
   const deadlineStages: string[] = [];
+  let deadlineTimerUnrefCalls = 0;
   const pending = new Promise<void>(() => undefined);
   const lifecycle = new ApplicationLifecycle({
     stopPolling: () => undefined,
@@ -260,7 +261,11 @@ test("shutdown deadline exits terminally without closing SQLite underneath a hun
     createShutdownDeadlineTimer: (handler, delayMs) => {
       assert.equal(delayMs, 30_000);
       fireDeadline = handler;
-      return { unref: () => undefined } as unknown as ReturnType<typeof setTimeout>;
+      return {
+        unref: () => {
+          deadlineTimerUnrefCalls += 1;
+        },
+      } as unknown as ReturnType<typeof setTimeout>;
     },
     clearShutdownDeadlineTimer: () => undefined,
     terminalExit: (code) => {
@@ -278,6 +283,7 @@ test("shutdown deadline exits terminally without closing SQLite underneath a hun
 
   assert.deepEqual(terminalExitCodes, [1]);
   assert.deepEqual(deadlineStages, ["background"]);
+  assert.equal(deadlineTimerUnrefCalls, 0);
   assert.equal(closes, 0);
   assert.equal(lifecycle.getState(), "SHUTTING_DOWN");
 });

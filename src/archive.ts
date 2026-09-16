@@ -161,7 +161,7 @@ export async function archiveClosedTicketsPendingUpload(
   );
   return {
     ...result,
-    hasMore: result.hasMore || hasAdditionalCandidate,
+    hasMore: result.hasMore || hasAdditionalCandidate || db.listClosedTicketsPendingArchive(staffChatId, 1).length > 0,
   };
 }
 
