@@ -13,6 +13,7 @@ import {
   processModerationCleanupJob,
   processModerationRecovery,
 } from "../src/languageModeration.js";
+import { StartupRecoveryBudget } from "../src/startup.js";
 
 const PUBLIC_CHAT_ID = -100777;
 const FIXED_NOW = new Date("2026-07-31T12:00:00.000Z");
@@ -334,6 +335,22 @@ describe("public language moderation sanctions", () => {
 });
 
 describe("moderation cleanup and Support Logs recovery", () => {
+  it("bounds startup recovery at cleanup-job boundaries without losing later work", async () => {
+    const harness = createHarness();
+    const firstJob = createDueJob(harness, 40);
+    const secondJob = createDueJob(harness, 41);
+    seedCycleViolation(harness, 40, 400);
+    seedCycleViolation(harness, 41, 401);
+
+    const result = await processModerationRecovery(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, FIXED_NOW, {
+      budget: new StartupRecoveryBudget({ maxItems: 1 }),
+    });
+
+    assert.deepEqual(result, { processed: 1, hasMore: true, madeProgress: true });
+    assert.equal(harness.db.getLanguageModerationCleanupJob(firstJob)?.state, "COMPLETED");
+    assert.equal(harness.db.getLanguageModerationCleanupJob(secondJob)?.state, "PENDING");
+  });
+
   it("deduplicates only identical in-process cleanup job ids without real sleeps", () => {
     const harness = createHarness();
     const scheduled: Array<{ delayMs: number; callback: () => void }> = [];

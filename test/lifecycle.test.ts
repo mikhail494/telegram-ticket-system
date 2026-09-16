@@ -82,6 +82,30 @@ test("duplicate shutdown signals and startup failure close SQLite only once", as
   );
 });
 
+test("shutdown waits for in-flight startup work before closing SQLite", async () => {
+  let releaseStartup!: () => void;
+  let closes = 0;
+  const startup = new Promise<void>((resolve) => {
+    releaseStartup = resolve;
+  });
+  const lifecycle = new ApplicationLifecycle({
+    stopPolling: () => undefined,
+    startupCompletion: () => startup,
+    pollingCompletion: () => null,
+    backgroundTasks: new BackgroundTaskRegistry(),
+    closeDatabase: () => {
+      closes += 1;
+    },
+  });
+
+  const shutdown = lifecycle.shutdown();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(closes, 0);
+  releaseStartup();
+  await shutdown;
+  assert.equal(closes, 1);
+});
+
 test("backup drain failure is logged and does not leave SQLite open", async () => {
   const failures: string[] = [];
   let closes = 0;
@@ -197,7 +221,7 @@ test("normal polling completion drains resources without stopping an already-end
   assert.equal(closes, 1);
 });
 
-test("lifecycle keeps readiness in shutdown before closing the operational listener", async () => {
+test("lifecycle retires the operational listener before closing SQLite", async () => {
   const events: string[] = [];
   const lifecycle = new ApplicationLifecycle({
     stopPolling: () => undefined,
@@ -211,8 +235,51 @@ test("lifecycle keeps readiness in shutdown before closing the operational liste
   const shutdown = lifecycle.shutdown();
   assert.equal(lifecycle.getState(), "SHUTTING_DOWN");
   await shutdown;
-  assert.deepEqual(events, ["db-close", "server-close"]);
+  assert.deepEqual(events, ["server-close", "db-close"]);
   assert.equal(lifecycle.getState(), "STOPPED");
+});
+
+test("shutdown deadline exits terminally without closing SQLite underneath a hung drain", async () => {
+  let fireDeadline!: () => void;
+  let closes = 0;
+  const terminalExitCodes: number[] = [];
+  const deadlineStages: string[] = [];
+  const pending = new Promise<void>(() => undefined);
+  const lifecycle = new ApplicationLifecycle({
+    stopPolling: () => undefined,
+    pollingCompletion: () => null,
+    backgroundTasks: {
+      run: () => true,
+      stopAccepting: () => undefined,
+      drain: () => pending,
+    },
+    closeDatabase: () => {
+      closes += 1;
+    },
+    shutdownDeadlineMs: 30_000,
+    createShutdownDeadlineTimer: (handler, delayMs) => {
+      assert.equal(delayMs, 30_000);
+      fireDeadline = handler;
+      return { unref: () => undefined } as unknown as ReturnType<typeof setTimeout>;
+    },
+    clearShutdownDeadlineTimer: () => undefined,
+    terminalExit: (code) => {
+      terminalExitCodes.push(code);
+    },
+    onShutdownDeadline: (stage) => {
+      deadlineStages.push(stage);
+    },
+  });
+
+  const shutdown = lifecycle.shutdown();
+  await new Promise((resolve) => setImmediate(resolve));
+  fireDeadline();
+  await shutdown;
+
+  assert.deepEqual(terminalExitCodes, [1]);
+  assert.deepEqual(deadlineStages, ["background"]);
+  assert.equal(closes, 0);
+  assert.equal(lifecycle.getState(), "SHUTTING_DOWN");
 });
 
 test("background task telemetry preserves acceptance, completion, failure, and shutdown semantics", async () => {

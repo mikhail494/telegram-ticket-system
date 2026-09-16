@@ -705,8 +705,12 @@ export class SupportDatabase {
     return this.moderation.getLanguageModerationCleanupJob(jobId);
   }
 
-  listLanguageModerationRecoveryJobs(staffChatId: number, nowIso: string): LanguageModerationCleanupJob[] {
-    return this.moderation.listLanguageModerationRecoveryJobs(staffChatId, nowIso);
+  listLanguageModerationRecoveryJobs(
+    staffChatId: number,
+    nowIso: string,
+    limit?: number
+  ): LanguageModerationCleanupJob[] {
+    return this.moderation.listLanguageModerationRecoveryJobs(staffChatId, nowIso, limit);
   }
 
   updateLanguageModerationCleanupJob(id: number, state: LanguageModerationCleanupJob["state"]): void {

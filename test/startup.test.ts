@@ -2,7 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { SupportDatabase } from "../src/db.js";
 import { InstallationService } from "../src/installation.js";
-import { runWorkspaceStartup } from "../src/startup.js";
+import { ApplicationLifecycle, BackgroundTaskRegistry, installShutdownSignalHandlers } from "../src/lifecycle.js";
+import {
+  StartupRecoveryBudget,
+  StartupRecoveryContinuation,
+  runBoundedRecoveryPass,
+  runWorkspaceStartup,
+} from "../src/startup.js";
 
 test("setup mode skips every staff-workspace startup task", async () => {
   const db = new SupportDatabase(":memory:");
@@ -74,4 +80,140 @@ test("ready startup automatically switches an adopted installation with an owner
   } finally {
     db.close();
   }
+});
+
+test("startup signal handling stops later recovery stages at an item boundary", async () => {
+  const db = new SupportDatabase(":memory:");
+  try {
+    const service = new InstallationService(db);
+    service.adoptLegacyInstallation(-10042);
+    const lifecycle = new ApplicationLifecycle({
+      stopPolling: () => undefined,
+      pollingCompletion: () => null,
+      backgroundTasks: { run: () => true, stopAccepting: () => undefined, drain: async () => undefined },
+      closeDatabase: () => undefined,
+    });
+    const handlers = new Map<NodeJS.Signals, () => void>();
+    installShutdownSignalHandlers(lifecycle, {
+      once: (signal, handler) => {
+        handlers.set(signal, handler);
+      },
+    });
+    const calls: string[] = [];
+
+    const result = await runWorkspaceStartup(
+      service,
+      {
+        initializeSupportLogs: async () => {
+          calls.push("logs");
+        },
+        recoverArchives: async () => {
+          calls.push("archives");
+          handlers.get("SIGTERM")!();
+          handlers.get("SIGINT")!();
+        },
+        recoverModeration: async () => {
+          calls.push("moderation");
+        },
+        recoverBatch: async () => {
+          calls.push("batch");
+        },
+        sendLegacyStaffOnboarding: async () => {
+          calls.push("onboarding");
+        },
+      },
+      { shouldContinue: () => lifecycle.getState() === "RUNNING" }
+    );
+
+    assert.equal(result, "SHUTTING_DOWN");
+    assert.deepEqual(calls, ["logs", "archives"]);
+    await lifecycle.shutdown();
+    assert.equal(lifecycle.getState(), "STOPPED");
+  } finally {
+    db.close();
+  }
+});
+
+test("bounded startup recovery leaves durable candidates for a later pass", async () => {
+  let now = 0;
+  const budget = new StartupRecoveryBudget({ maxItems: 2, maxDurationMs: 10, now: () => now });
+  const processed: number[] = [];
+
+  const result = await runBoundedRecoveryPass([1, 2, 3], budget, async (item) => {
+    processed.push(item);
+    now += 1;
+  });
+
+  assert.deepEqual(processed, [1, 2]);
+  assert.deepEqual(result, { processed: 2, hasMore: true, madeProgress: true });
+});
+
+test("startup recovery uses its ten-second limit only between durable items", async () => {
+  let now = 0;
+  const processed: number[] = [];
+  const budget = new StartupRecoveryBudget({ maxItems: 50, maxDurationMs: 10_000, now: () => now });
+
+  const result = await runBoundedRecoveryPass([1, 2], budget, async (item) => {
+    processed.push(item);
+    now = 10_000;
+  });
+
+  assert.deepEqual(processed, [1]);
+  assert.deepEqual(result, { processed: 1, hasMore: true, madeProgress: true });
+});
+
+test("startup recovery finishes an in-flight item before honoring cancellation", async () => {
+  let running = true;
+  const processed: number[] = [];
+  const budget = new StartupRecoveryBudget({ shouldContinue: () => running });
+
+  const result = await runBoundedRecoveryPass([1, 2], budget, async (item) => {
+    processed.push(item);
+    running = false;
+  });
+
+  assert.deepEqual(processed, [1]);
+  assert.deepEqual(result, { processed: 1, hasMore: true, madeProgress: true });
+});
+
+test("startup recovery continuation yields bounded chunks and stops with its owner", async () => {
+  const timers: Array<{ callback: () => void; delayMs: number }> = [];
+  const tasks = new BackgroundTaskRegistry();
+  let clearedTimers = 0;
+  const continuation = new StartupRecoveryContinuation({
+    backgroundTasks: tasks,
+    shouldContinue: () => true,
+    createTimer: (callback, delayMs) => {
+      timers.push({ callback, delayMs });
+      return { unref: () => undefined } as unknown as ReturnType<typeof setTimeout>;
+    },
+    clearTimer: () => {
+      clearedTimers += 1;
+    },
+  });
+  let runs = 0;
+  continuation.enqueue("archives", async () => {
+    runs += 1;
+    return { hasMore: true, madeProgress: runs === 1 };
+  });
+
+  continuation.start();
+  const firstTimer = timers.at(-1);
+  assert.ok(firstTimer);
+  assert.equal(firstTimer.delayMs, 250);
+  firstTimer.callback();
+  await tasks.drain();
+  assert.equal(runs, 1);
+  assert.equal(timers.at(-1)?.delayMs, 250);
+
+  const next = timers.at(-1);
+  assert.ok(next);
+  next.callback();
+  await tasks.drain();
+  assert.equal(runs, 2);
+  assert.equal(timers.at(-1)?.delayMs, 30_000);
+
+  continuation.stop();
+  assert.equal(continuation.pendingCount(), 0);
+  assert.equal(clearedTimers, 1);
 });
