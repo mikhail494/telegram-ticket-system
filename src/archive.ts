@@ -31,7 +31,6 @@ interface ArchiveAttemptOptions {
 export interface ArchiveRecoveryResult {
   processed: number;
   hasMore: boolean;
-  madeProgress: boolean;
 }
 
 export interface ArchiveRecoveryOptions {
@@ -149,16 +148,15 @@ export async function archiveClosedTicketsPendingUpload(
   const candidates = hasAdditionalCandidate ? tickets.slice(0, -1) : tickets;
 
   if (!options.budget) {
-    let madeProgress = false;
     for (const ticket of candidates) {
-      if (await archiveTicketIfPossible(api, db, staffChatId, ticket.id)) madeProgress = true;
+      await archiveTicketIfPossible(api, db, staffChatId, ticket.id);
     }
-    return { processed: candidates.length, hasMore: false, madeProgress };
+    return { processed: candidates.length, hasMore: false };
   }
 
-  const result = await runBoundedRecoveryPass(candidates, options.budget, (ticket) =>
-    archiveTicketIfPossible(api, db, staffChatId, ticket.id)
-  );
+  const result = await runBoundedRecoveryPass(candidates, options.budget, async (ticket) => {
+    await archiveTicketIfPossible(api, db, staffChatId, ticket.id);
+  });
   return {
     ...result,
     hasMore: result.hasMore || hasAdditionalCandidate || db.listClosedTicketsPendingArchive(staffChatId, 1).length > 0,

@@ -160,18 +160,18 @@ describe("Support Logs topic safety", () => {
       budget: new StartupRecoveryBudget({ maxItems: 1 }),
     });
 
-    assert.deepEqual(result, { processed: 1, hasMore: true, madeProgress: true });
+    assert.deepEqual(result, { processed: 1, hasMore: true });
     assert.ok(harness.db.getTicket(first.id)?.archived_at);
     assert.equal(harness.db.getTicket(second.id)?.archived_at, null);
 
     const resumed = await archiveClosedTicketsPendingUpload(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, {
       budget: new StartupRecoveryBudget({ maxItems: 1 }),
     });
-    assert.deepEqual(resumed, { processed: 1, hasMore: false, madeProgress: true });
+    assert.deepEqual(resumed, { processed: 1, hasMore: false });
     assert.ok(harness.db.getTicket(second.id)?.archived_at);
   });
 
-  it("keeps a transiently failed final archive candidate queued for continuation", async () => {
+  it("leaves a transiently failed final archive candidate durable without scheduling another attempt", async () => {
     const harness = createHarness();
     const ticket = harness.seedTicket({ messageThreadId: 5000 });
     harness.db.addMessage({
@@ -193,13 +193,8 @@ describe("Support Logs topic safety", () => {
       budget: new StartupRecoveryBudget({ maxItems: 1 }),
     });
 
-    assert.deepEqual(failed, { processed: 1, hasMore: true, madeProgress: false });
+    assert.deepEqual(failed, { processed: 1, hasMore: true });
     assert.equal(harness.db.getTicket(ticket.id)?.archived_at, null);
-
-    const resumed = await archiveClosedTicketsPendingUpload(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, {
-      budget: new StartupRecoveryBudget({ maxItems: 1 }),
-    });
-    assert.deepEqual(resumed, { processed: 1, hasMore: false, madeProgress: true });
-    assert.ok(harness.db.getTicket(ticket.id)?.archived_at);
+    assert.equal(harness.countApiCalls("sendDocument"), 1);
   });
 });

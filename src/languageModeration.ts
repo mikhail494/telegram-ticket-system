@@ -405,7 +405,7 @@ export function createModerationCleanupScheduler(
       const run = () => {
         const staffChatId = getStaffChatId();
         if (staffChatId === null) return Promise.resolve();
-        return processModerationCleanupJob(api, db, staffChatId, jobId, new Date()).then(() => undefined);
+        return processModerationCleanupJob(api, db, staffChatId, jobId, new Date());
       };
       const trackedRun = () =>
         run()
@@ -432,18 +432,17 @@ export async function processModerationRecovery(
   staffChatId: number,
   currentTime = new Date(),
   options: { budget?: StartupRecoveryBudget } = {}
-): Promise<{ processed: number; hasMore: boolean; madeProgress: boolean }> {
+): Promise<{ processed: number; hasMore: boolean }> {
   const limit = options.budget ? Math.max(1, options.budget.remainingItemCapacity() + 1) : undefined;
   const jobs = db.listLanguageModerationRecoveryJobs(staffChatId, currentTime.toISOString(), limit);
   const hasAdditionalCandidate = limit !== undefined && jobs.length === limit;
   const candidates = hasAdditionalCandidate ? jobs.slice(0, -1) : jobs;
 
   if (!options.budget) {
-    let madeProgress = false;
     for (const job of candidates) {
-      if (await processModerationCleanupJob(api, db, staffChatId, job.id, currentTime)) madeProgress = true;
+      await processModerationCleanupJob(api, db, staffChatId, job.id, currentTime);
     }
-    return { processed: candidates.length, hasMore: false, madeProgress };
+    return { processed: candidates.length, hasMore: false };
   }
 
   const result = await runBoundedRecoveryPass(candidates, options.budget, (job) =>
@@ -464,7 +463,7 @@ export async function processModerationCleanupJob(
   staffChatId: number,
   jobId: number,
   currentTime = new Date()
-): Promise<boolean> {
+): Promise<void> {
   const job = db.getLanguageModerationCleanupJob(jobId);
   if (
     !job ||
@@ -472,18 +471,17 @@ export async function processModerationCleanupJob(
     job.state === "COMPLETED" ||
     Date.parse(job.cleanup_due_at) > currentTime.getTime()
   )
-    return false;
+    return;
 
   if (!job.violation_cycle_id) {
     logger.warn(
       { jobId: job.id, chatId: job.chat_id },
       "Moderation cleanup job has no immutable violation cycle reference"
     );
-    return false;
+    return;
   }
 
   let state = job.state;
-  let madeProgress = false;
   const cycleId = job.violation_cycle_id;
 
   try {
@@ -509,7 +507,6 @@ export async function processModerationCleanupJob(
             state: "DELETED",
           });
           summary.deleted += 1;
-          madeProgress = true;
         } catch (error) {
           const diagnostic = normalizeTelegramDeliveryError(error);
           if (isAlreadyAbsentModerationMessage(diagnostic)) {
@@ -520,7 +517,6 @@ export async function processModerationCleanupJob(
               state: "ALREADY_ABSENT",
             });
             summary.alreadyAbsent += 1;
-            madeProgress = true;
             continue;
           }
 
@@ -535,10 +531,7 @@ export async function processModerationCleanupJob(
             errorDescription: diagnostic.description,
           });
           if (retryable) summary.retryableFailures += 1;
-          else {
-            summary.terminalFailures += 1;
-            madeProgress = true;
-          }
+          else summary.terminalFailures += 1;
           logger.warn(
             {
               jobId: job.id,
@@ -568,13 +561,12 @@ export async function processModerationCleanupJob(
       const unresolved = db
         .listLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId)
         .some((violation) => violation.cleanup_state === "PENDING" || violation.cleanup_state === "TERMINAL_FAILED");
-      if (unresolved) return madeProgress;
+      if (unresolved) return;
       db.updateLanguageModerationCleanupJob(job.id, "LOG_PENDING");
       state = "LOG_PENDING";
-      madeProgress = true;
     }
 
-    if (state !== "LOG_PENDING") return madeProgress;
+    if (state !== "LOG_PENDING") return;
     const { logModerationSanction } = await import("./archive.js");
     const managedChat = db.getManagedPublicChat(job.chat_id, true);
     const messageThreadIds = [
@@ -598,7 +590,6 @@ export async function processModerationCleanupJob(
     });
     db.clearLanguageModerationCleanupCycleViolations(job.chat_id, job.user_telegram_id, cycleId);
     db.updateLanguageModerationCleanupJob(job.id, "COMPLETED");
-    return true;
   } catch (error) {
     db.updateLanguageModerationCleanupJob(jobId, state === "LOG_PENDING" ? "LOG_PENDING" : "CLEANING");
     const diagnostic = normalizeTelegramDeliveryError(error);
@@ -612,7 +603,7 @@ export async function processModerationCleanupJob(
       },
       "Moderation cleanup/log recovery pending"
     );
-    return madeProgress;
+    return;
   }
 }
 

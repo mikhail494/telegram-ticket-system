@@ -2,13 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { SupportDatabase } from "../src/db.js";
 import { InstallationService } from "../src/installation.js";
-import { ApplicationLifecycle, BackgroundTaskRegistry, installShutdownSignalHandlers } from "../src/lifecycle.js";
-import {
-  StartupRecoveryBudget,
-  StartupRecoveryContinuation,
-  runBoundedRecoveryPass,
-  runWorkspaceStartup,
-} from "../src/startup.js";
+import { ApplicationLifecycle, installShutdownSignalHandlers } from "../src/lifecycle.js";
+import { StartupRecoveryBudget, runBoundedRecoveryPass, runWorkspaceStartup } from "../src/startup.js";
 
 test("setup mode skips every staff-workspace startup task", async () => {
   const db = new SupportDatabase(":memory:");
@@ -24,7 +19,6 @@ test("setup mode skips every staff-workspace startup task", async () => {
         initializeSupportLogs: task("logs"),
         recoverArchives: task("archives"),
         recoverModeration: task("moderation"),
-        recoverBatch: task("batch"),
         sendLegacyStaffOnboarding: task("onboarding"),
       }),
       "SETUP_REQUIRED"
@@ -49,12 +43,11 @@ test("legacy workspace starts recoveries without creating onboarding noise", asy
         initializeSupportLogs: task("logs"),
         recoverArchives: task("archives"),
         recoverModeration: task("moderation"),
-        recoverBatch: task("batch"),
         sendLegacyStaffOnboarding: task("onboarding"),
       }),
       "READY"
     );
-    assert.deepEqual(calls, ["logs", "archives", "moderation", "batch"]);
+    assert.deepEqual(calls, ["logs", "archives", "moderation"]);
   } finally {
     db.close();
   }
@@ -72,7 +65,6 @@ test("ready startup automatically switches an adopted installation with an owner
       initializeSupportLogs: task,
       recoverArchives: task,
       recoverModeration: task,
-      recoverBatch: task,
       sendLegacyStaffOnboarding: task,
     });
 
@@ -115,9 +107,6 @@ test("startup signal handling stops later recovery stages at an item boundary", 
         recoverModeration: async () => {
           calls.push("moderation");
         },
-        recoverBatch: async () => {
-          calls.push("batch");
-        },
         sendLegacyStaffOnboarding: async () => {
           calls.push("onboarding");
         },
@@ -145,7 +134,7 @@ test("bounded startup recovery leaves durable candidates for a later pass", asyn
   });
 
   assert.deepEqual(processed, [1, 2]);
-  assert.deepEqual(result, { processed: 2, hasMore: true, madeProgress: true });
+  assert.deepEqual(result, { processed: 2, hasMore: true });
 });
 
 test("startup recovery uses its ten-second limit only between durable items", async () => {
@@ -159,7 +148,7 @@ test("startup recovery uses its ten-second limit only between durable items", as
   });
 
   assert.deepEqual(processed, [1]);
-  assert.deepEqual(result, { processed: 1, hasMore: true, madeProgress: true });
+  assert.deepEqual(result, { processed: 1, hasMore: true });
 });
 
 test("startup recovery finishes an in-flight item before honoring cancellation", async () => {
@@ -173,47 +162,5 @@ test("startup recovery finishes an in-flight item before honoring cancellation",
   });
 
   assert.deepEqual(processed, [1]);
-  assert.deepEqual(result, { processed: 1, hasMore: true, madeProgress: true });
-});
-
-test("startup recovery continuation yields bounded chunks and stops with its owner", async () => {
-  const timers: Array<{ callback: () => void; delayMs: number }> = [];
-  const tasks = new BackgroundTaskRegistry();
-  let clearedTimers = 0;
-  const continuation = new StartupRecoveryContinuation({
-    backgroundTasks: tasks,
-    shouldContinue: () => true,
-    createTimer: (callback, delayMs) => {
-      timers.push({ callback, delayMs });
-      return { unref: () => undefined } as unknown as ReturnType<typeof setTimeout>;
-    },
-    clearTimer: () => {
-      clearedTimers += 1;
-    },
-  });
-  let runs = 0;
-  continuation.enqueue("archives", async () => {
-    runs += 1;
-    return { hasMore: true, madeProgress: runs === 1 };
-  });
-
-  continuation.start();
-  const firstTimer = timers.at(-1);
-  assert.ok(firstTimer);
-  assert.equal(firstTimer.delayMs, 250);
-  firstTimer.callback();
-  await tasks.drain();
-  assert.equal(runs, 1);
-  assert.equal(timers.at(-1)?.delayMs, 250);
-
-  const next = timers.at(-1);
-  assert.ok(next);
-  next.callback();
-  await tasks.drain();
-  assert.equal(runs, 2);
-  assert.equal(timers.at(-1)?.delayMs, 30_000);
-
-  continuation.stop();
-  assert.equal(continuation.pendingCount(), 0);
-  assert.equal(clearedTimers, 1);
+  assert.deepEqual(result, { processed: 1, hasMore: true });
 });

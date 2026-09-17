@@ -7,7 +7,7 @@ import { createPersistentQuickRepliesRegistry, loadQuickRepliesRegistry } from "
 import { processModerationRecovery } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
 import { InstallationService } from "./installation.js";
-import { StartupRecoveryBudget, StartupRecoveryContinuation, runWorkspaceStartup } from "./startup.js";
+import { StartupRecoveryBudget, runWorkspaceStartup } from "./startup.js";
 import { createAutomaticBackupScheduler } from "./backups.js";
 import {
   ApplicationLifecycle,
@@ -99,7 +99,6 @@ const backupScheduler = createAutomaticBackupScheduler(
 );
 let polling: Promise<void> | null = null;
 let operationalServer: OperationalServer | null = null;
-let startupRecoveryContinuation: StartupRecoveryContinuation | null = null;
 let startupCompletion: Promise<void> | null = null;
 const lifecycle = new ApplicationLifecycle({
   stopPolling: () => bot.stop(),
@@ -108,7 +107,6 @@ const lifecycle = new ApplicationLifecycle({
   stopBackgroundWork: () => {
     runtimeHealth.setRuntimeState("SHUTTING_DOWN");
     healthEvaluator.stop();
-    startupRecoveryContinuation?.stop();
     bot.stopBackgroundWork();
   },
   backgroundTasks,
@@ -122,11 +120,6 @@ const lifecycle = new ApplicationLifecycle({
     ),
   terminalExit: (code) => process.exit(code),
   onDrainFailure: (stage, error) => logger.warn({ err: error, stage }, "Graceful shutdown drain failed"),
-});
-startupRecoveryContinuation = new StartupRecoveryContinuation({
-  backgroundTasks,
-  shouldContinue: () => lifecycle.isRunning(),
-  onFailure: (name, error) => logger.warn({ err: error, name }, "Startup recovery continuation failed"),
 });
 installShutdownSignalHandlers(lifecycle, {
   once: (signal, handler) =>
@@ -197,22 +190,12 @@ async function startApplication(): Promise<void> {
       recoverArchives: async () => {
         const result = await recoverArchives(startupRecoveryBudget);
         if (result.hasMore)
-          startupRecoveryContinuation?.enqueue("archives", () =>
-            recoverArchives(new StartupRecoveryBudget({ shouldContinue: () => lifecycle.isRunning() }))
-          );
+          logger.warn("Bounded startup archive recovery left durable work pending for a later startup pass");
       },
       recoverModeration: async () => {
         const result = await recoverModeration(startupRecoveryBudget);
         if (result.hasMore)
-          startupRecoveryContinuation?.enqueue("moderation", () =>
-            recoverModeration(new StartupRecoveryBudget({ shouldContinue: () => lifecycle.isRunning() }))
-          );
-      },
-      recoverBatch: async () => {
-        startupRecoveryContinuation?.enqueue("ticket_batch", async () => {
-          await bot.recoverPendingTicketBatchStaffOperations();
-          return { hasMore: false, madeProgress: true };
-        });
+          logger.warn("Bounded startup moderation recovery left durable work pending for a later startup pass");
       },
       sendLegacyStaffOnboarding: () => sendStaffOnboardingIfNeeded(bot.api, db, installationService),
     },
@@ -235,7 +218,14 @@ async function startApplication(): Promise<void> {
       runtimeHealth.markPollingStarted();
       runtimeHealth.setRuntimeState("READY");
       healthEvaluator.start();
-      startupRecoveryContinuation?.start();
+      backgroundTasks.run(async () => {
+        try {
+          await bot.recoverPendingTicketBatchStaffOperations();
+        } catch (error) {
+          logger.warn({ err: error }, "Ticket Batch recovery after polling failed");
+          throw error;
+        }
+      });
       evaluateAlerts();
       logger.info({ username: botInfo.username }, "Telegram support bot started");
     },
