@@ -7,9 +7,14 @@ import { createPersistentQuickRepliesRegistry, loadQuickRepliesRegistry } from "
 import { processModerationRecovery } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
 import { InstallationService } from "./installation.js";
-import { runWorkspaceStartup } from "./startup.js";
+import { StartupRecoveryBudget, runWorkspaceStartup } from "./startup.js";
 import { createAutomaticBackupScheduler } from "./backups.js";
-import { ApplicationLifecycle, awaitApplicationCompletion, BackgroundTaskRegistry } from "./lifecycle.js";
+import {
+  ApplicationLifecycle,
+  awaitApplicationCompletion,
+  BackgroundTaskRegistry,
+  installShutdownSignalHandlers,
+} from "./lifecycle.js";
 import { OperationalServer, type OperationalRuntimeState } from "./operationsHttp.js";
 import {
   OperationalAlertCoordinator,
@@ -94,8 +99,10 @@ const backupScheduler = createAutomaticBackupScheduler(
 );
 let polling: Promise<void> | null = null;
 let operationalServer: OperationalServer | null = null;
+let startupCompletion: Promise<void> | null = null;
 const lifecycle = new ApplicationLifecycle({
   stopPolling: () => bot.stop(),
+  startupCompletion: () => startupCompletion,
   pollingCompletion: () => polling,
   stopBackgroundWork: () => {
     runtimeHealth.setRuntimeState("SHUTTING_DOWN");
@@ -106,7 +113,20 @@ const lifecycle = new ApplicationLifecycle({
   stopAndDrainBackups: () => backupScheduler?.stopAndDrain() ?? Promise.resolve(),
   closeDatabase: () => db.close(),
   closeOperationalServer: () => operationalServer?.stop() ?? Promise.resolve(),
+  onShutdownDeadline: (stage, deadlineMs) =>
+    logger.fatal(
+      { deadlineMs, stage },
+      "Graceful shutdown deadline expired; forcing terminal exit without closing SQLite"
+    ),
+  terminalExit: (code) => process.exit(code),
   onDrainFailure: (stage, error) => logger.warn({ err: error, stage }, "Graceful shutdown drain failed"),
+});
+installShutdownSignalHandlers(lifecycle, {
+  once: (signal, handler) =>
+    process.once(signal, () => {
+      logger.info({ signal }, "Stopping bot");
+      handler();
+    }),
 });
 
 function getOperationalRuntimeState(): OperationalRuntimeState {
@@ -121,7 +141,7 @@ function getOperationalSnapshot() {
   return telemetrySnapshot();
 }
 
-async function main(): Promise<void> {
+async function startApplication(): Promise<void> {
   if (config.opsHttpEnabled) {
     operationalServer = new OperationalServer({
       host: config.opsHttpHost,
@@ -133,51 +153,64 @@ async function main(): Promise<void> {
     await operationalServer.start();
     logger.info({ host: config.opsHttpHost, port: config.opsHttpPort }, "Operational HTTP server started");
   }
+  if (!lifecycle.isRunning()) return;
   await bot.api.deleteWebhook({ drop_pending_updates: false });
+  if (!lifecycle.isRunning()) return;
   const botInfo = await bot.api.getMe();
+  if (!lifecycle.isRunning()) return;
   bot.botInfo = botInfo;
-  await runWorkspaceStartup(installationService, {
-    discoverStaffWorkspaceMembers: async () => {
-      const workspace = installationService.getActiveWorkspace();
-      if (!workspace) return;
-      try {
-        const administrators = await bot.api.getChatAdministrators(workspace.telegram_chat_id);
-        for (const administrator of administrators) {
-          if (administrator.user.is_bot) continue;
-          installationService.ensureBaselineAgent({
-            telegramId: administrator.user.id,
-            username: administrator.user.username,
-            firstName: administrator.user.first_name,
-            lastName: administrator.user.last_name,
-          });
+  const startupRecoveryBudget = new StartupRecoveryBudget({ shouldContinue: () => lifecycle.isRunning() });
+  const recoverArchives = (budget: StartupRecoveryBudget) =>
+    archiveClosedTicketsPendingUpload(bot.api, db, installationService.requireStaffChatId(), { budget });
+  const recoverModeration = (budget: StartupRecoveryBudget) =>
+    processModerationRecovery(bot.api, db, installationService.requireStaffChatId(), new Date(), { budget });
+  const startupState = await runWorkspaceStartup(
+    installationService,
+    {
+      discoverStaffWorkspaceMembers: async () => {
+        const workspace = installationService.getActiveWorkspace();
+        if (!workspace) return;
+        try {
+          const administrators = await bot.api.getChatAdministrators(workspace.telegram_chat_id);
+          for (const administrator of administrators) {
+            if (administrator.user.is_bot) continue;
+            installationService.ensureBaselineAgent({
+              telegramId: administrator.user.id,
+              username: administrator.user.username,
+              firstName: administrator.user.first_name,
+              lastName: administrator.user.last_name,
+            });
+          }
+        } catch (error) {
+          logger.warn({ err: error }, "Could not discover staff workspace administrators");
         }
-      } catch (error) {
-        logger.warn({ err: error }, "Could not discover staff workspace administrators");
-      }
+      },
+      initializeSupportLogs: () =>
+        initializeSupportLogsTopic(bot.api, db, installationService.requireStaffChatId()).then(() => undefined),
+      recoverArchives: async () => {
+        const result = await recoverArchives(startupRecoveryBudget);
+        if (result.hasMore)
+          logger.warn("Bounded startup archive recovery left durable work pending for a later startup pass");
+      },
+      recoverModeration: async () => {
+        const result = await recoverModeration(startupRecoveryBudget);
+        if (result.hasMore)
+          logger.warn("Bounded startup moderation recovery left durable work pending for a later startup pass");
+      },
+      sendLegacyStaffOnboarding: () => sendStaffOnboardingIfNeeded(bot.api, db, installationService),
     },
-    initializeSupportLogs: () =>
-      initializeSupportLogsTopic(bot.api, db, installationService.requireStaffChatId()).then(() => undefined),
-    recoverArchives: () =>
-      archiveClosedTicketsPendingUpload(bot.api, db, installationService.requireStaffChatId()).then(() => undefined),
-    recoverModeration: () => processModerationRecovery(bot.api, db, installationService.requireStaffChatId()),
-    recoverBatch: () => bot.recoverPendingTicketBatchStaffOperations(),
-    sendLegacyStaffOnboarding: () => sendStaffOnboardingIfNeeded(bot.api, db, installationService),
-  });
+    { shouldContinue: () => lifecycle.isRunning() }
+  );
+  if (startupState === "SHUTTING_DOWN" || !lifecycle.isRunning()) return;
   await setBotCommands(bot, installationService);
+  if (!lifecycle.isRunning()) return;
   if (!installationService.getOwner()) {
     logger.warn(
       "No OWNER is paired. Run npm run owner:pair in an interactive terminal to create a one-use pairing link."
     );
   }
   if (backupScheduler) void backupScheduler.start().catch(recordAutomaticBackupFailure);
-
-  const shutdown = (signal: NodeJS.Signals) => {
-    logger.info({ signal }, "Stopping bot");
-    return lifecycle.shutdown();
-  };
-
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  if (!lifecycle.isRunning()) return;
 
   const pollingRun = bot.start({
     allowed_updates: [...TELEGRAM_ALLOWED_UPDATES],
@@ -185,6 +218,14 @@ async function main(): Promise<void> {
       runtimeHealth.markPollingStarted();
       runtimeHealth.setRuntimeState("READY");
       healthEvaluator.start();
+      backgroundTasks.run(async () => {
+        try {
+          await bot.recoverPendingTicketBatchStaffOperations();
+        } catch (error) {
+          logger.warn({ err: error }, "Ticket Batch recovery after polling failed");
+          throw error;
+        }
+      });
       evaluateAlerts();
       logger.info({ username: botInfo.username }, "Telegram support bot started");
     },
@@ -197,11 +238,20 @@ async function main(): Promise<void> {
       evaluateAlerts();
     },
   });
-  await awaitApplicationCompletion(polling, lifecycle);
 }
 
-main().catch(async (error) => {
-  logger.fatal({ err: error }, "Bot failed to start");
-  await lifecycle.startupFailed();
-  process.exitCode = 1;
-});
+const startup = startApplication();
+startupCompletion = startup.then(
+  () => undefined,
+  () => undefined
+);
+void startup
+  .then(async () => {
+    if (polling) await awaitApplicationCompletion(polling, lifecycle);
+  })
+  .catch(async (error) => {
+    if (!lifecycle.isRunning()) return;
+    logger.fatal({ err: error }, "Bot failed to start");
+    await lifecycle.startupFailed();
+    process.exitCode = 1;
+  });

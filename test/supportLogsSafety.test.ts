@@ -3,7 +3,9 @@ import { afterEach, describe, it } from "node:test";
 import type { Update } from "grammy/types";
 import { TEST_STAFF_CHAT_ID, createBotHarness, type BotHarness, type RecordedApiCall } from "./helpers/botHarness.js";
 
-const { archiveTicketIfPossible, getSupportLogsTopicInfo } = await import("../src/archive.js");
+const { archiveClosedTicketsPendingUpload, archiveTicketIfPossible, getSupportLogsTopicInfo } =
+  await import("../src/archive.js");
+const { StartupRecoveryBudget } = await import("../src/startup.js");
 const SUPPORT_LOGS_SETTING_KEY = `support_logs_message_thread_id:${TEST_STAFF_CHAT_ID}`;
 const TICKET_TOPIC_REJECTION = "This topic belongs to a support ticket and cannot be used as Support Logs.";
 
@@ -129,5 +131,70 @@ describe("Support Logs topic safety", () => {
     );
     assert.equal(harness.countApiCalls("createForumTopic"), 1);
     assert.notEqual(harness.db.getSetting(SUPPORT_LOGS_SETTING_KEY), String(ticket.message_thread_id));
+  });
+
+  it("bounds startup archive recovery without losing later durable archive work", async () => {
+    const harness = createHarness();
+    const first = harness.seedTicket({ messageThreadId: 5000 });
+    const second = harness.seedTicket({
+      messageThreadId: 5001,
+      user: { id: 124, username: "second_customer", firstName: "Second Customer" },
+    });
+    for (const ticket of [first, second]) {
+      harness.db.addMessage({
+        ticketId: ticket.id,
+        direction: "USER_TO_STAFF",
+        text: "Please help with my account.",
+        senderType: "USER",
+        senderDisplayName: "@test_customer",
+        senderUsername: "test_customer",
+      });
+      harness.db.closeTicketRecord(ticket.id, {
+        type: "STAFF",
+        displayName: "@test_staff",
+        username: "test_staff",
+      });
+    }
+
+    const result = await archiveClosedTicketsPendingUpload(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, {
+      budget: new StartupRecoveryBudget({ maxItems: 1 }),
+    });
+
+    assert.deepEqual(result, { processed: 1, hasMore: true });
+    assert.ok(harness.db.getTicket(first.id)?.archived_at);
+    assert.equal(harness.db.getTicket(second.id)?.archived_at, null);
+
+    const resumed = await archiveClosedTicketsPendingUpload(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, {
+      budget: new StartupRecoveryBudget({ maxItems: 1 }),
+    });
+    assert.deepEqual(resumed, { processed: 1, hasMore: false });
+    assert.ok(harness.db.getTicket(second.id)?.archived_at);
+  });
+
+  it("leaves a transiently failed final archive candidate durable without scheduling another attempt", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket({ messageThreadId: 5000 });
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "USER_TO_STAFF",
+      text: "Please help with my account.",
+      senderType: "USER",
+      senderDisplayName: "@test_customer",
+      senderUsername: "test_customer",
+    });
+    harness.db.closeTicketRecord(ticket.id, {
+      type: "STAFF",
+      displayName: "@test_staff",
+      username: "test_staff",
+    });
+    harness.failNextApiCall("sendDocument");
+
+    const failed = await archiveClosedTicketsPendingUpload(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, {
+      budget: new StartupRecoveryBudget({ maxItems: 1 }),
+    });
+
+    assert.deepEqual(failed, { processed: 1, hasMore: true });
+    assert.equal(harness.db.getTicket(ticket.id)?.archived_at, null);
+    assert.equal(harness.countApiCalls("sendDocument"), 1);
   });
 });

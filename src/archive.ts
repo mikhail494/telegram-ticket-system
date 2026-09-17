@@ -8,6 +8,7 @@ import { formatDate, truncate } from "./format.js";
 import { displayTelegramUser } from "./telegram.js";
 import { logger } from "./logger.js";
 import { normalizeTelegramDeliveryError, type NormalizedDeliveryError } from "./deliveryDiagnostics.js";
+import { runBoundedRecoveryPass, type StartupRecoveryBudget } from "./startup.js";
 
 const SUPPORT_LOGS_TOPIC_NAME = "📜 Support Logs";
 const SUPPORT_LOGS_THREAD_SETTING_PREFIX = "support_logs_message_thread_id";
@@ -25,6 +26,15 @@ interface SendTranscriptOptions {
 
 interface ArchiveAttemptOptions {
   onFailure?: (diagnostic: NormalizedDeliveryError) => void;
+}
+
+export interface ArchiveRecoveryResult {
+  processed: number;
+  hasMore: boolean;
+}
+
+export interface ArchiveRecoveryOptions {
+  budget?: StartupRecoveryBudget;
 }
 
 export interface ArchiveActor {
@@ -129,12 +139,28 @@ async function recreateSupportLogsTopic(api: BotApi, db: SupportDatabase, staffC
 export async function archiveClosedTicketsPendingUpload(
   api: BotApi,
   db: SupportDatabase,
-  staffChatId: number
-): Promise<void> {
-  const tickets = db.listClosedTicketsPendingArchive(staffChatId);
-  for (const ticket of tickets) {
-    await archiveTicketIfPossible(api, db, staffChatId, ticket.id);
+  staffChatId: number,
+  options: ArchiveRecoveryOptions = {}
+): Promise<ArchiveRecoveryResult> {
+  const limit = options.budget ? Math.max(1, options.budget.remainingItemCapacity() + 1) : 1_000;
+  const tickets = db.listClosedTicketsPendingArchive(staffChatId, limit);
+  const hasAdditionalCandidate = options.budget !== undefined && tickets.length === limit;
+  const candidates = hasAdditionalCandidate ? tickets.slice(0, -1) : tickets;
+
+  if (!options.budget) {
+    for (const ticket of candidates) {
+      await archiveTicketIfPossible(api, db, staffChatId, ticket.id);
+    }
+    return { processed: candidates.length, hasMore: false };
   }
+
+  const result = await runBoundedRecoveryPass(candidates, options.budget, async (ticket) => {
+    await archiveTicketIfPossible(api, db, staffChatId, ticket.id);
+  });
+  return {
+    ...result,
+    hasMore: result.hasMore || hasAdditionalCandidate || db.listClosedTicketsPendingArchive(staffChatId, 1).length > 0,
+  };
 }
 
 export async function archiveTicketIfPossible(

@@ -1,6 +1,7 @@
 import { normalizeTelegramDeliveryError } from "./deliveryDiagnostics.js";
 import { logger } from "./logger.js";
 import type { BackgroundTaskTracker } from "./lifecycle.js";
+import { runBoundedRecoveryPass, type StartupRecoveryBudget } from "./startup.js";
 import { francAll } from "franc-min";
 import { createHash } from "node:crypto";
 import {
@@ -429,11 +430,31 @@ export async function processModerationRecovery(
   api: import("grammy").Context["api"],
   db: import("./db.js").SupportDatabase,
   staffChatId: number,
-  currentTime = new Date()
-): Promise<void> {
-  for (const job of db.listLanguageModerationRecoveryJobs(staffChatId, currentTime.toISOString())) {
-    await processModerationCleanupJob(api, db, staffChatId, job.id, currentTime);
+  currentTime = new Date(),
+  options: { budget?: StartupRecoveryBudget } = {}
+): Promise<{ processed: number; hasMore: boolean }> {
+  const limit = options.budget ? Math.max(1, options.budget.remainingItemCapacity() + 1) : undefined;
+  const jobs = db.listLanguageModerationRecoveryJobs(staffChatId, currentTime.toISOString(), limit);
+  const hasAdditionalCandidate = limit !== undefined && jobs.length === limit;
+  const candidates = hasAdditionalCandidate ? jobs.slice(0, -1) : jobs;
+
+  if (!options.budget) {
+    for (const job of candidates) {
+      await processModerationCleanupJob(api, db, staffChatId, job.id, currentTime);
+    }
+    return { processed: candidates.length, hasMore: false };
   }
+
+  const result = await runBoundedRecoveryPass(candidates, options.budget, (job) =>
+    processModerationCleanupJob(api, db, staffChatId, job.id, currentTime)
+  );
+  return {
+    ...result,
+    hasMore:
+      result.hasMore ||
+      hasAdditionalCandidate ||
+      db.listLanguageModerationRecoveryJobs(staffChatId, currentTime.toISOString(), 1).length > 0,
+  };
 }
 
 export async function processModerationCleanupJob(
@@ -582,6 +603,7 @@ export async function processModerationCleanupJob(
       },
       "Moderation cleanup/log recovery pending"
     );
+    return;
   }
 }
 

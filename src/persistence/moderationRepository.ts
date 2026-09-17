@@ -526,12 +526,17 @@ export class ModerationRepository {
       LanguageModerationCleanupJob | undefined;
   }
 
-  listLanguageModerationRecoveryJobs(staffChatId: number, nowIso: string): LanguageModerationCleanupJob[] {
+  listLanguageModerationRecoveryJobs(
+    staffChatId: number,
+    nowIso: string,
+    limit?: number
+  ): LanguageModerationCleanupJob[] {
+    const sql =
+      "SELECT * FROM language_moderation_cleanup_jobs WHERE staff_chat_id = ? AND state IN ('PENDING', 'CLEANING', 'LOG_PENDING') AND cleanup_due_at <= ? ORDER BY id ASC" +
+      (limit === undefined ? "" : " LIMIT ?");
     return this.db
-      .prepare(
-        "SELECT * FROM language_moderation_cleanup_jobs WHERE staff_chat_id = ? AND state IN ('PENDING', 'CLEANING', 'LOG_PENDING') AND cleanup_due_at <= ? ORDER BY id ASC"
-      )
-      .all(staffChatId, nowIso) as LanguageModerationCleanupJob[];
+      .prepare(sql)
+      .all(staffChatId, nowIso, ...(limit === undefined ? [] : [limit])) as LanguageModerationCleanupJob[];
   }
 
   updateLanguageModerationCleanupJob(id: number, state: LanguageModerationCleanupJob["state"]): void {

@@ -8,6 +8,10 @@ All notable changes to this project are documented in this file. This project fo
 
 - Ticket Batch exports no longer fail entirely when Telegram cannot resolve a historical attachment file_id; the attachment is recorded as unavailable instead.
 
+### Changed
+
+- Bounded synchronous archive/moderation startup recovery to 50 durable items or a 10-second soft budget, leaving unfinished work durable for a later startup; Ticket Batch recovery begins after polling as tracked background work, with a 30-second graceful shutdown deadline.
+
 ## [2.0.0] - 2026-09-10
 
 ### Breaking compatibility
