@@ -101,10 +101,10 @@ describe("manual moderation persistence", () => {
       .run(102, 501, -100900, 78, timestamp, timestamp);
     legacy
       .prepare(
-        `INSERT INTO messages (ticket_id, direction, delivery_message_id, text, created_at)
-         VALUES (?, 'STAFF_TO_USER', ?, ?, ?)`
+        `INSERT INTO messages (ticket_id, direction, source_chat_id, source_message_id, delivery_message_id, text, created_at)
+         VALUES (?, 'STAFF_TO_USER', ?, ?, ?, ?, ?)`
       )
-      .run(102, 6601, "Historical delivered reply", timestamp);
+      .run(102, -100900, 7001, 6601, "Historical delivered reply", timestamp);
     legacy.close();
 
     new SupportDatabase(filename).close();
@@ -118,8 +118,17 @@ describe("manual moderation persistence", () => {
         1
       );
       assert.deepEqual(
-        inspected.prepare("SELECT delivery_message_id, text FROM messages WHERE ticket_id = ?").get(102),
-        { delivery_message_id: 6601, text: "Historical delivered reply" }
+        inspected
+          .prepare(
+            "SELECT source_chat_id, source_message_id, delivery_message_id, text FROM messages WHERE ticket_id = ?"
+          )
+          .get(102),
+        {
+          source_chat_id: -100900,
+          source_message_id: 7001,
+          delivery_message_id: 6601,
+          text: "Historical delivered reply",
+        }
       );
       assert.deepEqual(
         inspected

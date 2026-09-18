@@ -18,6 +18,7 @@ type BotApi = Context["api"];
 interface ArchiveAttemptOptions {
   onFailure?: (diagnostic: NormalizedDeliveryError) => void;
   topicReplacementAttempted?: boolean;
+  topicReopenAttempted?: boolean;
 }
 
 export interface ArchiveRecoveryResult {
@@ -280,31 +281,34 @@ export async function archiveTicketIfPossible(
         logger.warn({ ticketId: ticket.id, state: "UNKNOWN_DELIVERY" }, "Support Logs document outcome is unknown");
         return false;
       }
+      if (isForumTopicClosed(error)) {
+        const diagnostic = normalizeTelegramDeliveryError(error);
+        db.markTicketArchiveFailed(ticket.id, diagnostic.category, diagnostic.description);
+        if (options.topicReopenAttempted) return false;
+        try {
+          await api.reopenForumTopic(staffChatId, logsThreadId);
+        } catch (reopenError) {
+          if (!isForumTopicUnavailable(reopenError)) {
+            const reopenDiagnostic = normalizeTelegramDeliveryError(reopenError);
+            options.onFailure?.(reopenDiagnostic);
+            logger.error(
+              { ticketId: ticket.id, stage: "SUPPORT_LOGS_TOPIC", category: reopenDiagnostic.category },
+              "Could not reopen Support Logs topic after a confirmed transcript delivery failure"
+            );
+            return false;
+          }
+          return await replaceSupportLogsTopicAfterDocumentFailure(api, db, staffChatId, ticket, ticketId, options);
+        }
+        logger.info({ ticketId: ticket.id, logsThreadId }, "Reopened Support Logs topic for transcript delivery");
+        return await archiveTicketIfPossible(api, db, staffChatId, ticketId, {
+          ...options,
+          topicReopenAttempted: true,
+        });
+      }
       if (!isForumTopicUnavailable(error)) return await recordArchiveFailure(api, db, ticket, error, options);
-      if (options.topicReplacementAttempted) return await recordArchiveFailure(api, db, ticket, error, options);
       const diagnostic = normalizeTelegramDeliveryError(error);
       db.markTicketArchiveFailed(ticket.id, diagnostic.category, diagnostic.description);
-      let replacementTopic: number;
-      try {
-        replacementTopic = await recreateSupportLogsTopic(api, db, staffChatId);
-      } catch (replacementError) {
-        const replacementDiagnostic = normalizeTelegramDeliveryError(replacementError);
-        options.onFailure?.(replacementDiagnostic);
-        logger.error(
-          { ticketId: ticket.id, stage: "SUPPORT_LOGS_TOPIC", category: replacementDiagnostic.category },
-          "Could not recreate Support Logs topic after a confirmed transcript delivery failure"
-        );
-        return false;
-      }
-      if (!db.restageTicketArchiveForReplacementTopic(ticket.id, replacementTopic)) return false;
-      logger.info(
-        { ticketId: ticket.id, logsThreadId: replacementTopic },
-        "Restaged Support Logs archive for replacement topic"
-      );
-      return await archiveTicketIfPossible(api, db, staffChatId, ticketId, {
-        ...options,
-        topicReplacementAttempted: true,
-      });
+      return await replaceSupportLogsTopicAfterDocumentFailure(api, db, staffChatId, ticket, ticketId, options);
     }
     const finalized = db.finalizeTicketArchiveDelivery(ticket.id);
     if (finalized) await removeTicketTopicAfterArchive(api, ticket);
@@ -312,6 +316,38 @@ export async function archiveTicketIfPossible(
   } finally {
     await fs.rm(tempFile.directory, { recursive: true, force: true });
   }
+}
+
+async function replaceSupportLogsTopicAfterDocumentFailure(
+  api: BotApi,
+  db: SupportDatabase,
+  staffChatId: number,
+  ticket: TicketWithUser,
+  ticketId: number,
+  options: ArchiveAttemptOptions
+): Promise<boolean> {
+  if (options.topicReplacementAttempted) return false;
+  let replacementTopic: number;
+  try {
+    replacementTopic = await recreateSupportLogsTopic(api, db, staffChatId);
+  } catch (replacementError) {
+    const replacementDiagnostic = normalizeTelegramDeliveryError(replacementError);
+    options.onFailure?.(replacementDiagnostic);
+    logger.error(
+      { ticketId: ticket.id, stage: "SUPPORT_LOGS_TOPIC", category: replacementDiagnostic.category },
+      "Could not recreate Support Logs topic after a confirmed transcript delivery failure"
+    );
+    return false;
+  }
+  if (!db.restageTicketArchiveForReplacementTopic(ticket.id, replacementTopic)) return false;
+  logger.info(
+    { ticketId: ticket.id, logsThreadId: replacementTopic },
+    "Restaged Support Logs archive for replacement topic"
+  );
+  return await archiveTicketIfPossible(api, db, staffChatId, ticketId, {
+    ...options,
+    topicReplacementAttempted: true,
+  });
 }
 
 async function recordArchiveFailure(

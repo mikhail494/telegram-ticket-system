@@ -315,6 +315,114 @@ describe("Staff ticket replies", () => {
     assert.equal(harness.db.getTicketOutboundDelivery(`staff-message:${TEST_STAFF_CHAT_ID}:7891`)?.state, "DELIVERED");
   });
 
+  it("materializes a delivered intent instead of resending a proven legacy text reply", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const operationKey = `staff-message:${TEST_STAFF_CHAT_ID}:7896`;
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "STAFF_TO_USER",
+      sourceChatId: TEST_STAFF_CHAT_ID,
+      sourceMessageId: 7896,
+      deliveryChatId: ticket.user_telegram_id,
+      deliveryMessageId: 6611,
+      text: "Legacy delivered reply",
+      senderType: "STAFF",
+    });
+
+    assert.equal(harness.db.getTicketOutboundDelivery(operationKey), undefined);
+    await harness.bot.handleUpdate(buildStaffTextMessageUpdate({ messageId: 7896, text: "Legacy delivered reply" }));
+
+    assert.equal(userSendMessages(harness).length, 0);
+    assert.equal(harness.db.listMessagesChronological(ticket.id).length, 1);
+    assert.equal(harness.db.getTicketOutboundDelivery(operationKey)?.state, "DELIVERED");
+    assert.equal(harness.db.getTicketOutboundDelivery(operationKey)?.delivery_message_id, 6611);
+  });
+
+  it("materializes a delivered intent instead of resending a proven legacy media reply", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const operationKey = `staff-message:${TEST_STAFF_CHAT_ID}:7897`;
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "STAFF_TO_USER",
+      sourceChatId: TEST_STAFF_CHAT_ID,
+      sourceMessageId: 7897,
+      deliveryChatId: ticket.user_telegram_id,
+      deliveryMessageId: 6612,
+      text: "Legacy delivered media",
+      mediaType: "photo",
+      fileId: "legacy-photo",
+      senderType: "STAFF",
+    });
+
+    assert.equal(harness.db.getTicketOutboundDelivery(operationKey), undefined);
+    await harness.bot.handleUpdate(
+      buildStaffMediaMessageUpdate({ messageId: 7897, mediaType: "photo", text: "Legacy delivered media" })
+    );
+
+    assert.equal(harness.countApiCalls("copyMessage"), 0);
+    assert.equal(harness.db.listMessagesChronological(ticket.id).length, 1);
+    assert.equal(harness.db.getTicketOutboundDelivery(operationKey)?.state, "DELIVERED");
+    assert.equal(harness.db.getTicketOutboundDelivery(operationKey)?.delivery_message_id, 6612);
+  });
+
+  it("requires an exact proven legacy source identity before deduplicating a staff reply", () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const otherTicket = harness.seedTicket({
+      messageThreadId: 5001,
+      user: { id: TEST_USER_ID + 1, username: "other_customer", firstName: "Other Customer" },
+    });
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "STAFF_TO_USER",
+      sourceChatId: TEST_STAFF_CHAT_ID,
+      sourceMessageId: 7898,
+      deliveryMessageId: 6613,
+      senderType: "STAFF",
+    });
+    harness.db.addMessage({
+      ticketId: otherTicket.id,
+      direction: "STAFF_TO_USER",
+      sourceChatId: TEST_STAFF_CHAT_ID,
+      sourceMessageId: 7899,
+      deliveryMessageId: 6614,
+      senderType: "STAFF",
+    });
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "STAFF_TO_USER",
+      sourceChatId: TEST_STAFF_CHAT_ID,
+      sourceMessageId: 7900,
+      senderType: "STAFF",
+    });
+
+    for (const input of [
+      { operationKey: "staff-message:-100901:7898", sourceChatId: -100901, sourceMessageId: 7898 },
+      {
+        operationKey: `staff-message:${TEST_STAFF_CHAT_ID}:7899`,
+        sourceChatId: TEST_STAFF_CHAT_ID,
+        sourceMessageId: 7899,
+      },
+      {
+        operationKey: `staff-message:${TEST_STAFF_CHAT_ID}:7900`,
+        sourceChatId: TEST_STAFF_CHAT_ID,
+        sourceMessageId: 7900,
+      },
+    ]) {
+      const intent = harness.db.createTicketOutboundDeliveryIntent({
+        ...input,
+        ticketId: ticket.id,
+        direction: "STAFF_TO_USER",
+        deliveryChatId: ticket.user_telegram_id,
+        senderType: "STAFF",
+      });
+      assert.equal(intent.created, true);
+      assert.equal(intent.delivery.state, "PENDING");
+    }
+  });
+
   it("does not resend a pre-existing pending interactive reply", async () => {
     const harness = createHarness();
     const ticket = harness.seedTicket();

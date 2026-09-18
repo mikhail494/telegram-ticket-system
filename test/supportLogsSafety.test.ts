@@ -64,6 +64,7 @@ function archiveApi(
     sendMessage?: () => Promise<{ message_id: number }>;
     sendDocument?: () => Promise<{ message_id: number }>;
     createForumTopic?: () => Promise<{ message_thread_id: number }>;
+    reopenForumTopic?: () => Promise<true>;
   } = {}
 ) {
   return {
@@ -71,6 +72,7 @@ function archiveApi(
     sendMessage: handlers.sendMessage ?? (async () => ({ message_id: 9001 })),
     sendDocument: handlers.sendDocument ?? (async () => ({ message_id: 9002 })),
     createForumTopic: handlers.createForumTopic ?? (async () => ({ message_thread_id: 8001 })),
+    reopenForumTopic: handlers.reopenForumTopic ?? (async () => true),
     deleteForumTopic: async () => true,
   } as unknown as BotHarness["bot"]["api"];
 }
@@ -484,6 +486,112 @@ describe("Support Logs topic safety", () => {
     assert.equal(documentAttempts, 3);
     assert.equal(topicAttempts, 2);
     assert.ok(harness.db.getTicket(ticket.id)?.archived_at);
+  });
+
+  it("reopens a closed Support Logs topic and retries only the document", async () => {
+    const harness = createHarness();
+    const ticket = seedClosedTicketForArchive(harness);
+    assert.equal(harness.db.claimTicketArchiveSummary(ticket.id, 8000).claimed, true);
+    assert.equal(harness.db.markTicketArchiveSummarySent(ticket.id, 9001), true);
+    let documentAttempts = 0;
+    let reopenAttempts = 0;
+    let summaryAttempts = 0;
+    const api = archiveApi({
+      sendMessage: async () => {
+        summaryAttempts += 1;
+        return { message_id: 9101 };
+      },
+      sendDocument: async () => {
+        documentAttempts += 1;
+        if (documentAttempts === 1) throw grammyFailure("sendDocument", "Bad Request: topic is closed");
+        return { message_id: 9003 };
+      },
+      reopenForumTopic: async () => {
+        reopenAttempts += 1;
+        return true;
+      },
+    });
+
+    assert.equal(await archiveTicketIfPossible(api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), true);
+    assert.equal(summaryAttempts, 0);
+    assert.equal(reopenAttempts, 1);
+    assert.equal(documentAttempts, 2);
+    assert.equal(harness.db.getTicket(ticket.id)?.logs_message_id, 9001);
+    assert.equal(harness.db.getTicket(ticket.id)?.transcript_message_id, 9003);
+  });
+
+  for (const [name, reopenForumTopic] of [
+    [
+      "confirmed",
+      async () => Promise.reject(grammyFailure("reopenForumTopic", "Forbidden: bot lacks permissions", 403)),
+    ],
+    ["ambiguous", async () => Promise.reject(new Error("Synthetic transport interruption"))],
+  ] as const) {
+    it(`keeps a closed-topic archive retryable when reopening has a ${name} failure`, async () => {
+      const harness = createHarness();
+      const ticket = seedClosedTicketForArchive(harness);
+      assert.equal(harness.db.claimTicketArchiveSummary(ticket.id, 8000).claimed, true);
+      assert.equal(harness.db.markTicketArchiveSummarySent(ticket.id, 9001), true);
+      let documentAttempts = 0;
+      let summaryAttempts = 0;
+      let topicAttempts = 0;
+      const api = archiveApi({
+        sendMessage: async () => {
+          summaryAttempts += 1;
+          return { message_id: 9101 };
+        },
+        sendDocument: async () => {
+          documentAttempts += 1;
+          throw grammyFailure("sendDocument", "Bad Request: topic is closed");
+        },
+        reopenForumTopic,
+        createForumTopic: async () => {
+          topicAttempts += 1;
+          return { message_thread_id: 8001 };
+        },
+      });
+
+      assert.equal(await archiveTicketIfPossible(api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), false);
+      assert.equal(harness.db.getTicketArchiveDelivery(ticket.id)?.state, "SUMMARY_SENT");
+      assert.equal(summaryAttempts, 0);
+      assert.equal(documentAttempts, 1);
+      assert.equal(topicAttempts, 0);
+    });
+  }
+
+  it("replaces a missing closed Support Logs topic with a complete replacement archive", async () => {
+    const harness = createHarness();
+    const ticket = seedClosedTicketForArchive(harness);
+    assert.equal(harness.db.claimTicketArchiveSummary(ticket.id, 8000).claimed, true);
+    assert.equal(harness.db.markTicketArchiveSummarySent(ticket.id, 9001), true);
+    let documentAttempts = 0;
+    let summaryAttempts = 0;
+    let topicAttempts = 0;
+    const api = archiveApi({
+      sendMessage: async () => {
+        summaryAttempts += 1;
+        return { message_id: 9101 };
+      },
+      sendDocument: async () => {
+        documentAttempts += 1;
+        if (documentAttempts === 1) throw grammyFailure("sendDocument", "Bad Request: topic is closed");
+        return { message_id: 9102 };
+      },
+      reopenForumTopic: async () => {
+        throw grammyFailure("reopenForumTopic", "Bad Request: message thread not found");
+      },
+      createForumTopic: async () => {
+        topicAttempts += 1;
+        return { message_thread_id: 8001 };
+      },
+    });
+
+    assert.equal(await archiveTicketIfPossible(api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), true);
+    assert.equal(topicAttempts, 1);
+    assert.equal(summaryAttempts, 1);
+    assert.equal(documentAttempts, 2);
+    assert.equal(harness.db.getTicket(ticket.id)?.logs_message_id, 9101);
+    assert.equal(harness.db.getTicket(ticket.id)?.transcript_message_id, 9102);
   });
 
   it("never restages or resends an archive after an ambiguous document outcome", async () => {

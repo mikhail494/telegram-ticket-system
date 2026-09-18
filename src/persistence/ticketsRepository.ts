@@ -289,37 +289,18 @@ export class TicketRepository {
     created: boolean;
     delivery: TicketOutboundDeliveryRecord;
   } {
-    const timestamp = now();
-    const result = this.db
-      .prepare(
-        `INSERT INTO ticket_outbound_deliveries (
-          operation_key, ticket_id, state, source_chat_id, source_message_id, delivery_chat_id,
-          from_telegram_id, from_username, sender_type, sender_display_name, sender_username,
-          text, media_type, filename, file_id, created_at, updated_at
-        ) VALUES (?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(operation_key) DO NOTHING`
-      )
-      .run(
-        input.operationKey,
-        input.ticketId,
-        input.sourceChatId ?? null,
-        input.sourceMessageId ?? null,
-        input.deliveryChatId ?? null,
-        input.fromTelegramId ?? null,
-        input.fromUsername ?? null,
-        input.senderType ?? senderTypeForDirection(input.direction),
-        input.senderDisplayName ?? null,
-        input.senderUsername ?? input.fromUsername ?? null,
-        input.text ?? null,
-        input.mediaType ?? null,
-        input.filename ?? null,
-        input.fileId ?? null,
-        timestamp,
-        timestamp
-      );
-    const delivery = this.getTicketOutboundDelivery(input.operationKey);
-    if (!delivery) throw new Error("Could not load ticket outbound delivery intent");
-    return { created: result.changes === 1, delivery };
+    const tx = this.db.transaction(() => {
+      const existing = this.getTicketOutboundDelivery(input.operationKey);
+      if (existing) return { created: false, delivery: existing };
+
+      const legacyDeliveryMessageId = this.findProvenLegacyStaffDelivery(input);
+      const created = this.insertTicketOutboundDelivery(input, legacyDeliveryMessageId);
+      const delivery = this.getTicketOutboundDelivery(input.operationKey);
+      if (!delivery) throw new Error("Could not load ticket outbound delivery intent");
+      return { created: created && legacyDeliveryMessageId === null, delivery };
+    });
+
+    return tx();
   }
 
   getTicketOutboundDelivery(operationKey: string): TicketOutboundDeliveryRecord | undefined {
@@ -553,6 +534,71 @@ export class TicketRepository {
       .run(logsMessageId, transcriptMessageId, timestamp, timestamp, ticketId);
 
     this.db.prepare("DELETE FROM messages WHERE ticket_id = ?").run(ticketId);
+  }
+
+  private findProvenLegacyStaffDelivery(input: CreateTicketOutboundDeliveryIntentInput): number | null {
+    if (
+      !input.operationKey.startsWith("staff-message:") ||
+      input.direction !== "STAFF_TO_USER" ||
+      input.sourceChatId === null ||
+      input.sourceChatId === undefined ||
+      input.sourceMessageId === null ||
+      input.sourceMessageId === undefined
+    )
+      return null;
+
+    const row = this.db
+      .prepare(
+        `SELECT delivery_message_id
+         FROM messages
+         WHERE ticket_id = ?
+           AND direction = 'STAFF_TO_USER'
+           AND source_chat_id = ?
+           AND source_message_id = ?
+           AND delivery_message_id IS NOT NULL
+         ORDER BY id ASC
+         LIMIT 1`
+      )
+      .get(input.ticketId, input.sourceChatId, input.sourceMessageId) as { delivery_message_id: number } | undefined;
+    return row?.delivery_message_id ?? null;
+  }
+
+  private insertTicketOutboundDelivery(
+    input: CreateTicketOutboundDeliveryIntentInput,
+    legacyDeliveryMessageId: number | null
+  ): boolean {
+    const timestamp = now();
+    return (
+      this.db
+        .prepare(
+          `INSERT INTO ticket_outbound_deliveries (
+            operation_key, ticket_id, state, source_chat_id, source_message_id, delivery_chat_id,
+            delivery_message_id, from_telegram_id, from_username, sender_type, sender_display_name, sender_username,
+            text, media_type, filename, file_id, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(operation_key) DO NOTHING`
+        )
+        .run(
+          input.operationKey,
+          input.ticketId,
+          legacyDeliveryMessageId === null ? "PENDING" : "DELIVERED",
+          input.sourceChatId ?? null,
+          input.sourceMessageId ?? null,
+          input.deliveryChatId ?? null,
+          legacyDeliveryMessageId,
+          input.fromTelegramId ?? null,
+          input.fromUsername ?? null,
+          input.senderType ?? senderTypeForDirection(input.direction),
+          input.senderDisplayName ?? null,
+          input.senderUsername ?? input.fromUsername ?? null,
+          input.text ?? null,
+          input.mediaType ?? null,
+          input.filename ?? null,
+          input.fileId ?? null,
+          timestamp,
+          timestamp
+        ).changes === 1
+    );
   }
 
   addMessage(input: AddMessageInput): number {
