@@ -278,23 +278,9 @@ export class TicketRepository {
   }
 
   markTicketArchivedAndDeleteMessages(ticketId: number, logsMessageId: number, transcriptMessageId: number): void {
-    const tx = this.db.transaction(() => {
-      const timestamp = now();
-      this.db
-        .prepare(
-          `
-          UPDATE tickets
-          SET logs_message_id = ?,
-              transcript_message_id = ?,
-              archived_at = ?,
-              updated_at = ?
-          WHERE id = ?
-        `
-        )
-        .run(logsMessageId, transcriptMessageId, timestamp, timestamp, ticketId);
-
-      this.db.prepare("DELETE FROM messages WHERE ticket_id = ?").run(ticketId);
-    });
+    const tx = this.db.transaction(() =>
+      this.markTicketArchivedAndDeleteMessagesInTransaction(ticketId, logsMessageId, transcriptMessageId)
+    );
 
     tx();
   }
@@ -488,7 +474,7 @@ export class TicketRepository {
           `UPDATE ticket_archive_deliveries
            SET state = 'FAILED', logs_thread_id = ?, summary_message_id = NULL, document_message_id = NULL,
                failure_category = NULL, failure_description = NULL, updated_at = ?
-           WHERE ticket_id = ? AND state = 'DOCUMENT_PENDING'`
+           WHERE ticket_id = ? AND state = 'SUMMARY_SENT'`
         )
         .run(logsThreadId, now(), ticketId).changes === 1
     );
@@ -535,11 +521,38 @@ export class TicketRepository {
         delivery.document_message_id === null
       )
         return false;
-      this.markTicketArchivedAndDeleteMessages(ticketId, delivery.summary_message_id, delivery.document_message_id);
+      this.markTicketArchivedAndDeleteMessagesInTransaction(
+        ticketId,
+        delivery.summary_message_id,
+        delivery.document_message_id
+      );
+      this.db.prepare("DELETE FROM ticket_outbound_deliveries WHERE ticket_id = ?").run(ticketId);
       this.db.prepare("DELETE FROM ticket_archive_deliveries WHERE ticket_id = ?").run(ticketId);
       return true;
     });
     return tx();
+  }
+
+  private markTicketArchivedAndDeleteMessagesInTransaction(
+    ticketId: number,
+    logsMessageId: number,
+    transcriptMessageId: number
+  ): void {
+    const timestamp = now();
+    this.db
+      .prepare(
+        `
+        UPDATE tickets
+        SET logs_message_id = ?,
+            transcript_message_id = ?,
+            archived_at = ?,
+            updated_at = ?
+        WHERE id = ?
+      `
+      )
+      .run(logsMessageId, transcriptMessageId, timestamp, timestamp, ticketId);
+
+    this.db.prepare("DELETE FROM messages WHERE ticket_id = ?").run(ticketId);
   }
 
   addMessage(input: AddMessageInput): number {

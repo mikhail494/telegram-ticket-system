@@ -282,7 +282,20 @@ export async function archiveTicketIfPossible(
       }
       if (!isForumTopicUnavailable(error)) return await recordArchiveFailure(api, db, ticket, error, options);
       if (options.topicReplacementAttempted) return await recordArchiveFailure(api, db, ticket, error, options);
-      const replacementTopic = await recreateSupportLogsTopic(api, db, staffChatId);
+      const diagnostic = normalizeTelegramDeliveryError(error);
+      db.markTicketArchiveFailed(ticket.id, diagnostic.category, diagnostic.description);
+      let replacementTopic: number;
+      try {
+        replacementTopic = await recreateSupportLogsTopic(api, db, staffChatId);
+      } catch (replacementError) {
+        const replacementDiagnostic = normalizeTelegramDeliveryError(replacementError);
+        options.onFailure?.(replacementDiagnostic);
+        logger.error(
+          { ticketId: ticket.id, stage: "SUPPORT_LOGS_TOPIC", category: replacementDiagnostic.category },
+          "Could not recreate Support Logs topic after a confirmed transcript delivery failure"
+        );
+        return false;
+      }
       if (!db.restageTicketArchiveForReplacementTopic(ticket.id, replacementTopic)) return false;
       logger.info(
         { ticketId: ticket.id, logsThreadId: replacementTopic },

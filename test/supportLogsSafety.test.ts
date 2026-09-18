@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
+import { GrammyError } from "grammy";
 import type { Update } from "grammy/types";
 import { TEST_STAFF_CHAT_ID, createBotHarness, type BotHarness, type RecordedApiCall } from "./helpers/botHarness.js";
 
@@ -62,12 +63,14 @@ function archiveApi(
   handlers: {
     sendMessage?: () => Promise<{ message_id: number }>;
     sendDocument?: () => Promise<{ message_id: number }>;
+    createForumTopic?: () => Promise<{ message_thread_id: number }>;
   } = {}
 ) {
   return {
     sendChatAction: async () => true,
     sendMessage: handlers.sendMessage ?? (async () => ({ message_id: 9001 })),
     sendDocument: handlers.sendDocument ?? (async () => ({ message_id: 9002 })),
+    createForumTopic: handlers.createForumTopic ?? (async () => ({ message_thread_id: 8001 })),
     deleteForumTopic: async () => true,
   } as unknown as BotHarness["bot"]["api"];
 }
@@ -78,6 +81,10 @@ function seedClosedTicketForArchive(harness: BotHarness) {
   harness.db.addMessage({ ticketId: ticket.id, direction: "USER_TO_STAFF", text: "Archive me" });
   harness.db.closeTicketRecord(ticket.id, { type: "STAFF", displayName: "@test_staff", username: "test_staff" });
   return ticket;
+}
+
+function grammyFailure(method: string, description: string, errorCode = 400): GrammyError {
+  return new GrammyError(method, { ok: false, error_code: errorCode, description }, method, {});
 }
 
 describe("Support Logs topic safety", () => {
@@ -274,6 +281,44 @@ describe("Support Logs topic safety", () => {
     assert.equal(harness.countApiCalls("sendDocument"), 0);
   });
 
+  it("purges delivered interactive payloads only after their ticket archive is finalized", async () => {
+    const harness = createHarness();
+    const ticket = seedClosedTicketForArchive(harness);
+    const unrelated = harness.seedTicket({
+      messageThreadId: 5001,
+      user: { id: 124, username: "unrelated_customer", firstName: "Unrelated Customer" },
+    });
+    const deliveredOperation = "staff-message:-100900:9101";
+    const unrelatedOperation = "staff-message:-100900:9102";
+    for (const [operationKey, targetTicket] of [
+      [deliveredOperation, ticket],
+      [unrelatedOperation, unrelated],
+    ] as const) {
+      harness.db.createTicketOutboundDeliveryIntent({
+        operationKey,
+        ticketId: targetTicket.id,
+        direction: "STAFF_TO_USER",
+        deliveryChatId: targetTicket.user_telegram_id,
+        text: "Durable interactive reply",
+        mediaType: "document",
+        filename: "durable.txt",
+        fileId: "durable-file-id",
+        senderType: "STAFF",
+      });
+      assert.equal(harness.db.markTicketOutboundDeliveryDelivered(operationKey, 9100), 9100);
+    }
+    harness.clearApiCalls();
+
+    assert.equal(await archiveTicketIfPossible(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), true);
+
+    const transcript = new TextDecoder().decode(harness.findApiCalls("sendDocument")[0]?.documentBytes);
+    assert.match(transcript, /Durable interactive reply/);
+    assert.ok(harness.db.getTicket(ticket.id)?.archived_at);
+    assert.equal(harness.db.listMessagesChronological(ticket.id).length, 0);
+    assert.equal(harness.db.getTicketOutboundDelivery(deliveredOperation), undefined);
+    assert.equal(harness.db.getTicketOutboundDelivery(unrelatedOperation)?.state, "DELIVERED");
+  });
+
   it("allows only one concurrent archive invocation to claim each Support Logs send", async () => {
     const harness = createHarness();
     const ticket = seedClosedTicketForArchive(harness);
@@ -381,6 +426,64 @@ describe("Support Logs topic safety", () => {
     assert.equal(replacementDocument.payload.message_thread_id, replacementTopic);
     assert.equal(harness.db.getTicket(ticket.id)?.logs_message_id, replacementSummary.responseMessageId);
     assert.equal(harness.db.getTicket(ticket.id)?.transcript_message_id, replacementDocument.responseMessageId);
+  });
+
+  it("keeps confirmed document-topic failure retryable when replacement topic creation fails", async () => {
+    const harness = createHarness();
+    const ticket = seedClosedTicketForArchive(harness);
+    let documentAttempts = 0;
+    let topicAttempts = 0;
+    const api = archiveApi({
+      sendDocument: async () => {
+        documentAttempts += 1;
+        if (documentAttempts <= 2) throw grammyFailure("sendDocument", "Bad Request: message thread not found");
+        return { message_id: 9003 };
+      },
+      createForumTopic: async () => {
+        topicAttempts += 1;
+        if (topicAttempts === 1) throw grammyFailure("createForumTopic", "Bad Request: chat not found");
+        return { message_thread_id: 8001 };
+      },
+    });
+
+    assert.equal(await archiveTicketIfPossible(api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), false);
+    assert.equal(harness.db.getTicketArchiveDelivery(ticket.id)?.state, "SUMMARY_SENT");
+    assert.equal(documentAttempts, 1);
+    assert.equal(topicAttempts, 1);
+
+    assert.equal(await archiveTicketIfPossible(api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), true);
+    assert.equal(documentAttempts, 3);
+    assert.equal(topicAttempts, 2);
+    assert.ok(harness.db.getTicket(ticket.id)?.archived_at);
+  });
+
+  it("keeps archive content retryable when replacement topic creation has an ambiguous outcome", async () => {
+    const harness = createHarness();
+    const ticket = seedClosedTicketForArchive(harness);
+    let documentAttempts = 0;
+    let topicAttempts = 0;
+    const api = archiveApi({
+      sendDocument: async () => {
+        documentAttempts += 1;
+        if (documentAttempts <= 2) throw grammyFailure("sendDocument", "Bad Request: message thread not found");
+        return { message_id: 9003 };
+      },
+      createForumTopic: async () => {
+        topicAttempts += 1;
+        if (topicAttempts === 1) throw new Error("Synthetic transport interruption");
+        return { message_thread_id: 8001 };
+      },
+    });
+
+    assert.equal(await archiveTicketIfPossible(api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), false);
+    assert.equal(harness.db.getTicketArchiveDelivery(ticket.id)?.state, "SUMMARY_SENT");
+    assert.equal(documentAttempts, 1);
+    assert.equal(topicAttempts, 1);
+
+    assert.equal(await archiveTicketIfPossible(api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), true);
+    assert.equal(documentAttempts, 3);
+    assert.equal(topicAttempts, 2);
+    assert.ok(harness.db.getTicket(ticket.id)?.archived_at);
   });
 
   it("never restages or resends an archive after an ambiguous document outcome", async () => {
