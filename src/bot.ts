@@ -557,6 +557,8 @@ export function createBot(
   }
 
   async function handleQuickRepliesCallback(ctx: Context, data: string): Promise<void> {
+    const callbackId = ctx.callbackQuery?.id;
+    if (!callbackId) return;
     const [, action, rawTicketId, rawResourceId, rawPage] = data.split(":");
     if (
       action !== "open" &&
@@ -611,7 +613,11 @@ export function createBot(
       }
 
       try {
-        await ticketRouting.deliverAndRecordStaffTextReply(target.ticket, template.text, ctx.from);
+        await ticketRouting.deliverAndRecordStaffTextReply(target.ticket, template.text, ctx.from, {
+          chatId: target.messageChatId,
+          messageId: target.messageId,
+          operationKey: `quick-reply:${callbackId}`,
+        });
       } catch (error) {
         logger.error({ err: error, ticketId: target.ticket.id }, "Could not deliver Quick Reply to user");
         await ticketRouting.sendStaffTopicNotice(

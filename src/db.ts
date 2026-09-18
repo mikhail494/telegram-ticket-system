@@ -10,6 +10,7 @@ import { now } from "./persistence/helpers.js";
 import type { NormalizedDeliveryError } from "./deliveryDiagnostics.js";
 import type {
   AddMessageInput,
+  CreateTicketOutboundDeliveryIntentInput,
   BanUserInput,
   BannedUserRecord,
   CloseTicketInput,
@@ -48,6 +49,8 @@ import type {
   TicketFollowUpHistoryRecord,
   TicketFollowUpState,
   TicketMessageRecord,
+  TicketArchiveDeliveryRecord,
+  TicketOutboundDeliveryRecord,
   TicketRecord,
   TicketStatus,
   TicketWithUser,
@@ -222,6 +225,81 @@ export class SupportDatabase {
 
   listClosedTicketsPendingArchive(staffChatId: number, limit = 1000): TicketWithUser[] {
     return this.tickets.listClosedTicketsPendingArchive(staffChatId, limit);
+  }
+
+  createTicketOutboundDeliveryIntent(input: CreateTicketOutboundDeliveryIntentInput): {
+    created: boolean;
+    delivery: TicketOutboundDeliveryRecord;
+  } {
+    return this.tickets.createTicketOutboundDeliveryIntent(input);
+  }
+
+  getTicketOutboundDelivery(operationKey: string): TicketOutboundDeliveryRecord | undefined {
+    return this.tickets.getTicketOutboundDelivery(operationKey);
+  }
+
+  markTicketOutboundDeliveryDelivered(operationKey: string, deliveryMessageId: number): number | null {
+    return this.tickets.markTicketOutboundDeliveryDelivered(operationKey, deliveryMessageId);
+  }
+
+  markTicketOutboundDeliveryFailed(
+    operationKey: string,
+    failureCategory: string,
+    failureDescription: string | null
+  ): void {
+    return this.tickets.markTicketOutboundDeliveryFailed(operationKey, failureCategory, failureDescription);
+  }
+
+  markTicketOutboundDeliveryUnknown(operationKey: string, failureDescription: string | null): void {
+    return this.tickets.markTicketOutboundDeliveryUnknown(operationKey, failureDescription);
+  }
+
+  markPendingTicketOutboundDeliveriesUnknown(): number {
+    return this.tickets.markPendingTicketOutboundDeliveriesUnknown();
+  }
+
+  hasUnresolvedTicketOutboundDeliveries(ticketId: number): boolean {
+    return this.tickets.hasUnresolvedTicketOutboundDeliveries(ticketId);
+  }
+
+  getTicketArchiveDelivery(ticketId: number): TicketArchiveDeliveryRecord | undefined {
+    return this.tickets.getTicketArchiveDelivery(ticketId);
+  }
+
+  prepareTicketArchiveSummary(ticketId: number, logsThreadId: number): TicketArchiveDeliveryRecord {
+    return this.tickets.prepareTicketArchiveSummary(ticketId, logsThreadId);
+  }
+
+  markTicketArchiveSummarySent(ticketId: number, messageId: number): void {
+    return this.tickets.markTicketArchiveSummarySent(ticketId, messageId);
+  }
+
+  setTicketArchiveLogsThread(ticketId: number, logsThreadId: number): void {
+    return this.tickets.setTicketArchiveLogsThread(ticketId, logsThreadId);
+  }
+
+  prepareTicketArchiveDocument(ticketId: number): TicketArchiveDeliveryRecord | undefined {
+    return this.tickets.prepareTicketArchiveDocument(ticketId);
+  }
+
+  markTicketArchiveDocumentDelivered(ticketId: number, messageId: number): void {
+    return this.tickets.markTicketArchiveDocumentDelivered(ticketId, messageId);
+  }
+
+  markTicketArchiveFailed(ticketId: number, failureCategory: string, failureDescription: string | null): void {
+    return this.tickets.markTicketArchiveFailed(ticketId, failureCategory, failureDescription);
+  }
+
+  markTicketArchiveUnknown(ticketId: number, failureDescription: string | null): void {
+    return this.tickets.markTicketArchiveUnknown(ticketId, failureDescription);
+  }
+
+  markPendingTicketArchiveDeliveriesUnknown(): number {
+    return this.tickets.markPendingTicketArchiveDeliveriesUnknown();
+  }
+
+  finalizeTicketArchiveDelivery(ticketId: number): boolean {
+    return this.tickets.finalizeTicketArchiveDelivery(ticketId);
   }
 
   createTicketBatchExport(input: CreateTicketBatchExportInput): void {
@@ -1875,6 +1953,54 @@ export class SupportDatabase {
               observations_since_maintenance INTEGER NOT NULL DEFAULT 0
                 CHECK(observations_since_maintenance >= 0)
             );
+          `);
+        },
+      },
+      {
+        id: 25,
+        name: "add_ticket_delivery_durability",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS ticket_outbound_deliveries (
+              operation_key TEXT PRIMARY KEY,
+              ticket_id INTEGER NOT NULL,
+              state TEXT NOT NULL CHECK(state IN ('PENDING', 'DELIVERED', 'FAILED', 'UNKNOWN_DELIVERY')),
+              source_chat_id INTEGER,
+              source_message_id INTEGER,
+              delivery_chat_id INTEGER,
+              delivery_message_id INTEGER,
+              from_telegram_id INTEGER,
+              from_username TEXT,
+              sender_type TEXT CHECK(sender_type IN ('USER', 'STAFF', 'SYSTEM')),
+              sender_display_name TEXT,
+              sender_username TEXT,
+              text TEXT,
+              media_type TEXT,
+              filename TEXT,
+              file_id TEXT,
+              failure_category TEXT,
+              failure_description TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_ticket_outbound_deliveries_ticket_state
+              ON ticket_outbound_deliveries(ticket_id, state, created_at);
+
+            CREATE TABLE IF NOT EXISTS ticket_archive_deliveries (
+              ticket_id INTEGER PRIMARY KEY,
+              state TEXT NOT NULL CHECK(state IN ('SUMMARY_PENDING', 'SUMMARY_SENT', 'DOCUMENT_PENDING', 'DELIVERED', 'UNKNOWN_DELIVERY', 'FAILED')),
+              logs_thread_id INTEGER,
+              summary_message_id INTEGER,
+              document_message_id INTEGER,
+              failure_category TEXT,
+              failure_description TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_ticket_archive_deliveries_state
+              ON ticket_archive_deliveries(state, updated_at, ticket_id);
           `);
         },
       },

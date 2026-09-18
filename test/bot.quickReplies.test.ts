@@ -451,6 +451,24 @@ describe("Quick Replies callbacks", () => {
     assertCallbackAnswer(harness, "Quick reply sent.");
   });
 
+  it("does not resend a Quick Reply when its callback is replayed", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const update = buildStaffCallbackUpdate({
+      callbackId: "replayed-quick-reply",
+      callbackData: `qr:template:${ticket.id}:ask_uid`,
+    });
+
+    await harness.bot.handleUpdate(update);
+    await harness.bot.handleUpdate(update);
+
+    assert.equal(
+      harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id).length,
+      1
+    );
+    assert.equal(harness.db.getTicketOutboundDelivery("quick-reply:replayed-quick-reply")?.state, "DELIVERED");
+  });
+
   it("does not retry a successful operation when callback acknowledgement fails", async () => {
     const harness = createHarness();
     const ticket = harness.seedTicket();

@@ -15,15 +15,6 @@ const SUPPORT_LOGS_THREAD_SETTING_PREFIX = "support_logs_message_thread_id";
 
 type BotApi = Context["api"];
 
-interface TranscriptDelivery {
-  summaryMessageId: number;
-  documentMessageId: number;
-}
-
-interface SendTranscriptOptions {
-  recreateTopic?: boolean;
-}
-
 interface ArchiveAttemptOptions {
   onFailure?: (diagnostic: NormalizedDeliveryError) => void;
 }
@@ -179,80 +170,152 @@ export async function archiveTicketIfPossible(
     return true;
   }
 
+  if (db.hasUnresolvedTicketOutboundDeliveries(ticket.id)) {
+    logger.warn({ ticketId: ticket.id }, "Ticket archive is blocked by an unresolved interactive delivery");
+    return false;
+  }
+
+  let delivery = db.getTicketArchiveDelivery(ticket.id);
+  if (delivery?.state === "UNKNOWN_DELIVERY") {
+    logger.warn({ ticketId: ticket.id, state: delivery.state }, "Ticket archive requires manual reconciliation");
+    return false;
+  }
+
+  if (delivery?.state === "DELIVERED") {
+    const finalized = db.finalizeTicketArchiveDelivery(ticket.id);
+    if (finalized) await removeTicketTopicAfterArchive(api, ticket);
+    return finalized;
+  }
+
   const messages = db.listMessagesChronological(ticket.id);
   if (!messages.length) {
     logger.warn({ ticketId: ticket.id }, "Closed ticket has no messages to archive");
     return false;
   }
 
+  if (!delivery || delivery.state === "FAILED") {
+    let logsThreadId = await initializeSupportLogsTopic(api, db, staffChatId);
+    delivery = db.prepareTicketArchiveSummary(ticket.id, logsThreadId);
+    if (delivery.state === "SUMMARY_PENDING") {
+      try {
+        const summary = await api.sendMessage(staffChatId, formatTicketClosedLog(ticket), {
+          message_thread_id: logsThreadId,
+        });
+        db.markTicketArchiveSummarySent(ticket.id, summary.message_id);
+        logger.info({ ticketId: ticket.id, state: "SUMMARY_SENT" }, "Support Logs archive summary delivered");
+      } catch (error) {
+        if (isAmbiguousTelegramOutcome(error)) {
+          db.markTicketArchiveUnknown(ticket.id, "Support Logs summary delivery outcome could not be confirmed.");
+          logger.warn({ ticketId: ticket.id, state: "UNKNOWN_DELIVERY" }, "Support Logs summary outcome is unknown");
+          return false;
+        }
+        const diagnostic = normalizeTelegramDeliveryError(error);
+        db.markTicketArchiveFailed(ticket.id, diagnostic.category, diagnostic.description);
+        if (isForumTopicUnavailable(error)) {
+          logsThreadId = await recreateSupportLogsTopic(api, db, staffChatId);
+          db.prepareTicketArchiveSummary(ticket.id, logsThreadId);
+          try {
+            const summary = await api.sendMessage(staffChatId, formatTicketClosedLog(ticket), {
+              message_thread_id: logsThreadId,
+            });
+            db.markTicketArchiveSummarySent(ticket.id, summary.message_id);
+          } catch (retryError) {
+            return await recordArchiveFailure(api, db, ticket, retryError, options);
+          }
+        } else {
+          return await recordArchiveFailure(api, db, ticket, error, options);
+        }
+      }
+    } else if (delivery.state === "UNKNOWN_DELIVERY") {
+      return false;
+    }
+  }
+
+  delivery = db.getTicketArchiveDelivery(ticket.id);
+  if (!delivery || delivery.state === "UNKNOWN_DELIVERY") return false;
+  if (delivery.state === "DOCUMENT_PENDING") {
+    db.markTicketArchiveUnknown(
+      ticket.id,
+      "Process encountered a pre-existing pending Support Logs document delivery."
+    );
+    return false;
+  }
+  if (delivery.state === "SUMMARY_PENDING") {
+    db.markTicketArchiveUnknown(ticket.id, "Process encountered a pre-existing pending Support Logs summary delivery.");
+    return false;
+  }
+  if (delivery.state === "DELIVERED") {
+    const finalized = db.finalizeTicketArchiveDelivery(ticket.id);
+    if (finalized) await removeTicketTopicAfterArchive(api, ticket);
+    return finalized;
+  }
+
   const transcript = buildTranscript(ticket, messages);
   const filename = `ticket-${ticket.id}-transcript.txt`;
   const tempFile = await writeTemporaryTranscript(filename, transcript);
-
   try {
-    const delivery = await sendTranscriptToSupportLogs(api, db, staffChatId, ticket, tempFile.filePath, filename);
-    db.markTicketArchivedAndDeleteMessages(ticket.id, delivery.summaryMessageId, delivery.documentMessageId);
-    await removeTicketTopicAfterArchive(api, ticket);
-    return true;
-  } catch (error) {
-    if (isForumTopicUnavailable(error)) {
-      const diagnostic = normalizeTelegramDeliveryError(error);
-      logger.warn(
-        {
-          ticketId: ticket.id,
-          stage: "SUPPORT_LOGS_DELIVERY",
-          category: diagnostic.category,
-          method: diagnostic.method,
-          telegramErrorCode: diagnostic.telegramErrorCode,
-          httpStatus: diagnostic.httpStatus,
-        },
-        "Support Logs topic is unavailable; recreating and retrying transcript upload"
-      );
-
-      try {
-        const delivery = await sendTranscriptToSupportLogs(api, db, staffChatId, ticket, tempFile.filePath, filename, {
-          recreateTopic: true,
-        });
-        db.markTicketArchivedAndDeleteMessages(ticket.id, delivery.summaryMessageId, delivery.documentMessageId);
-        await removeTicketTopicAfterArchive(api, ticket);
-        return true;
-      } catch (retryError) {
-        const retryDiagnostic = normalizeTelegramDeliveryError(retryError);
-        options.onFailure?.(retryDiagnostic);
-        logger.error(
-          {
-            ticketId: ticket.id,
-            stage: "TRANSCRIPT_ARCHIVE_RETRY",
-            category: retryDiagnostic.category,
-            method: retryDiagnostic.method,
-            telegramErrorCode: retryDiagnostic.telegramErrorCode,
-            httpStatus: retryDiagnostic.httpStatus,
-          },
-          "Could not archive ticket transcript after retry"
-        );
-        await notifyTicketTopicArchiveFailure(api, ticket, retryDiagnostic.category);
+    let documentDelivery = db.prepareTicketArchiveDocument(ticket.id);
+    if (!documentDelivery || documentDelivery.state !== "DOCUMENT_PENDING") return false;
+    const logsThreadId = documentDelivery.logs_thread_id;
+    if (logsThreadId === null) throw new Error("Support Logs archive delivery has no topic");
+    try {
+      const document = await api.sendDocument(staffChatId, new InputFile(tempFile.filePath, filename), {
+        message_thread_id: logsThreadId,
+      });
+      db.markTicketArchiveDocumentDelivered(ticket.id, document.message_id);
+      logger.info({ ticketId: ticket.id, state: "DELIVERED" }, "Support Logs archive document delivered");
+    } catch (error) {
+      if (isAmbiguousTelegramOutcome(error)) {
+        db.markTicketArchiveUnknown(ticket.id, "Support Logs transcript delivery outcome could not be confirmed.");
+        logger.warn({ ticketId: ticket.id, state: "UNKNOWN_DELIVERY" }, "Support Logs document outcome is unknown");
         return false;
       }
+      if (!isForumTopicUnavailable(error)) return await recordArchiveFailure(api, db, ticket, error, options);
+      const replacementTopic = await recreateSupportLogsTopic(api, db, staffChatId);
+      db.setTicketArchiveLogsThread(ticket.id, replacementTopic);
+      documentDelivery = db.prepareTicketArchiveDocument(ticket.id);
+      try {
+        const document = await api.sendDocument(staffChatId, new InputFile(tempFile.filePath, filename), {
+          message_thread_id: replacementTopic,
+        });
+        db.markTicketArchiveDocumentDelivered(ticket.id, document.message_id);
+      } catch (retryError) {
+        return await recordArchiveFailure(api, db, ticket, retryError, options);
+      }
     }
-
-    const diagnostic = normalizeTelegramDeliveryError(error);
-    options.onFailure?.(diagnostic);
-    logger.error(
-      {
-        ticketId: ticket.id,
-        stage: "TRANSCRIPT_ARCHIVE",
-        category: diagnostic.category,
-        method: diagnostic.method,
-        telegramErrorCode: diagnostic.telegramErrorCode,
-        httpStatus: diagnostic.httpStatus,
-      },
-      "Could not archive ticket transcript"
-    );
-    await notifyTicketTopicArchiveFailure(api, ticket, diagnostic.category);
-    return false;
+    const finalized = db.finalizeTicketArchiveDelivery(ticket.id);
+    if (finalized) await removeTicketTopicAfterArchive(api, ticket);
+    return finalized;
   } finally {
     await fs.rm(tempFile.directory, { recursive: true, force: true });
   }
+}
+
+async function recordArchiveFailure(
+  api: BotApi,
+  db: SupportDatabase,
+  ticket: TicketWithUser,
+  error: unknown,
+  options: ArchiveAttemptOptions
+): Promise<false> {
+  const diagnostic = normalizeTelegramDeliveryError(error);
+  if (isAmbiguousTelegramOutcome(error)) {
+    db.markTicketArchiveUnknown(ticket.id, "Support Logs delivery outcome could not be confirmed.");
+    logger.warn({ ticketId: ticket.id, state: "UNKNOWN_DELIVERY" }, "Support Logs archive outcome is unknown");
+    return false;
+  }
+  db.markTicketArchiveFailed(ticket.id, diagnostic.category, diagnostic.description);
+  options.onFailure?.(diagnostic);
+  logger.error(
+    { ticketId: ticket.id, stage: "TRANSCRIPT_ARCHIVE", category: diagnostic.category },
+    "Could not archive ticket transcript"
+  );
+  await notifyTicketTopicArchiveFailure(api, ticket, diagnostic.category);
+  return false;
+}
+
+function isAmbiguousTelegramOutcome(error: unknown): boolean {
+  return !(error instanceof GrammyError);
 }
 
 export async function logBanEvent(
@@ -351,45 +414,6 @@ function parseStoredThreadId(value: string | undefined): number | null {
 
 function supportLogsThreadSettingKey(staffChatId: number): string {
   return `${SUPPORT_LOGS_THREAD_SETTING_PREFIX}:${staffChatId}`;
-}
-
-async function sendTranscriptToSupportLogs(
-  api: BotApi,
-  db: SupportDatabase,
-  staffChatId: number,
-  ticket: TicketWithUser,
-  filePath: string,
-  filename: string,
-  options: SendTranscriptOptions = {}
-): Promise<TranscriptDelivery> {
-  const logsThreadId = options.recreateTopic
-    ? await recreateSupportLogsTopic(api, db, staffChatId)
-    : await initializeSupportLogsTopic(api, db, staffChatId);
-  const safeLogsThreadId =
-    logsThreadId === ticket.message_thread_id ? await recreateSupportLogsTopic(api, db, staffChatId) : logsThreadId;
-  let summaryMessageId: number | null = null;
-
-  try {
-    const summary = await api.sendMessage(staffChatId, formatTicketClosedLog(ticket), {
-      message_thread_id: safeLogsThreadId,
-    });
-    summaryMessageId = summary.message_id;
-
-    const document = await api.sendDocument(staffChatId, new InputFile(filePath, filename), {
-      message_thread_id: safeLogsThreadId,
-    });
-
-    return {
-      summaryMessageId: summary.message_id,
-      documentMessageId: document.message_id,
-    };
-  } catch (error) {
-    if (summaryMessageId !== null) {
-      await deleteMessageSafely(api, staffChatId, summaryMessageId);
-    }
-
-    throw error;
-  }
 }
 
 function buildTranscript(ticket: TicketWithUser, messages: TicketMessageRecord[]): string {
@@ -683,14 +707,6 @@ async function notifyTicketTopicArchiveFailure(api: BotApi, ticket: TicketWithUs
       },
       "Could not notify staff about archive failure"
     );
-  }
-}
-
-async function deleteMessageSafely(api: BotApi, chatId: number, messageId: number): Promise<void> {
-  try {
-    await api.deleteMessage(chatId, messageId);
-  } catch (error) {
-    logger.warn({ err: error, messageId }, "Could not delete incomplete support log summary");
   }
 }
 

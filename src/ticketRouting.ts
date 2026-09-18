@@ -31,6 +31,7 @@ interface CloseTicketOptions {
 interface StaffTextReplySource {
   chatId: number;
   messageId: number;
+  operationKey?: string;
 }
 
 interface TicketRoutingServiceDependencies {
@@ -53,15 +54,12 @@ export class TicketRoutingService {
     staffUser: User | undefined,
     source?: StaffTextReplySource
   ): Promise<number> {
-    const sent = await this.dependencies.api.sendMessage(ticket.user_telegram_id, truncate(text.trim(), 3500));
-
-    this.dependencies.db.addMessage({
+    const message = {
       ticketId: ticket.id,
       direction: "STAFF_TO_USER",
       sourceChatId: source?.chatId ?? ticket.staff_chat_id ?? this.requireStaffChatId(),
       sourceMessageId: source?.messageId ?? null,
       deliveryChatId: ticket.user_telegram_id,
-      deliveryMessageId: sent.message_id,
       fromTelegramId: staffUser?.id ?? null,
       fromUsername: usernameOf(staffUser),
       senderType: "STAFF",
@@ -71,8 +69,17 @@ export class TicketRoutingService {
       mediaType: null,
       filename: null,
       fileId: null,
-    });
-    return sent.message_id;
+    } as const;
+    if (!source?.operationKey) {
+      const sent = await this.dependencies.api.sendMessage(ticket.user_telegram_id, truncate(text.trim(), 3500));
+      this.dependencies.db.addMessage({ ...message, deliveryMessageId: sent.message_id });
+      return sent.message_id;
+    }
+    return this.deliverInteractiveStaffReply(source.operationKey, message, () =>
+      this.dependencies.api
+        .sendMessage(ticket.user_telegram_id, truncate(text.trim(), 3500))
+        .then((sent) => sent.message_id)
+    );
   }
 
   async handlePrivateUserMessage(ctx: Context): Promise<void> {
@@ -121,35 +128,35 @@ export class TicketRoutingService {
     }
 
     const content = getMessageContent(ctx.message);
+    const sourceMessageId = ctx.message.message_id;
     try {
       if (content.mediaType) {
-        const delivered = await this.deliverStaffMediaReplyToUser(
-          ctx.api,
-          this.requireStaffChatId(),
-          ticket,
-          ctx.message.message_id
+        const sourceChatId = ctx.chat.id;
+        await this.deliverInteractiveStaffReply(
+          `staff-message:${sourceChatId}:${sourceMessageId}`,
+          {
+            ticketId: ticket.id,
+            direction: "STAFF_TO_USER",
+            sourceChatId,
+            sourceMessageId,
+            deliveryChatId: ticket.user_telegram_id,
+            fromTelegramId: ctx.from?.id ?? null,
+            fromUsername: usernameOf(ctx.from),
+            senderType: "STAFF",
+            senderDisplayName: ctx.from ? displayTelegramUser(ctx.from) : "Support",
+            senderUsername: usernameOf(ctx.from),
+            text: content.text,
+            mediaType: content.mediaType,
+            filename: content.filename,
+            fileId: content.fileId,
+          },
+          () => this.deliverStaffMediaReplyToUser(ctx.api, this.requireStaffChatId(), ticket, sourceMessageId)
         );
-        this.dependencies.db.addMessage({
-          ticketId: ticket.id,
-          direction: "STAFF_TO_USER",
-          sourceChatId: ctx.chat.id,
-          sourceMessageId: ctx.message.message_id,
-          deliveryChatId: ticket.user_telegram_id,
-          deliveryMessageId: delivered,
-          fromTelegramId: ctx.from?.id ?? null,
-          fromUsername: usernameOf(ctx.from),
-          senderType: "STAFF",
-          senderDisplayName: ctx.from ? displayTelegramUser(ctx.from) : "Support",
-          senderUsername: usernameOf(ctx.from),
-          text: content.text,
-          mediaType: content.mediaType,
-          filename: content.filename,
-          fileId: content.fileId,
-        });
       } else {
         await this.deliverAndRecordStaffTextReply(ticket, content.text ?? "", ctx.from, {
           chatId: ctx.chat.id,
-          messageId: ctx.message.message_id,
+          messageId: sourceMessageId,
+          operationKey: `staff-message:${ctx.chat.id}:${sourceMessageId}`,
         });
       }
 
@@ -524,6 +531,53 @@ export class TicketRoutingService {
     const sourceChatId = ticket.staff_chat_id ?? staffChatId;
     const copied = await api.copyMessage(ticket.user_telegram_id, sourceChatId, sourceMessageId);
     return copied.message_id;
+  }
+
+  private async deliverInteractiveStaffReply(
+    operationKey: string,
+    message: Parameters<SupportDatabase["addMessage"]>[0],
+    send: () => Promise<number>
+  ): Promise<number> {
+    const intent = this.dependencies.db.createTicketOutboundDeliveryIntent({ ...message, operationKey });
+    if (!intent.created) {
+      if (intent.delivery.state === "DELIVERED" && intent.delivery.delivery_message_id !== null)
+        return intent.delivery.delivery_message_id;
+      throw new Error(`Interactive reply ${intent.delivery.state}; it will not be resent automatically.`);
+    }
+
+    try {
+      const deliveryMessageId = await send();
+      const finalized = this.dependencies.db.markTicketOutboundDeliveryDelivered(operationKey, deliveryMessageId);
+      if (finalized === null) throw new Error("Interactive reply delivery state changed before finalization");
+      logger.info(
+        { ticketId: message.ticketId, operationKey, state: "DELIVERED" },
+        "Interactive staff reply delivered"
+      );
+      return finalized;
+    } catch (error) {
+      const diagnostic = normalizeTelegramDeliveryError(error);
+      if (error instanceof GrammyError) {
+        this.dependencies.db.markTicketOutboundDeliveryFailed(
+          operationKey,
+          diagnostic.category,
+          diagnostic.description
+        );
+        logger.warn(
+          { ticketId: message.ticketId, operationKey, state: "FAILED", category: diagnostic.category },
+          "Interactive staff reply failed before Telegram delivery"
+        );
+      } else {
+        this.dependencies.db.markTicketOutboundDeliveryUnknown(
+          operationKey,
+          "Telegram delivery outcome could not be confirmed."
+        );
+        logger.warn(
+          { ticketId: message.ticketId, operationKey, state: "UNKNOWN_DELIVERY", category: diagnostic.category },
+          "Interactive staff reply has an unknown Telegram delivery outcome"
+        );
+      }
+      throw error;
+    }
   }
 
   private async pinMessageSafely(api: BotApi, chatId: number, messageId: number, ticketId: number): Promise<void> {

@@ -31,7 +31,7 @@ async function databasePath(): Promise<string> {
 }
 
 describe("manual moderation persistence", () => {
-  it("adds migration 24 once with safe manual defaults and hash-only adaptive storage", async () => {
+  it("adds migrations 24 and 25 once with safe durable defaults and preserved data", async () => {
     const filename = await databasePath();
     const legacy = new Database(filename);
     legacy.exec(`
@@ -72,6 +72,21 @@ describe("manual moderation persistence", () => {
         (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 24").get() as { count: number })
           .count,
         1
+      );
+      assert.equal(
+        (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 25").get() as { count: number })
+          .count,
+        1
+      );
+      assert.ok(
+        inspected
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ticket_outbound_deliveries'")
+          .get()
+      );
+      assert.ok(
+        inspected
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ticket_archive_deliveries'")
+          .get()
       );
       assert.equal(
         (inspected.prepare("SELECT value FROM sentinel WHERE id = 1").get() as { value: string }).value,
@@ -159,7 +174,7 @@ describe("manual moderation persistence", () => {
         (inspected.prepare("SELECT id FROM schema_migrations ORDER BY id").all() as Array<{ id: number }>).map(
           (row) => row.id
         ),
-        Array.from({ length: 24 }, (_, index) => index + 1)
+        Array.from({ length: 25 }, (_, index) => index + 1)
       );
       assert.equal(
         (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 23").get() as { count: number })

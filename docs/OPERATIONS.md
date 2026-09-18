@@ -14,6 +14,10 @@ OPS_HTTP_PORT=3000
 
 `GET /metrics` exposes process-lifetime counters and gauges for polling, aggregate update outcomes, tracked background work, database probes, automatic backup success/failure/freshness, and operational alert delivery. Metrics use only a fixed category set and never include chat, user, message, ticket, filesystem path, exception text, or secret labels. Backup freshness becomes stale after the greater of twice the configured interval or the configured interval plus one hour. Disabled backups report disabled and never become stale.
 
+## Delivery reconciliation
+
+Interactive staff replies and Support Logs archive delivery persist a durable intent before Telegram is called. A process interruption while an intent is `PENDING`, or any ambiguous transport outcome, becomes `UNKNOWN_DELIVERY` during startup recovery. The application deliberately does not resend those operations because Telegram has no application idempotency key. Operators must reconcile an unknown interactive reply or archive manually; confirmed archive stages can still safely continue or finalize without duplicate Support Logs sends.
+
 ```bash
 curl http://127.0.0.1:3000/healthz
 curl http://127.0.0.1:3000/readyz

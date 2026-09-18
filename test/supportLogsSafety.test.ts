@@ -197,4 +197,48 @@ describe("Support Logs topic safety", () => {
     assert.equal(harness.db.getTicket(ticket.id)?.archived_at, null);
     assert.equal(harness.countApiCalls("sendDocument"), 1);
   });
+
+  it("continues an archive after a durably recorded summary without resending it", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket({ messageThreadId: 5000 });
+    harness.db.addMessage({ ticketId: ticket.id, direction: "USER_TO_STAFF", text: "Archive me" });
+    harness.db.closeTicketRecord(ticket.id, { type: "STAFF", displayName: "@test_staff", username: "test_staff" });
+    harness.db.prepareTicketArchiveSummary(ticket.id, 8000);
+    harness.db.markTicketArchiveSummarySent(ticket.id, 9001);
+
+    assert.equal(await archiveTicketIfPossible(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), true);
+    assert.equal(harness.countApiCalls("sendMessage"), 0);
+    assert.equal(harness.countApiCalls("sendDocument"), 1);
+    assert.equal(harness.db.getTicket(ticket.id)?.logs_message_id, 9001);
+    assert.ok(harness.db.getTicket(ticket.id)?.archived_at);
+  });
+
+  it("finalizes a delivered archive locally without resending Support Logs content", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket({ messageThreadId: 5000 });
+    harness.db.addMessage({ ticketId: ticket.id, direction: "USER_TO_STAFF", text: "Finalize me" });
+    harness.db.closeTicketRecord(ticket.id, { type: "STAFF", displayName: "@test_staff", username: "test_staff" });
+    harness.db.prepareTicketArchiveSummary(ticket.id, 8000);
+    harness.db.markTicketArchiveSummarySent(ticket.id, 9002);
+    harness.db.prepareTicketArchiveDocument(ticket.id);
+    harness.db.markTicketArchiveDocumentDelivered(ticket.id, 9003);
+
+    assert.equal(await archiveTicketIfPossible(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), true);
+    assert.equal(harness.countApiCalls("sendMessage"), 0);
+    assert.equal(harness.countApiCalls("sendDocument"), 0);
+    assert.equal(harness.db.getTicket(ticket.id)?.logs_message_id, 9002);
+    assert.equal(harness.db.getTicket(ticket.id)?.transcript_message_id, 9003);
+  });
+
+  it("marks an orphan archive pending state unknown without Telegram replay", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket({ messageThreadId: 5000 });
+    harness.db.prepareTicketArchiveSummary(ticket.id, 8000);
+
+    assert.equal(harness.db.markPendingTicketArchiveDeliveriesUnknown(), 1);
+    assert.equal(harness.db.getTicketArchiveDelivery(ticket.id)?.state, "UNKNOWN_DELIVERY");
+    assert.equal(await archiveTicketIfPossible(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), false);
+    assert.equal(harness.countApiCalls("sendMessage"), 0);
+    assert.equal(harness.countApiCalls("sendDocument"), 0);
+  });
 });

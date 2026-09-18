@@ -10,7 +10,7 @@ Telegram operations can be interrupted after a remote side effect may have occur
 
 ## Decision
 
-Persist `UNKNOWN_DELIVERY` for ambiguous outcomes and require deliberate reconciliation rather than automatic user-facing retry. Staff-only work uses separately persisted recovery state where safe.
+Persist `UNKNOWN_DELIVERY` for ambiguous outcomes and require deliberate reconciliation rather than automatic user-facing retry. This applies to Ticket Batch, interactive staff replies, and each Support Logs archive delivery stage. Staff-only work uses separately persisted recovery state only where a prior Telegram outcome is durably confirmed.
 
 ## Consequences
 
