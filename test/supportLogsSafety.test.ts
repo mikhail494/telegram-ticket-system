@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { GrammyError } from "grammy";
 import type { Update } from "grammy/types";
+import type { NormalizedDeliveryError } from "../src/deliveryDiagnostics.js";
 import { TEST_STAFF_CHAT_ID, createBotHarness, type BotHarness, type RecordedApiCall } from "./helpers/botHarness.js";
 
 const { archiveClosedTicketsPendingUpload, archiveTicketIfPossible, getSupportLogsTopicInfo } =
@@ -273,14 +274,22 @@ describe("Support Logs topic safety", () => {
 
   it("marks an orphan archive pending state unknown without Telegram replay", async () => {
     const harness = createHarness();
-    const ticket = harness.seedTicket({ messageThreadId: 5000 });
+    const ticket = seedClosedTicketForArchive(harness);
+    const failures: NormalizedDeliveryError[] = [];
     assert.equal(harness.db.claimTicketArchiveSummary(ticket.id, 8000).claimed, true);
 
     assert.equal(harness.db.markPendingTicketArchiveDeliveriesUnknown(), 1);
     assert.equal(harness.db.getTicketArchiveDelivery(ticket.id)?.state, "UNKNOWN_DELIVERY");
-    assert.equal(await archiveTicketIfPossible(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), false);
+    assert.equal(
+      await archiveTicketIfPossible(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, ticket.id, {
+        onFailure: (diagnostic) => failures.push(diagnostic),
+      }),
+      false
+    );
     assert.equal(harness.countApiCalls("sendMessage"), 0);
     assert.equal(harness.countApiCalls("sendDocument"), 0);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0]?.permanence, "UNKNOWN_DELIVERY");
   });
 
   it("purges delivered interactive payloads only after their ticket archive is finalized", async () => {
@@ -597,6 +606,7 @@ describe("Support Logs topic safety", () => {
   it("never restages or resends an archive after an ambiguous document outcome", async () => {
     const harness = createHarness();
     const ticket = seedClosedTicketForArchive(harness);
+    const failures: NormalizedDeliveryError[] = [];
     let summarySends = 0;
     let documentSends = 0;
     const api = archiveApi({
@@ -607,10 +617,42 @@ describe("Support Logs topic safety", () => {
       },
     });
 
-    assert.equal(await archiveTicketIfPossible(api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), false);
+    assert.equal(
+      await archiveTicketIfPossible(api, harness.db, TEST_STAFF_CHAT_ID, ticket.id, {
+        onFailure: (diagnostic) => failures.push(diagnostic),
+      }),
+      false
+    );
     assert.equal(harness.db.getTicketArchiveDelivery(ticket.id)?.state, "UNKNOWN_DELIVERY");
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0]?.permanence, "UNKNOWN_DELIVERY");
     assert.equal(await archiveTicketIfPossible(api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), false);
     assert.equal(summarySends, 1);
     assert.equal(documentSends, 1);
+  });
+
+  it("reports an ambiguous summary outcome as unknown without an automatic resend", async () => {
+    const harness = createHarness();
+    const ticket = seedClosedTicketForArchive(harness);
+    const failures: NormalizedDeliveryError[] = [];
+    let summarySends = 0;
+    const api = archiveApi({
+      sendMessage: async () => {
+        summarySends += 1;
+        throw new Error("Synthetic transport interruption");
+      },
+    });
+
+    assert.equal(
+      await archiveTicketIfPossible(api, harness.db, TEST_STAFF_CHAT_ID, ticket.id, {
+        onFailure: (diagnostic) => failures.push(diagnostic),
+      }),
+      false
+    );
+    assert.equal(harness.db.getTicketArchiveDelivery(ticket.id)?.state, "UNKNOWN_DELIVERY");
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0]?.permanence, "UNKNOWN_DELIVERY");
+    assert.equal(await archiveTicketIfPossible(api, harness.db, TEST_STAFF_CHAT_ID, ticket.id), false);
+    assert.equal(summarySends, 1);
   });
 });

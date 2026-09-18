@@ -369,6 +369,55 @@ describe("ticket batch Telegram workflow", () => {
     );
   });
 
+  it("leaves an orphan archive unknown for manual Batch reconciliation without retry scheduling", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket({ user: { id: 2805 }, messageThreadId: 72805 });
+    harness.db.addMessage({ ticketId: ticket.id, direction: "USER_TO_STAFF", text: "Keep the archive durable." });
+    const token = getTicketSnapshotToken(
+      harness.db.getTicketWithUser(ticket.id)!,
+      harness.db.listMessagesChronological(ticket.id)
+    );
+    harness.db.createTicketBatchExport({
+      exportId: "export_silent_unknown_archive",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      selectionMode: "all_active",
+      ticketCount: 1,
+      items: [{ ticketId: ticket.id, snapshotToken: token }],
+    });
+    harness.db.createTicketBatchAnswerPackage({
+      answerPackageId: "silent_unknown_archive",
+      exportId: "export_silent_unknown_archive",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      packageHash: "sha256:silent_unknown_archive",
+      packageCreatedAt: "2026-07-30T00:00:00.000Z",
+      items: [{ ticket_id: ticket.id, snapshot_token: token, action: "silent_close", reply_text: null }],
+    });
+    harness.db.claimTicketBatchAnswerPackage("silent_unknown_archive", TEST_STAFF_CHAT_ID);
+    harness.db.claimTicketBatchAnswerItem("silent_unknown_archive", ticket.id);
+    harness.db.closeTicketRecord(ticket.id, {
+      type: "STAFF",
+      displayName: "Synthetic Staff",
+      username: "synthetic_staff",
+    });
+    assert.equal(harness.db.claimTicketArchiveSummary(ticket.id, 8000).claimed, true);
+    assert.equal(harness.db.markPendingTicketArchiveDeliveriesUnknown(), 1);
+    harness.clearApiCalls();
+
+    await harness.bot.recoverPendingTicketBatchStaffOperations();
+
+    const item = harness.db.listTicketBatchAnswerItems("silent_unknown_archive")[0];
+    assert.equal(item?.state, "APPLYING");
+    assert.equal(item?.topic_echo_next_retry_at, "9999-12-31T23:59:59.999Z");
+    assert.equal(harness.countApiCalls("sendDocument"), 0);
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_thread_id === 8000),
+      false
+    );
+  });
+
   it("sends one self-contained export document without copying attachments into the staff chat", async () => {
     const harness = createHarness();
     const active = harness.seedTicket({ messageThreadId: 5000 });

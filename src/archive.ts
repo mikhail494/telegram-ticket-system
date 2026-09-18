@@ -179,6 +179,7 @@ export async function archiveTicketIfPossible(
 
   let delivery = db.getTicketArchiveDelivery(ticket.id);
   if (delivery?.state === "UNKNOWN_DELIVERY") {
+    reportUnknownArchiveDelivery(options, delivery);
     logger.warn({ ticketId: ticket.id, state: delivery.state }, "Ticket archive requires manual reconciliation");
     return false;
   }
@@ -215,6 +216,7 @@ export async function archiveTicketIfPossible(
       } catch (error) {
         if (isAmbiguousTelegramOutcome(error)) {
           db.markTicketArchiveUnknown(ticket.id, "Support Logs summary delivery outcome could not be confirmed.");
+          reportUnknownArchiveDelivery(options, undefined, error);
           logger.warn({ ticketId: ticket.id, state: "UNKNOWN_DELIVERY" }, "Support Logs summary outcome is unknown");
           return false;
         }
@@ -247,7 +249,11 @@ export async function archiveTicketIfPossible(
   }
 
   delivery = db.getTicketArchiveDelivery(ticket.id);
-  if (!delivery || delivery.state === "UNKNOWN_DELIVERY") return false;
+  if (!delivery) return false;
+  if (delivery.state === "UNKNOWN_DELIVERY") {
+    reportUnknownArchiveDelivery(options, delivery);
+    return false;
+  }
   if (delivery.state === "DOCUMENT_PENDING" || delivery.state === "SUMMARY_PENDING") return false;
   if (delivery.state === "DELIVERED") {
     const finalized = db.finalizeTicketArchiveDelivery(ticket.id);
@@ -278,6 +284,7 @@ export async function archiveTicketIfPossible(
     } catch (error) {
       if (isAmbiguousTelegramOutcome(error)) {
         db.markTicketArchiveUnknown(ticket.id, "Support Logs transcript delivery outcome could not be confirmed.");
+        reportUnknownArchiveDelivery(options, undefined, error);
         logger.warn({ ticketId: ticket.id, state: "UNKNOWN_DELIVERY" }, "Support Logs document outcome is unknown");
         return false;
       }
@@ -360,6 +367,7 @@ async function recordArchiveFailure(
   const diagnostic = normalizeTelegramDeliveryError(error);
   if (isAmbiguousTelegramOutcome(error)) {
     db.markTicketArchiveUnknown(ticket.id, "Support Logs delivery outcome could not be confirmed.");
+    reportUnknownArchiveDelivery(options, undefined, error);
     logger.warn({ ticketId: ticket.id, state: "UNKNOWN_DELIVERY" }, "Support Logs archive outcome is unknown");
     return false;
   }
@@ -371,6 +379,28 @@ async function recordArchiveFailure(
   );
   await notifyTicketTopicArchiveFailure(api, ticket, diagnostic.category);
   return false;
+}
+
+function reportUnknownArchiveDelivery(
+  options: ArchiveAttemptOptions,
+  delivery?: {
+    failure_category: NormalizedDeliveryError["category"] | null;
+    failure_description: string | null;
+    updated_at: string;
+  },
+  error?: unknown
+): void {
+  const normalized = error === undefined ? undefined : normalizeTelegramDeliveryError(error);
+  options.onFailure?.({
+    category: delivery?.failure_category ?? normalized?.category ?? "UNKNOWN_TELEGRAM_ERROR",
+    permanence: "UNKNOWN_DELIVERY",
+    method: normalized?.method ?? null,
+    telegramErrorCode: normalized?.telegramErrorCode ?? null,
+    httpStatus: normalized?.httpStatus ?? null,
+    retryAfterSeconds: normalized?.retryAfterSeconds ?? null,
+    description: delivery?.failure_description ?? normalized?.description ?? null,
+    occurredAt: normalized?.occurredAt ?? delivery?.updated_at ?? new Date().toISOString(),
+  });
 }
 
 function isAmbiguousTelegramOutcome(error: unknown): boolean {
