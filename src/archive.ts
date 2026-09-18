@@ -17,6 +17,7 @@ type BotApi = Context["api"];
 
 interface ArchiveAttemptOptions {
   onFailure?: (diagnostic: NormalizedDeliveryError) => void;
+  topicReplacementAttempted?: boolean;
 }
 
 export interface ArchiveRecoveryResult {
@@ -195,13 +196,20 @@ export async function archiveTicketIfPossible(
 
   if (!delivery || delivery.state === "FAILED") {
     let logsThreadId = await initializeSupportLogsTopic(api, db, staffChatId);
-    delivery = db.prepareTicketArchiveSummary(ticket.id, logsThreadId);
-    if (delivery.state === "SUMMARY_PENDING") {
+    const summaryClaim = db.claimTicketArchiveSummary(ticket.id, logsThreadId);
+    delivery = summaryClaim.delivery;
+    if (summaryClaim.claimed) {
       try {
         const summary = await api.sendMessage(staffChatId, formatTicketClosedLog(ticket), {
           message_thread_id: logsThreadId,
         });
-        db.markTicketArchiveSummarySent(ticket.id, summary.message_id);
+        if (!db.markTicketArchiveSummarySent(ticket.id, summary.message_id)) {
+          logger.error(
+            { ticketId: ticket.id, state: "SUMMARY_PENDING" },
+            "Could not persist Support Logs summary delivery"
+          );
+          return false;
+        }
         logger.info({ ticketId: ticket.id, state: "SUMMARY_SENT" }, "Support Logs archive summary delivered");
       } catch (error) {
         if (isAmbiguousTelegramOutcome(error)) {
@@ -213,12 +221,20 @@ export async function archiveTicketIfPossible(
         db.markTicketArchiveFailed(ticket.id, diagnostic.category, diagnostic.description);
         if (isForumTopicUnavailable(error)) {
           logsThreadId = await recreateSupportLogsTopic(api, db, staffChatId);
-          db.prepareTicketArchiveSummary(ticket.id, logsThreadId);
+          const replacementClaim = db.claimTicketArchiveSummary(ticket.id, logsThreadId);
+          if (!replacementClaim.claimed) return false;
           try {
             const summary = await api.sendMessage(staffChatId, formatTicketClosedLog(ticket), {
               message_thread_id: logsThreadId,
             });
-            db.markTicketArchiveSummarySent(ticket.id, summary.message_id);
+            if (!db.markTicketArchiveSummarySent(ticket.id, summary.message_id)) {
+              logger.error(
+                { ticketId: ticket.id, state: "SUMMARY_PENDING" },
+                "Could not persist replacement Support Logs summary delivery"
+              );
+              return false;
+            }
+            logger.info({ ticketId: ticket.id, state: "SUMMARY_SENT" }, "Replacement Support Logs summary delivered");
           } catch (retryError) {
             return await recordArchiveFailure(api, db, ticket, retryError, options);
           }
@@ -226,24 +242,12 @@ export async function archiveTicketIfPossible(
           return await recordArchiveFailure(api, db, ticket, error, options);
         }
       }
-    } else if (delivery.state === "UNKNOWN_DELIVERY") {
-      return false;
     }
   }
 
   delivery = db.getTicketArchiveDelivery(ticket.id);
   if (!delivery || delivery.state === "UNKNOWN_DELIVERY") return false;
-  if (delivery.state === "DOCUMENT_PENDING") {
-    db.markTicketArchiveUnknown(
-      ticket.id,
-      "Process encountered a pre-existing pending Support Logs document delivery."
-    );
-    return false;
-  }
-  if (delivery.state === "SUMMARY_PENDING") {
-    db.markTicketArchiveUnknown(ticket.id, "Process encountered a pre-existing pending Support Logs summary delivery.");
-    return false;
-  }
+  if (delivery.state === "DOCUMENT_PENDING" || delivery.state === "SUMMARY_PENDING") return false;
   if (delivery.state === "DELIVERED") {
     const finalized = db.finalizeTicketArchiveDelivery(ticket.id);
     if (finalized) await removeTicketTopicAfterArchive(api, ticket);
@@ -254,15 +258,21 @@ export async function archiveTicketIfPossible(
   const filename = `ticket-${ticket.id}-transcript.txt`;
   const tempFile = await writeTemporaryTranscript(filename, transcript);
   try {
-    let documentDelivery = db.prepareTicketArchiveDocument(ticket.id);
-    if (!documentDelivery || documentDelivery.state !== "DOCUMENT_PENDING") return false;
-    const logsThreadId = documentDelivery.logs_thread_id;
+    const documentClaim = db.claimTicketArchiveDocument(ticket.id);
+    if (!documentClaim?.claimed) return false;
+    const logsThreadId = documentClaim.delivery.logs_thread_id;
     if (logsThreadId === null) throw new Error("Support Logs archive delivery has no topic");
     try {
       const document = await api.sendDocument(staffChatId, new InputFile(tempFile.filePath, filename), {
         message_thread_id: logsThreadId,
       });
-      db.markTicketArchiveDocumentDelivered(ticket.id, document.message_id);
+      if (!db.markTicketArchiveDocumentDelivered(ticket.id, document.message_id)) {
+        logger.error(
+          { ticketId: ticket.id, state: "DOCUMENT_PENDING" },
+          "Could not persist Support Logs document delivery"
+        );
+        return false;
+      }
       logger.info({ ticketId: ticket.id, state: "DELIVERED" }, "Support Logs archive document delivered");
     } catch (error) {
       if (isAmbiguousTelegramOutcome(error)) {
@@ -271,17 +281,17 @@ export async function archiveTicketIfPossible(
         return false;
       }
       if (!isForumTopicUnavailable(error)) return await recordArchiveFailure(api, db, ticket, error, options);
+      if (options.topicReplacementAttempted) return await recordArchiveFailure(api, db, ticket, error, options);
       const replacementTopic = await recreateSupportLogsTopic(api, db, staffChatId);
-      db.setTicketArchiveLogsThread(ticket.id, replacementTopic);
-      documentDelivery = db.prepareTicketArchiveDocument(ticket.id);
-      try {
-        const document = await api.sendDocument(staffChatId, new InputFile(tempFile.filePath, filename), {
-          message_thread_id: replacementTopic,
-        });
-        db.markTicketArchiveDocumentDelivered(ticket.id, document.message_id);
-      } catch (retryError) {
-        return await recordArchiveFailure(api, db, ticket, retryError, options);
-      }
+      if (!db.restageTicketArchiveForReplacementTopic(ticket.id, replacementTopic)) return false;
+      logger.info(
+        { ticketId: ticket.id, logsThreadId: replacementTopic },
+        "Restaged Support Logs archive for replacement topic"
+      );
+      return await archiveTicketIfPossible(api, db, staffChatId, ticketId, {
+        ...options,
+        topicReplacementAttempted: true,
+      });
     }
     const finalized = db.finalizeTicketArchiveDelivery(ticket.id);
     if (finalized) await removeTicketTopicAfterArchive(api, ticket);

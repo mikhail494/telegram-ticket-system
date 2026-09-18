@@ -333,6 +333,12 @@ describe("Staff ticket replies", () => {
 
     assert.equal(userSendMessages(harness).length, 0);
     assert.equal(harness.db.listMessagesChronological(ticket.id).length, 0);
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some((call) => call.payload.text === "Delivery outcome is unknown; the reply was not resent automatically."),
+      true
+    );
   });
 
   it("does not resend an UNKNOWN_DELIVERY interactive reply", async () => {
@@ -355,6 +361,12 @@ describe("Staff ticket replies", () => {
 
     assert.equal(userSendMessages(harness).length, 0);
     assert.equal(harness.db.getTicketOutboundDelivery(operationKey)?.state, "UNKNOWN_DELIVERY");
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some((call) => call.payload.text === "Delivery outcome is unknown; the reply was not resent automatically."),
+      true
+    );
   });
 
   it("converts orphan pending interactive replies to UNKNOWN_DELIVERY without a Telegram send", () => {

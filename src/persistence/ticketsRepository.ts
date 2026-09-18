@@ -15,6 +15,7 @@ import type {
   UserInput,
   UserRecord,
   CreateTicketOutboundDeliveryIntentInput,
+  TicketArchiveDeliveryClaim,
   TicketArchiveDeliveryRecord,
   TicketOutboundDeliveryRecord,
 } from "./types.js";
@@ -424,61 +425,73 @@ export class TicketRepository {
       TicketArchiveDeliveryRecord | undefined;
   }
 
-  prepareTicketArchiveSummary(ticketId: number, logsThreadId: number): TicketArchiveDeliveryRecord {
-    const existing = this.getTicketArchiveDelivery(ticketId);
-    if (!existing) {
-      this.db
-        .prepare(
-          `INSERT INTO ticket_archive_deliveries (ticket_id, state, logs_thread_id, created_at, updated_at)
-           VALUES (?, 'SUMMARY_PENDING', ?, ?, ?)`
-        )
-        .run(ticketId, logsThreadId, now(), now());
-    } else if (existing.state === "FAILED" && existing.summary_message_id === null) {
+  claimTicketArchiveSummary(ticketId: number, logsThreadId: number): TicketArchiveDeliveryClaim {
+    const timestamp = now();
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO ticket_archive_deliveries (ticket_id, state, logs_thread_id, created_at, updated_at)
+         VALUES (?, 'SUMMARY_PENDING', ?, ?, ?)
+         ON CONFLICT(ticket_id) DO NOTHING`
+      )
+      .run(ticketId, logsThreadId, timestamp, timestamp);
+    if (inserted.changes === 1) return { claimed: true, delivery: this.getTicketArchiveDelivery(ticketId)! };
+
+    const retried = this.db
+      .prepare(
+        `UPDATE ticket_archive_deliveries
+         SET state = 'SUMMARY_PENDING', logs_thread_id = ?, failure_category = NULL, failure_description = NULL, updated_at = ?
+         WHERE ticket_id = ? AND state = 'FAILED' AND summary_message_id IS NULL`
+      )
+      .run(logsThreadId, timestamp, ticketId);
+    return { claimed: retried.changes === 1, delivery: this.getTicketArchiveDelivery(ticketId)! };
+  }
+
+  markTicketArchiveSummarySent(ticketId: number, messageId: number): boolean {
+    return (
       this.db
         .prepare(
           `UPDATE ticket_archive_deliveries
-           SET state = 'SUMMARY_PENDING', logs_thread_id = ?, failure_category = NULL, failure_description = NULL, updated_at = ?
-           WHERE ticket_id = ?`
-        )
-        .run(logsThreadId, now(), ticketId);
-    }
-    return this.getTicketArchiveDelivery(ticketId)!;
-  }
-
-  markTicketArchiveSummarySent(ticketId: number, messageId: number): void {
-    this.db
-      .prepare(
-        `UPDATE ticket_archive_deliveries
          SET state = 'SUMMARY_SENT', summary_message_id = ?, failure_category = NULL, failure_description = NULL, updated_at = ?
          WHERE ticket_id = ? AND state = 'SUMMARY_PENDING'`
-      )
-      .run(messageId, now(), ticketId);
+        )
+        .run(messageId, now(), ticketId).changes === 1
+    );
   }
 
-  setTicketArchiveLogsThread(ticketId: number, logsThreadId: number): void {
-    this.db
-      .prepare("UPDATE ticket_archive_deliveries SET logs_thread_id = ?, updated_at = ? WHERE ticket_id = ?")
-      .run(logsThreadId, now(), ticketId);
-  }
-
-  prepareTicketArchiveDocument(ticketId: number): TicketArchiveDeliveryRecord | undefined {
-    this.db
+  claimTicketArchiveDocument(ticketId: number): TicketArchiveDeliveryClaim | undefined {
+    const updated = this.db
       .prepare(
         `UPDATE ticket_archive_deliveries SET state = 'DOCUMENT_PENDING', updated_at = ?
          WHERE ticket_id = ? AND state = 'SUMMARY_SENT'`
       )
       .run(now(), ticketId);
-    return this.getTicketArchiveDelivery(ticketId);
+    const delivery = this.getTicketArchiveDelivery(ticketId);
+    return delivery ? { claimed: updated.changes === 1, delivery } : undefined;
   }
 
-  markTicketArchiveDocumentDelivered(ticketId: number, messageId: number): void {
-    this.db
-      .prepare(
-        `UPDATE ticket_archive_deliveries
+  markTicketArchiveDocumentDelivered(ticketId: number, messageId: number): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE ticket_archive_deliveries
          SET state = 'DELIVERED', document_message_id = ?, failure_category = NULL, failure_description = NULL, updated_at = ?
          WHERE ticket_id = ? AND state = 'DOCUMENT_PENDING'`
-      )
-      .run(messageId, now(), ticketId);
+        )
+        .run(messageId, now(), ticketId).changes === 1
+    );
+  }
+
+  restageTicketArchiveForReplacementTopic(ticketId: number, logsThreadId: number): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE ticket_archive_deliveries
+           SET state = 'FAILED', logs_thread_id = ?, summary_message_id = NULL, document_message_id = NULL,
+               failure_category = NULL, failure_description = NULL, updated_at = ?
+           WHERE ticket_id = ? AND state = 'DOCUMENT_PENDING'`
+        )
+        .run(logsThreadId, now(), ticketId).changes === 1
+    );
   }
 
   markTicketArchiveFailed(ticketId: number, failureCategory: string, failureDescription: string | null): void {

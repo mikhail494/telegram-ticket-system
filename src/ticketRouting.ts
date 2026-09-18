@@ -34,6 +34,12 @@ interface StaffTextReplySource {
   operationKey?: string;
 }
 
+export class InteractiveReplyNotResentError extends Error {
+  constructor(readonly state: "PENDING" | "UNKNOWN_DELIVERY") {
+    super("Delivery outcome is unknown; the reply was not resent automatically.");
+  }
+}
+
 interface TicketRoutingServiceDependencies {
   db: SupportDatabase;
   api: BotApi;
@@ -166,12 +172,11 @@ export class TicketRoutingService {
       }
     } catch (error) {
       logger.error({ err: error, ticketId: ticket.id }, "Could not deliver staff reply to user");
-      await this.sendStaffTopicNotice(
-        ctx.api,
-        this.requireStaffChatId(),
-        ticket,
-        `Could not deliver staff reply for ticket #${ticket.id} to user ${ticket.user_telegram_id}: ${describeError(error)}`
-      );
+      const staffNotice =
+        error instanceof InteractiveReplyNotResentError
+          ? "Delivery outcome is unknown; the reply was not resent automatically."
+          : `Could not deliver staff reply for ticket #${ticket.id} to user ${ticket.user_telegram_id}: ${describeError(error)}`;
+      await this.sendStaffTopicNotice(ctx.api, this.requireStaffChatId(), ticket, staffNotice);
     }
   }
 
@@ -542,6 +547,9 @@ export class TicketRoutingService {
     if (!intent.created) {
       if (intent.delivery.state === "DELIVERED" && intent.delivery.delivery_message_id !== null)
         return intent.delivery.delivery_message_id;
+      if (intent.delivery.state === "PENDING" || intent.delivery.state === "UNKNOWN_DELIVERY") {
+        throw new InteractiveReplyNotResentError(intent.delivery.state);
+      }
       throw new Error(`Interactive reply ${intent.delivery.state}; it will not be resent automatically.`);
     }
 

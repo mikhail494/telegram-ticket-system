@@ -50,6 +50,7 @@ import type {
   TicketFollowUpState,
   TicketMessageRecord,
   TicketArchiveDeliveryRecord,
+  TicketArchiveDeliveryClaim,
   TicketOutboundDeliveryRecord,
   TicketRecord,
   TicketStatus,
@@ -266,24 +267,24 @@ export class SupportDatabase {
     return this.tickets.getTicketArchiveDelivery(ticketId);
   }
 
-  prepareTicketArchiveSummary(ticketId: number, logsThreadId: number): TicketArchiveDeliveryRecord {
-    return this.tickets.prepareTicketArchiveSummary(ticketId, logsThreadId);
+  claimTicketArchiveSummary(ticketId: number, logsThreadId: number): TicketArchiveDeliveryClaim {
+    return this.tickets.claimTicketArchiveSummary(ticketId, logsThreadId);
   }
 
-  markTicketArchiveSummarySent(ticketId: number, messageId: number): void {
+  markTicketArchiveSummarySent(ticketId: number, messageId: number): boolean {
     return this.tickets.markTicketArchiveSummarySent(ticketId, messageId);
   }
 
-  setTicketArchiveLogsThread(ticketId: number, logsThreadId: number): void {
-    return this.tickets.setTicketArchiveLogsThread(ticketId, logsThreadId);
+  claimTicketArchiveDocument(ticketId: number): TicketArchiveDeliveryClaim | undefined {
+    return this.tickets.claimTicketArchiveDocument(ticketId);
   }
 
-  prepareTicketArchiveDocument(ticketId: number): TicketArchiveDeliveryRecord | undefined {
-    return this.tickets.prepareTicketArchiveDocument(ticketId);
-  }
-
-  markTicketArchiveDocumentDelivered(ticketId: number, messageId: number): void {
+  markTicketArchiveDocumentDelivered(ticketId: number, messageId: number): boolean {
     return this.tickets.markTicketArchiveDocumentDelivered(ticketId, messageId);
+  }
+
+  restageTicketArchiveForReplacementTopic(ticketId: number, logsThreadId: number): boolean {
+    return this.tickets.restageTicketArchiveForReplacementTopic(ticketId, logsThreadId);
   }
 
   markTicketArchiveFailed(ticketId: number, failureCategory: string, failureDescription: string | null): void {

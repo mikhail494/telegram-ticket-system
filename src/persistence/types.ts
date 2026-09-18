@@ -234,6 +234,11 @@ export interface TicketArchiveDeliveryRecord {
   updated_at: string;
 }
 
+export interface TicketArchiveDeliveryClaim {
+  claimed: boolean;
+  delivery: TicketArchiveDeliveryRecord;
+}
+
 export interface BanUserInput {
   userTelegramId: number;
   username?: string | null;
