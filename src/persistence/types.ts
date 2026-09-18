@@ -191,6 +191,54 @@ export interface AddMessageInput {
   fileId?: string | null;
 }
 
+export type TicketOutboundDeliveryState = "PENDING" | "DELIVERED" | "FAILED" | "UNKNOWN_DELIVERY";
+
+export interface TicketOutboundDeliveryRecord {
+  operation_key: string;
+  ticket_id: number;
+  state: TicketOutboundDeliveryState;
+  source_chat_id: number | null;
+  source_message_id: number | null;
+  delivery_chat_id: number | null;
+  delivery_message_id: number | null;
+  from_telegram_id: number | null;
+  from_username: string | null;
+  sender_type: MessageSenderType | null;
+  sender_display_name: string | null;
+  sender_username: string | null;
+  text: string | null;
+  media_type: string | null;
+  filename: string | null;
+  file_id: string | null;
+  failure_category: DeliveryErrorCategory | null;
+  failure_description: string | null;
+  updated_at: string;
+}
+
+export interface CreateTicketOutboundDeliveryIntentInput extends AddMessageInput {
+  operationKey: string;
+}
+
+export type TicketArchiveDeliveryState =
+  "SUMMARY_PENDING" | "SUMMARY_SENT" | "DOCUMENT_PENDING" | "DELIVERED" | "UNKNOWN_DELIVERY" | "FAILED";
+
+export interface TicketArchiveDeliveryRecord {
+  ticket_id: number;
+  state: TicketArchiveDeliveryState;
+  logs_thread_id: number | null;
+  summary_message_id: number | null;
+  document_message_id: number | null;
+  failure_category: DeliveryErrorCategory | null;
+  failure_description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TicketArchiveDeliveryClaim {
+  claimed: boolean;
+  delivery: TicketArchiveDeliveryRecord;
+}
+
 export interface BanUserInput {
   userTelegramId: number;
   username?: string | null;

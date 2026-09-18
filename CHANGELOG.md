@@ -7,6 +7,7 @@ All notable changes to this project are documented in this file. This project fo
 ### Fixed
 
 - Ticket Batch exports no longer fail entirely when Telegram cannot resolve a historical attachment file_id; the attachment is recorded as unavailable instead.
+- Interactive staff replies and Support Logs transcript archives now persist delivery intent and confirmed Telegram message IDs around external sends. Ambiguous outcomes become `UNKNOWN_DELIVERY` and require reconciliation instead of blind resend.
 
 ### Changed
 

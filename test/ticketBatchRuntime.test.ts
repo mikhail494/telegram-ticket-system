@@ -457,4 +457,70 @@ describe("ticket batch runtime ownership", () => {
     await backgroundRuns[0];
     assert.equal(calls.includes(-1002), true);
   });
+
+  it("does not schedule a recovery timer when an archive reports unknown delivery", async () => {
+    const retries: Array<{ retryAt: string; category: string | null }> = [];
+    const timers: Array<{ callback: () => void; delayMs: number; unref(): void }> = [];
+    const item = {
+      answer_package_id: "package-a",
+      ticket_id: 1,
+      action: "silent_close",
+      state: "APPLYING",
+      snapshot_token: "snapshot",
+    };
+    const database = {
+      listInvalidTicketBatchSuccessEchoes: () => [],
+      listClosedTicketBatchReplyAndClosePendingEchoes: () => [],
+      listPendingTicketBatchFailureEvents: () => [],
+      listPendingTicketBatchTopicEchoes: () => [],
+      listPendingTicketBatchReplyAndCloseContinuations: () => [],
+      listPendingTicketBatchSilentCloseContinuations: () => [item],
+      listTicketBatchAnswerItems: () => [item],
+      getTicketWithUser: () => ({ id: 1, status: "CLOSED", staff_chat_id: -1001, archived_at: null }),
+      recordTicketBatchTopicEcho: () => undefined,
+      recordTicketBatchFailureEvent: () => undefined,
+      updateTicketBatchAnswerItem: () => undefined,
+      setTicketBatchPostDeliveryRetry: (
+        _packageId: string,
+        _ticketId: number,
+        retryAt: string,
+        category: string | null
+      ) => retries.push({ retryAt, category }),
+      finalizeTicketBatchAnswerPackage: () => undefined,
+      listPendingTicketBatchFinalSummaries: () => [],
+      getNextTicketBatchStaffRetryAt: () => null,
+    } as unknown as SupportDatabase;
+    const runtime = new TicketBatchRuntime({
+      db: database,
+      installation: { requireStaffChatId: () => -1001 } as unknown as InstallationService,
+      backgroundTasks: { run: () => true },
+      closeTicket: async (
+        _ticketId: number,
+        options: { onArchiveFailure: (diagnostic: NormalizedDeliveryError) => void }
+      ) => {
+        options.onArchiveFailure({
+          category: "UNKNOWN_TELEGRAM_ERROR",
+          permanence: "UNKNOWN_DELIVERY",
+          method: null,
+          telegramErrorCode: null,
+          httpStatus: null,
+          retryAfterSeconds: null,
+          description: null,
+          occurredAt: "2026-01-01T00:00:00.000Z",
+        });
+      },
+      staffActor: () => ({ type: "SYSTEM", displayName: "System", username: null, telegramId: null }),
+      createRecoveryTimer: (callback: () => void, delayMs: number) => {
+        const timer = { callback, delayMs, unref: () => undefined };
+        timers.push(timer);
+        return timer as unknown as ReturnType<typeof setTimeout>;
+      },
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+    } as unknown as TicketBatchRuntimeDependencies);
+
+    await runtime.recoverPendingStaffOperations();
+
+    assert.deepEqual(retries, [{ retryAt: "9999-12-31T23:59:59.999Z", category: "UNKNOWN_TELEGRAM_ERROR" }]);
+    assert.deepEqual(timers, []);
+  });
 });

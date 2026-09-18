@@ -451,6 +451,58 @@ describe("Quick Replies callbacks", () => {
     assertCallbackAnswer(harness, "Quick reply sent.");
   });
 
+  it("does not resend a Quick Reply when its callback is replayed", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const update = buildStaffCallbackUpdate({
+      callbackId: "replayed-quick-reply",
+      callbackData: `qr:template:${ticket.id}:ask_uid`,
+    });
+
+    await harness.bot.handleUpdate(update);
+    await harness.bot.handleUpdate(update);
+
+    assert.equal(
+      harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id).length,
+      1
+    );
+    assert.equal(harness.db.getTicketOutboundDelivery("quick-reply:replayed-quick-reply")?.state, "DELIVERED");
+  });
+
+  it("reports an unknown Quick Reply delivery outcome without claiming a confirmed failure", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const callbackId = "unknown-quick-reply";
+    harness.db.createTicketOutboundDeliveryIntent({
+      operationKey: `quick-reply:${callbackId}`,
+      ticketId: ticket.id,
+      direction: "STAFF_TO_USER",
+      deliveryChatId: ticket.user_telegram_id,
+      text: "Existing uncertain Quick Reply",
+      senderType: "STAFF",
+    });
+    harness.db.markTicketOutboundDeliveryUnknown(`quick-reply:${callbackId}`, "Synthetic ambiguous outcome");
+
+    await harness.bot.handleUpdate(
+      buildStaffCallbackUpdate({
+        callbackId,
+        callbackData: `qr:template:${ticket.id}:ask_uid`,
+      })
+    );
+
+    assert.equal(
+      harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id).length,
+      0
+    );
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some((call) => call.payload.text === "Delivery outcome is unknown; the reply was not resent automatically."),
+      true
+    );
+    assertCallbackAnswer(harness, "Delivery outcome is unknown; the reply was not resent automatically.", true);
+  });
+
   it("does not retry a successful operation when callback acknowledgement fails", async () => {
     const harness = createHarness();
     const ticket = harness.seedTicket();

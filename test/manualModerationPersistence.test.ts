@@ -31,7 +31,128 @@ async function databasePath(): Promise<string> {
 }
 
 describe("manual moderation persistence", () => {
-  it("adds migration 24 once with safe manual defaults and hash-only adaptive storage", async () => {
+  it("upgrades a version-24 ticket database without rewriting proven transcript or archive history", async () => {
+    const filename = await databasePath();
+    const legacy = new Database(filename);
+    const timestamp = "2026-09-17T00:00:00.000Z";
+    legacy.exec(`
+      CREATE TABLE schema_migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);
+      CREATE TABLE users (
+        telegram_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE tickets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_telegram_id INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        staff_chat_id INTEGER,
+        message_thread_id INTEGER,
+        staff_message_id INTEGER,
+        logs_message_id INTEGER,
+        transcript_message_id INTEGER,
+        archived_at TEXT,
+        closed_by_type TEXT,
+        closed_by_display_name TEXT,
+        closed_by_username TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        closed_at TEXT,
+        FOREIGN KEY(user_telegram_id) REFERENCES users(telegram_id) ON DELETE CASCADE
+      );
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticket_id INTEGER NOT NULL,
+        direction TEXT NOT NULL,
+        source_chat_id INTEGER,
+        source_message_id INTEGER,
+        delivery_chat_id INTEGER,
+        delivery_message_id INTEGER,
+        from_telegram_id INTEGER,
+        from_username TEXT,
+        sender_type TEXT,
+        sender_display_name TEXT,
+        sender_username TEXT,
+        text TEXT,
+        media_type TEXT,
+        filename TEXT,
+        file_id TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+      );
+    `);
+    const migration = legacy.prepare("INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)");
+    for (let id = 1; id <= 24; id += 1) migration.run(id, `migration_${id}`, timestamp);
+    legacy
+      .prepare("INSERT INTO users (telegram_id, username, created_at, updated_at) VALUES (?, ?, ?, ?)")
+      .run(501, "historical_user", timestamp, timestamp);
+    legacy
+      .prepare(
+        `INSERT INTO tickets (
+          id, user_telegram_id, status, staff_chat_id, message_thread_id, logs_message_id, transcript_message_id,
+          archived_at, created_at, updated_at, closed_at
+        ) VALUES (?, ?, 'CLOSED', ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(101, 501, -100900, 77, 8801, 8802, timestamp, timestamp, timestamp, timestamp);
+    legacy
+      .prepare(
+        `INSERT INTO tickets (id, user_telegram_id, status, staff_chat_id, message_thread_id, created_at, updated_at)
+         VALUES (?, ?, 'CLOSED', ?, ?, ?, ?)`
+      )
+      .run(102, 501, -100900, 78, timestamp, timestamp);
+    legacy
+      .prepare(
+        `INSERT INTO messages (ticket_id, direction, source_chat_id, source_message_id, delivery_message_id, text, created_at)
+         VALUES (?, 'STAFF_TO_USER', ?, ?, ?, ?, ?)`
+      )
+      .run(102, -100900, 7001, 6601, "Historical delivered reply", timestamp);
+    legacy.close();
+
+    new SupportDatabase(filename).close();
+    new SupportDatabase(filename).close();
+
+    const inspected = new Database(filename, { readonly: true });
+    try {
+      assert.equal(
+        (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 25").get() as { count: number })
+          .count,
+        1
+      );
+      assert.deepEqual(
+        inspected
+          .prepare(
+            "SELECT source_chat_id, source_message_id, delivery_message_id, text FROM messages WHERE ticket_id = ?"
+          )
+          .get(102),
+        {
+          source_chat_id: -100900,
+          source_message_id: 7001,
+          delivery_message_id: 6601,
+          text: "Historical delivered reply",
+        }
+      );
+      assert.deepEqual(
+        inspected
+          .prepare("SELECT logs_message_id, transcript_message_id, archived_at FROM tickets WHERE id = ?")
+          .get(101),
+        { logs_message_id: 8801, transcript_message_id: 8802, archived_at: timestamp }
+      );
+      assert.equal(
+        (inspected.prepare("SELECT COUNT(*) AS count FROM ticket_outbound_deliveries").get() as { count: number })
+          .count,
+        0
+      );
+      assert.equal(
+        (inspected.prepare("SELECT COUNT(*) AS count FROM ticket_archive_deliveries").get() as { count: number }).count,
+        0
+      );
+      assert.deepEqual(inspected.prepare("PRAGMA foreign_key_check").all(), []);
+      assert.deepEqual(inspected.prepare("PRAGMA integrity_check").all(), [{ integrity_check: "ok" }]);
+    } finally {
+      inspected.close();
+    }
+  });
+
+  it("adds migrations 24 and 25 once with safe durable defaults and preserved data", async () => {
     const filename = await databasePath();
     const legacy = new Database(filename);
     legacy.exec(`
@@ -72,6 +193,21 @@ describe("manual moderation persistence", () => {
         (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 24").get() as { count: number })
           .count,
         1
+      );
+      assert.equal(
+        (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 25").get() as { count: number })
+          .count,
+        1
+      );
+      assert.ok(
+        inspected
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ticket_outbound_deliveries'")
+          .get()
+      );
+      assert.ok(
+        inspected
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ticket_archive_deliveries'")
+          .get()
       );
       assert.equal(
         (inspected.prepare("SELECT value FROM sentinel WHERE id = 1").get() as { value: string }).value,
@@ -159,7 +295,7 @@ describe("manual moderation persistence", () => {
         (inspected.prepare("SELECT id FROM schema_migrations ORDER BY id").all() as Array<{ id: number }>).map(
           (row) => row.id
         ),
-        Array.from({ length: 24 }, (_, index) => index + 1)
+        Array.from({ length: 25 }, (_, index) => index + 1)
       );
       assert.equal(
         (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 23").get() as { count: number })

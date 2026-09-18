@@ -80,7 +80,7 @@ import {
   TicketBatchRuntime,
   TicketBatchStaffOperationError,
 } from "./ticketBatchRuntime.js";
-import { TicketRoutingService } from "./ticketRouting.js";
+import { InteractiveReplyNotResentError, TicketRoutingService } from "./ticketRouting.js";
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
@@ -557,6 +557,8 @@ export function createBot(
   }
 
   async function handleQuickRepliesCallback(ctx: Context, data: string): Promise<void> {
+    const callbackId = ctx.callbackQuery?.id;
+    if (!callbackId) return;
     const [, action, rawTicketId, rawResourceId, rawPage] = data.split(":");
     if (
       action !== "open" &&
@@ -611,17 +613,26 @@ export function createBot(
       }
 
       try {
-        await ticketRouting.deliverAndRecordStaffTextReply(target.ticket, template.text, ctx.from);
+        await ticketRouting.deliverAndRecordStaffTextReply(target.ticket, template.text, ctx.from, {
+          chatId: target.messageChatId,
+          messageId: target.messageId,
+          operationKey: `quick-reply:${callbackId}`,
+        });
       } catch (error) {
         logger.error({ err: error, ticketId: target.ticket.id }, "Could not deliver Quick Reply to user");
+        const outcomeUnknown = error instanceof InteractiveReplyNotResentError;
         await ticketRouting.sendStaffTopicNotice(
           ctx.api,
           requireStaffChatId(),
           target.ticket,
-          `Could not send quick reply for ticket #${target.ticket.id} to user ${target.ticket.user_telegram_id}: ${describeError(error)}`
+          outcomeUnknown
+            ? "Delivery outcome is unknown; the reply was not resent automatically."
+            : `Could not send quick reply for ticket #${target.ticket.id} to user ${target.ticket.user_telegram_id}: ${describeError(error)}`
         );
         await ctx.answerCallbackQuery({
-          text: "Could not send quick reply.",
+          text: outcomeUnknown
+            ? "Delivery outcome is unknown; the reply was not resent automatically."
+            : "Could not send quick reply.",
           show_alert: true,
         });
         return;

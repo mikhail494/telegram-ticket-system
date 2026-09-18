@@ -14,6 +14,10 @@ import type {
   TicketMessageRecord,
   UserInput,
   UserRecord,
+  CreateTicketOutboundDeliveryIntentInput,
+  TicketArchiveDeliveryClaim,
+  TicketArchiveDeliveryRecord,
+  TicketOutboundDeliveryRecord,
 } from "./types.js";
 export class TicketRepository {
   constructor(private readonly db: Database.Database) {}
@@ -274,25 +278,327 @@ export class TicketRepository {
   }
 
   markTicketArchivedAndDeleteMessages(ticketId: number, logsMessageId: number, transcriptMessageId: number): void {
-    const tx = this.db.transaction(() => {
-      const timestamp = now();
-      this.db
-        .prepare(
-          `
-          UPDATE tickets
-          SET logs_message_id = ?,
-              transcript_message_id = ?,
-              archived_at = ?,
-              updated_at = ?
-          WHERE id = ?
-        `
-        )
-        .run(logsMessageId, transcriptMessageId, timestamp, timestamp, ticketId);
-
-      this.db.prepare("DELETE FROM messages WHERE ticket_id = ?").run(ticketId);
-    });
+    const tx = this.db.transaction(() =>
+      this.markTicketArchivedAndDeleteMessagesInTransaction(ticketId, logsMessageId, transcriptMessageId)
+    );
 
     tx();
+  }
+
+  createTicketOutboundDeliveryIntent(input: CreateTicketOutboundDeliveryIntentInput): {
+    created: boolean;
+    delivery: TicketOutboundDeliveryRecord;
+  } {
+    const tx = this.db.transaction(() => {
+      const existing = this.getTicketOutboundDelivery(input.operationKey);
+      if (existing) return { created: false, delivery: existing };
+
+      const legacyDeliveryMessageId = this.findProvenLegacyStaffDelivery(input);
+      const created = this.insertTicketOutboundDelivery(input, legacyDeliveryMessageId);
+      const delivery = this.getTicketOutboundDelivery(input.operationKey);
+      if (!delivery) throw new Error("Could not load ticket outbound delivery intent");
+      return { created: created && legacyDeliveryMessageId === null, delivery };
+    });
+
+    return tx();
+  }
+
+  getTicketOutboundDelivery(operationKey: string): TicketOutboundDeliveryRecord | undefined {
+    return this.db.prepare("SELECT * FROM ticket_outbound_deliveries WHERE operation_key = ?").get(operationKey) as
+      TicketOutboundDeliveryRecord | undefined;
+  }
+
+  markTicketOutboundDeliveryDelivered(operationKey: string, deliveryMessageId: number): number | null {
+    const tx = this.db.transaction(() => {
+      const delivery = this.getTicketOutboundDelivery(operationKey);
+      if (!delivery) throw new Error("Ticket outbound delivery intent was not found");
+      if (delivery.state === "DELIVERED") return delivery.delivery_message_id;
+      if (delivery.state !== "PENDING") return null;
+      this.db
+        .prepare(
+          `UPDATE ticket_outbound_deliveries
+           SET state = 'DELIVERED', delivery_message_id = ?, failure_category = NULL, failure_description = NULL, updated_at = ?
+           WHERE operation_key = ? AND state = 'PENDING'`
+        )
+        .run(deliveryMessageId, now(), operationKey);
+      this.addMessage({
+        ticketId: delivery.ticket_id,
+        direction: "STAFF_TO_USER",
+        sourceChatId: delivery.source_chat_id,
+        sourceMessageId: delivery.source_message_id,
+        deliveryChatId: delivery.delivery_chat_id,
+        deliveryMessageId,
+        fromTelegramId: delivery.from_telegram_id,
+        fromUsername: delivery.from_username,
+        senderType: delivery.sender_type,
+        senderDisplayName: delivery.sender_display_name,
+        senderUsername: delivery.sender_username,
+        text: delivery.text,
+        mediaType: delivery.media_type,
+        filename: delivery.filename,
+        fileId: delivery.file_id,
+      });
+      return deliveryMessageId;
+    });
+    return tx();
+  }
+
+  markTicketOutboundDeliveryFailed(
+    operationKey: string,
+    failureCategory: string,
+    failureDescription: string | null
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE ticket_outbound_deliveries
+         SET state = 'FAILED', failure_category = ?, failure_description = ?, updated_at = ?
+         WHERE operation_key = ? AND state = 'PENDING'`
+      )
+      .run(failureCategory, failureDescription, now(), operationKey);
+  }
+
+  markTicketOutboundDeliveryUnknown(operationKey: string, failureDescription: string | null): void {
+    this.db
+      .prepare(
+        `UPDATE ticket_outbound_deliveries
+         SET state = 'UNKNOWN_DELIVERY', failure_description = ?, updated_at = ?
+         WHERE operation_key = ? AND state = 'PENDING'`
+      )
+      .run(failureDescription, now(), operationKey);
+  }
+
+  markPendingTicketOutboundDeliveriesUnknown(): number {
+    return this.db
+      .prepare(
+        `UPDATE ticket_outbound_deliveries
+         SET state = 'UNKNOWN_DELIVERY', failure_description = 'Process ended while Telegram delivery outcome was pending.', updated_at = ?
+         WHERE state = 'PENDING'`
+      )
+      .run(now()).changes;
+  }
+
+  hasUnresolvedTicketOutboundDeliveries(ticketId: number): boolean {
+    return Boolean(
+      this.db
+        .prepare(
+          "SELECT 1 FROM ticket_outbound_deliveries WHERE ticket_id = ? AND state IN ('PENDING', 'UNKNOWN_DELIVERY') LIMIT 1"
+        )
+        .get(ticketId)
+    );
+  }
+
+  getTicketArchiveDelivery(ticketId: number): TicketArchiveDeliveryRecord | undefined {
+    return this.db.prepare("SELECT * FROM ticket_archive_deliveries WHERE ticket_id = ?").get(ticketId) as
+      TicketArchiveDeliveryRecord | undefined;
+  }
+
+  claimTicketArchiveSummary(ticketId: number, logsThreadId: number): TicketArchiveDeliveryClaim {
+    const timestamp = now();
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO ticket_archive_deliveries (ticket_id, state, logs_thread_id, created_at, updated_at)
+         VALUES (?, 'SUMMARY_PENDING', ?, ?, ?)
+         ON CONFLICT(ticket_id) DO NOTHING`
+      )
+      .run(ticketId, logsThreadId, timestamp, timestamp);
+    if (inserted.changes === 1) return { claimed: true, delivery: this.getTicketArchiveDelivery(ticketId)! };
+
+    const retried = this.db
+      .prepare(
+        `UPDATE ticket_archive_deliveries
+         SET state = 'SUMMARY_PENDING', logs_thread_id = ?, failure_category = NULL, failure_description = NULL, updated_at = ?
+         WHERE ticket_id = ? AND state = 'FAILED' AND summary_message_id IS NULL`
+      )
+      .run(logsThreadId, timestamp, ticketId);
+    return { claimed: retried.changes === 1, delivery: this.getTicketArchiveDelivery(ticketId)! };
+  }
+
+  markTicketArchiveSummarySent(ticketId: number, messageId: number): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE ticket_archive_deliveries
+         SET state = 'SUMMARY_SENT', summary_message_id = ?, failure_category = NULL, failure_description = NULL, updated_at = ?
+         WHERE ticket_id = ? AND state = 'SUMMARY_PENDING'`
+        )
+        .run(messageId, now(), ticketId).changes === 1
+    );
+  }
+
+  claimTicketArchiveDocument(ticketId: number): TicketArchiveDeliveryClaim | undefined {
+    const updated = this.db
+      .prepare(
+        `UPDATE ticket_archive_deliveries SET state = 'DOCUMENT_PENDING', updated_at = ?
+         WHERE ticket_id = ? AND state = 'SUMMARY_SENT'`
+      )
+      .run(now(), ticketId);
+    const delivery = this.getTicketArchiveDelivery(ticketId);
+    return delivery ? { claimed: updated.changes === 1, delivery } : undefined;
+  }
+
+  markTicketArchiveDocumentDelivered(ticketId: number, messageId: number): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE ticket_archive_deliveries
+         SET state = 'DELIVERED', document_message_id = ?, failure_category = NULL, failure_description = NULL, updated_at = ?
+         WHERE ticket_id = ? AND state = 'DOCUMENT_PENDING'`
+        )
+        .run(messageId, now(), ticketId).changes === 1
+    );
+  }
+
+  restageTicketArchiveForReplacementTopic(ticketId: number, logsThreadId: number): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE ticket_archive_deliveries
+           SET state = 'FAILED', logs_thread_id = ?, summary_message_id = NULL, document_message_id = NULL,
+               failure_category = NULL, failure_description = NULL, updated_at = ?
+           WHERE ticket_id = ? AND state = 'SUMMARY_SENT'`
+        )
+        .run(logsThreadId, now(), ticketId).changes === 1
+    );
+  }
+
+  markTicketArchiveFailed(ticketId: number, failureCategory: string, failureDescription: string | null): void {
+    this.db
+      .prepare(
+        `UPDATE ticket_archive_deliveries
+         SET state = CASE WHEN summary_message_id IS NULL THEN 'FAILED' ELSE 'SUMMARY_SENT' END,
+             failure_category = ?, failure_description = ?, updated_at = ?
+         WHERE ticket_id = ? AND state IN ('SUMMARY_PENDING', 'DOCUMENT_PENDING')`
+      )
+      .run(failureCategory, failureDescription, now(), ticketId);
+  }
+
+  markTicketArchiveUnknown(ticketId: number, failureDescription: string | null): void {
+    this.db
+      .prepare(
+        `UPDATE ticket_archive_deliveries
+         SET state = 'UNKNOWN_DELIVERY', failure_description = ?, updated_at = ?
+         WHERE ticket_id = ? AND state IN ('SUMMARY_PENDING', 'DOCUMENT_PENDING')`
+      )
+      .run(failureDescription, now(), ticketId);
+  }
+
+  markPendingTicketArchiveDeliveriesUnknown(): number {
+    return this.db
+      .prepare(
+        `UPDATE ticket_archive_deliveries
+         SET state = 'UNKNOWN_DELIVERY', failure_description = 'Process ended while Support Logs delivery outcome was pending.', updated_at = ?
+         WHERE state IN ('SUMMARY_PENDING', 'DOCUMENT_PENDING')`
+      )
+      .run(now()).changes;
+  }
+
+  finalizeTicketArchiveDelivery(ticketId: number): boolean {
+    const tx = this.db.transaction(() => {
+      const delivery = this.getTicketArchiveDelivery(ticketId);
+      if (
+        !delivery ||
+        delivery.state !== "DELIVERED" ||
+        delivery.summary_message_id === null ||
+        delivery.document_message_id === null
+      )
+        return false;
+      this.markTicketArchivedAndDeleteMessagesInTransaction(
+        ticketId,
+        delivery.summary_message_id,
+        delivery.document_message_id
+      );
+      this.db.prepare("DELETE FROM ticket_outbound_deliveries WHERE ticket_id = ?").run(ticketId);
+      this.db.prepare("DELETE FROM ticket_archive_deliveries WHERE ticket_id = ?").run(ticketId);
+      return true;
+    });
+    return tx();
+  }
+
+  private markTicketArchivedAndDeleteMessagesInTransaction(
+    ticketId: number,
+    logsMessageId: number,
+    transcriptMessageId: number
+  ): void {
+    const timestamp = now();
+    this.db
+      .prepare(
+        `
+        UPDATE tickets
+        SET logs_message_id = ?,
+            transcript_message_id = ?,
+            archived_at = ?,
+            updated_at = ?
+        WHERE id = ?
+      `
+      )
+      .run(logsMessageId, transcriptMessageId, timestamp, timestamp, ticketId);
+
+    this.db.prepare("DELETE FROM messages WHERE ticket_id = ?").run(ticketId);
+  }
+
+  private findProvenLegacyStaffDelivery(input: CreateTicketOutboundDeliveryIntentInput): number | null {
+    if (
+      !input.operationKey.startsWith("staff-message:") ||
+      input.direction !== "STAFF_TO_USER" ||
+      input.sourceChatId === null ||
+      input.sourceChatId === undefined ||
+      input.sourceMessageId === null ||
+      input.sourceMessageId === undefined
+    )
+      return null;
+
+    const row = this.db
+      .prepare(
+        `SELECT delivery_message_id
+         FROM messages
+         WHERE ticket_id = ?
+           AND direction = 'STAFF_TO_USER'
+           AND source_chat_id = ?
+           AND source_message_id = ?
+           AND delivery_message_id IS NOT NULL
+         ORDER BY id ASC
+         LIMIT 1`
+      )
+      .get(input.ticketId, input.sourceChatId, input.sourceMessageId) as { delivery_message_id: number } | undefined;
+    return row?.delivery_message_id ?? null;
+  }
+
+  private insertTicketOutboundDelivery(
+    input: CreateTicketOutboundDeliveryIntentInput,
+    legacyDeliveryMessageId: number | null
+  ): boolean {
+    const timestamp = now();
+    return (
+      this.db
+        .prepare(
+          `INSERT INTO ticket_outbound_deliveries (
+            operation_key, ticket_id, state, source_chat_id, source_message_id, delivery_chat_id,
+            delivery_message_id, from_telegram_id, from_username, sender_type, sender_display_name, sender_username,
+            text, media_type, filename, file_id, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(operation_key) DO NOTHING`
+        )
+        .run(
+          input.operationKey,
+          input.ticketId,
+          legacyDeliveryMessageId === null ? "PENDING" : "DELIVERED",
+          input.sourceChatId ?? null,
+          input.sourceMessageId ?? null,
+          input.deliveryChatId ?? null,
+          legacyDeliveryMessageId,
+          input.fromTelegramId ?? null,
+          input.fromUsername ?? null,
+          input.senderType ?? senderTypeForDirection(input.direction),
+          input.senderDisplayName ?? null,
+          input.senderUsername ?? input.fromUsername ?? null,
+          input.text ?? null,
+          input.mediaType ?? null,
+          input.filename ?? null,
+          input.fileId ?? null,
+          timestamp,
+          timestamp
+        ).changes === 1
+    );
   }
 
   addMessage(input: AddMessageInput): number {
@@ -409,6 +715,16 @@ export class TicketRepository {
         WHERE tickets.staff_chat_id = ?
           AND tickets.status = 'CLOSED'
           AND tickets.archived_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM ticket_outbound_deliveries
+            WHERE ticket_outbound_deliveries.ticket_id = tickets.id
+              AND ticket_outbound_deliveries.state IN ('PENDING', 'UNKNOWN_DELIVERY')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM ticket_archive_deliveries
+            WHERE ticket_archive_deliveries.ticket_id = tickets.id
+              AND ticket_archive_deliveries.state = 'UNKNOWN_DELIVERY'
+          )
           AND EXISTS (
             SELECT 1 FROM messages WHERE messages.ticket_id = tickets.id
           )

@@ -159,6 +159,15 @@ async function startApplication(): Promise<void> {
   const botInfo = await bot.api.getMe();
   if (!lifecycle.isRunning()) return;
   bot.botInfo = botInfo;
+  const orphanInteractiveDeliveries = db.markPendingTicketOutboundDeliveriesUnknown();
+  const orphanArchiveDeliveries = db.markPendingTicketArchiveDeliveriesUnknown();
+  if (orphanInteractiveDeliveries > 0)
+    logger.warn(
+      { count: orphanInteractiveDeliveries },
+      "Converted orphan interactive delivery intents to UNKNOWN_DELIVERY"
+    );
+  if (orphanArchiveDeliveries > 0)
+    logger.warn({ count: orphanArchiveDeliveries }, "Converted orphan archive delivery intents to UNKNOWN_DELIVERY");
   const startupRecoveryBudget = new StartupRecoveryBudget({ shouldContinue: () => lifecycle.isRunning() });
   const recoverArchives = (budget: StartupRecoveryBudget) =>
     archiveClosedTicketsPendingUpload(bot.api, db, installationService.requireStaffChatId(), { budget });
