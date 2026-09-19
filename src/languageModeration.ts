@@ -6,7 +6,6 @@ import { francAll } from "franc-min";
 import { createHash } from "node:crypto";
 import {
   ADAPTIVE_LEARNING_HORIZON_MS,
-  ADAPTIVE_MESSAGE_FEATURE_TTL_MS,
   MAX_ADAPTIVE_FINGERPRINT_TOKENS,
   MAX_ADAPTIVE_TOKEN_FEATURES,
   MAX_ADAPTIVE_TOKEN_LENGTH,

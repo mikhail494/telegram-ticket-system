@@ -16,8 +16,14 @@ export default tseslint.config(
     rules: {
       "@typescript-eslint/await-thenable": "error",
       "@typescript-eslint/no-misused-promises": ["error", { checksVoidReturn: false }],
-      // Dead-code cleanup from earlier control-plane extraction belongs in its own reviewable change.
-      "@typescript-eslint/no-unused-vars": "off",
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
     },
   },
   {

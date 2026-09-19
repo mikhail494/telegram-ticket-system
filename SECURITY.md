@@ -4,10 +4,10 @@
 
 Security fixes are supported for the latest released version only.
 
-| Version         | Supported |
-| --------------- | --------- |
-| 1.4.x           | Yes       |
-| 1.3.x and older | No        |
+| Version        | Supported |
+| -------------- | --------- |
+| 2.0.x          | Yes       |
+| Older releases | No        |
 
 ## Reporting a Vulnerability
 

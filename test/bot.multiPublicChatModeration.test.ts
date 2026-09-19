@@ -242,6 +242,34 @@ describe("multi-public-chat moderation", () => {
     assert.equal(harness.db.getLanguageModerationUserState(CHAT_A, USER_ID)?.sanction_tier, 0);
   });
 
+  it("contains a confirmed bot-membership loss to the affected managed chat", async () => {
+    const { harness } = createHarness();
+    manage(harness, CHAT_A, true);
+    manage(harness, CHAT_B, true);
+    harness.db.upsertLanguageModerationUserState({
+      chat_id: CHAT_A,
+      user_telegram_id: USER_ID,
+      username: null,
+      current_strikes: 2,
+      sanction_tier: 0,
+      first_strike_at: new Date().toISOString(),
+    });
+    harness.failNextApiCall("restrictChatMember", "Bad Request: user is an administrator", 400);
+    harness.setApiResponseOverride("getChat", (call, success) =>
+      call.payload.chat_id === CHAT_A
+        ? { ok: false, error_code: 400, description: "Bad Request: bot is not a member of the chat" }
+        : success
+    );
+
+    await harness.bot.handleUpdate(publicMessage(CHAT_A, 2));
+
+    assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.moderation_enabled, 0);
+    assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.permission_status, "UNHEALTHY");
+    assert.equal(harness.db.getManagedPublicChat(CHAT_A)?.connection_status, "UNREACHABLE");
+    assert.equal(harness.db.getManagedPublicChat(CHAT_B)?.moderation_enabled, 1);
+    assert.equal(harness.db.getManagedPublicChat(CHAT_B)?.permission_status, "UNKNOWN");
+  });
+
   it("sends grouped warnings into their originating forum topics", async () => {
     const { harness } = createHarness();
     manage(harness, CHAT_A, true);

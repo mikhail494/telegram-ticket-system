@@ -16,23 +16,17 @@ import {
   SupportDatabase,
   type TicketStatus,
   type TicketWithUser,
-  type TeamMemberRecord,
   type LanguageModerationUserState,
   type LanguageModerationViolation,
 } from "./db.js";
 import {
   CLOSED_TEXT,
-  DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME,
-  DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE,
-  formatTicketReceived,
   START_TEXT,
   formatStatus,
   formatTicketDetails,
   formatWhois,
   formatUserTicketList,
-  SUPPORT_RESPONSE_TIME_PLACEHOLDER,
   truncate,
-  validateRenderedSupportAcknowledgement,
 } from "./format.js";
 import { logger } from "./logger.js";
 import { createQuickRepliesManager, type QuickRepliesRegistry } from "./quickReplies.js";
@@ -60,11 +54,7 @@ import {
   type ModerationCleanupScheduler,
 } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
-import {
-  normalizeTelegramDeliveryError,
-  runReplaySafeTelegramEdit,
-  type NormalizedDeliveryError,
-} from "./deliveryDiagnostics.js";
+import { normalizeTelegramDeliveryError, runReplaySafeTelegramEdit } from "./deliveryDiagnostics.js";
 import {
   StaffChatDeliveryCoordinator,
   type StaffChatDeliveryOptions,
@@ -80,8 +70,8 @@ import {
   validateStaffWorkspace,
   type WorkspaceValidationResult,
 } from "./workspaceValidation.js";
-import { formatPublicChatPermissionChecklist, validatePublicModerationChat } from "./publicChatModeration.js";
-import { PrivateControlPlane, type PublicChatConfigurationField } from "./privateControlPlane.js";
+import { validatePublicModerationChat } from "./publicChatModeration.js";
+import { PrivateControlPlane } from "./privateControlPlane.js";
 import type { RuntimeHealthRegistry, UpdateErrorCategory } from "./runtimeObservability.js";
 import {
   TicketBatchExportInProgressError,
@@ -794,17 +784,6 @@ export function createBot(
   const showDashboard = privateControlPlane.showDashboard.bind(privateControlPlane);
   const showDashboardAfterStaffTestTicketClose =
     privateControlPlane.showDashboardAfterStaffTestTicketClose.bind(privateControlPlane);
-  const showSystemStatus = privateControlPlane.showSystemStatus.bind(privateControlPlane);
-  const showModerationDashboard = privateControlPlane.showModerationDashboard.bind(privateControlPlane);
-  function supportExpectedResponseTime(): string {
-    return db.getSetting(SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME;
-  }
-
-  function supportTicketReceivedTemplate(): string {
-    return (
-      db.getSetting(SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY)?.trim() || DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE
-    );
-  }
   async function showStaffWorkspaceSettings(ctx: Context, notice?: string, refresh = false): Promise<void> {
     const workspace = installation.getActiveWorkspace();
     const current = workspace
@@ -954,370 +933,6 @@ export function createBot(
       `Staff workspace validated:\n${formatWorkspaceChecklist(result)}`,
       new InlineKeyboard().text("Continue", "setup:stage:SUPPORT_LOGS")
     );
-  }
-
-  function publicChatLabel(chat: ReturnType<SupportDatabase["getManagedPublicChat"]>): string {
-    if (!chat) return "Unknown public chat";
-    return chat.title ?? (chat.username ? `@${chat.username}` : String(chat.chat_id));
-  }
-
-  function publicChatButtonLabel(chat: ReturnType<SupportDatabase["getManagedPublicChat"]>): string {
-    const label = publicChatLabel(chat);
-    return label.length > 40 ? `${label.slice(0, 39)}...` : label;
-  }
-
-  function publicChatConnectionLabel(chat: NonNullable<ReturnType<SupportDatabase["getManagedPublicChat"]>>): string {
-    if (chat.connection_status === "CONNECTED") return "yes";
-    if (chat.connection_status === "UNREACHABLE") return "no";
-    return "unknown";
-  }
-
-  async function showPublicChats(ctx: Context, notice?: string): Promise<void> {
-    const chats = db.listManagedPublicChats();
-    const keyboard = new InlineKeyboard().text("Add public chat", "public:add").row();
-    for (const chat of chats) {
-      keyboard.text(`Open settings: ${publicChatButtonLabel(chat)}`, `public:open:${chat.chat_id}`).row();
-    }
-    keyboard.text("Back", "dashboard:home");
-    const lines = chats.length
-      ? chats.flatMap((chat) => [
-          "",
-          publicChatLabel(chat),
-          chat.username ? `@${chat.username}` : "No public username",
-          `Connected: ${publicChatConnectionLabel(chat)}`,
-          `Moderation: ${chat.moderation_enabled ? "enabled" : "disabled"}`,
-          `Permissions: ${chat.permission_status.toLowerCase()}`,
-          `Reactions: ${chat.reaction_status.toLowerCase()} (advisory)`,
-        ])
-      : ["", "No public chats are configured."];
-    await renderPrivateScreen(ctx, ["Public chats", ...(notice ? ["", notice] : []), ...lines].join("\n"), keyboard);
-  }
-
-  async function showPublicChatSettings(ctx: Context, chatId: number, notice?: string): Promise<void> {
-    const chat = db.getManagedPublicChat(chatId);
-    if (!chat) {
-      await renderPrivateScreen(
-        ctx,
-        "This public chat is not managed.",
-        new InlineKeyboard().text("Back", "public:list")
-      );
-      return;
-    }
-    const keyboard = new InlineKeyboard()
-      .text(
-        chat.moderation_enabled ? "Disable moderation" : "Enable moderation",
-        `public:${chat.moderation_enabled ? "disable" : "enable"}:${chat.chat_id}`
-      )
-      .row()
-      .text("Check permissions", `public:check:${chat.chat_id}`)
-      .row()
-      .text("Warning message", `public:config-warning:${chat.chat_id}`)
-      .text("Allowed terms", `public:config-allowlist:${chat.chat_id}`)
-      .row()
-      .text("Warning cooldown", `public:config-cooldown:${chat.chat_id}`)
-      .text("Message threshold", `public:config-threshold:${chat.chat_id}`)
-      .text("Violation window", `public:config-lookback:${chat.chat_id}`)
-      .row()
-      .text("Remove chat", `public:remove:${chat.chat_id}`)
-      .row()
-      .text("Back", "public:list");
-    await renderPrivateScreen(
-      ctx,
-      [
-        "Public chat settings",
-        "",
-        ...(notice ? [notice, ""] : []),
-        `Title: ${chat.title ?? "unknown"}`,
-        `Username: ${chat.username ? `@${chat.username}` : "not available"}`,
-        `Chat ID: ${chat.chat_id}`,
-        `Forum topics: ${chat.is_forum ? "enabled" : "not enabled"}`,
-        `Connected: ${publicChatConnectionLabel(chat)}`,
-        `Moderation: ${chat.moderation_enabled ? "enabled" : "disabled"}`,
-        `Permissions: ${chat.permission_status.toLowerCase()}`,
-        `Reactions: ${chat.reaction_status.toLowerCase()} (advisory only)`,
-        `Warning: ${chat.warning_text}`,
-        `Allowed terms: ${chat.allowlist.length}`,
-        `Warning cooldown: ${chat.warning_cooldown_minutes} minutes`,
-        `Message threshold: ${chat.warning_message_threshold} messages`,
-        `Violation window: ${chat.lookback_minutes} minutes`,
-      ].join("\n"),
-      keyboard
-    );
-  }
-
-  function publicChatConfigurationPrompt(
-    chat: NonNullable<ReturnType<SupportDatabase["getManagedPublicChat"]>>,
-    field: PublicChatConfigurationField,
-    error?: string
-  ): string {
-    const details: Record<PublicChatConfigurationField, string> = {
-      warning: [
-        "Warning message",
-        "Shown when the bot sends a first-strike warning in this public chat.",
-        `Current value: ${chat.warning_text}`,
-        "Valid: 1-500 characters.",
-        "Example: Please use English in this chat.",
-      ].join("\n"),
-      allowlist: [
-        "Allowed terms",
-        "Terms removed before language analysis. Messages containing only these terms stay exempt.",
-        `Current value: ${chat.allowlist.length ? chat.allowlist.join(", ") : "none"}`,
-        "Valid: comma-separated terms, up to 100 terms of 80 characters each; send - to clear.",
-        "Example: productname, ticker",
-      ].join("\n"),
-      cooldown: [
-        "Warning cooldown",
-        "Minimum time after a warning before another first-strike warning can appear. The message threshold must also be met.",
-        `Current value: ${chat.warning_cooldown_minutes} minutes`,
-        "Valid: whole number from 1 to 1440 minutes.",
-        "Example: 30",
-      ].join("\n"),
-      threshold: [
-        "Message threshold",
-        "Incoming messages in this chat or topic after a warning before another first-strike warning can appear. All messages count.",
-        `Current value: ${chat.warning_message_threshold} messages`,
-        "Valid: whole number from 1 to 10000 messages.",
-        "Example: 20",
-      ].join("\n"),
-      lookback: [
-        "Violation window",
-        "First violations in the same chat or topic during this window are grouped into one warning.",
-        `Current value: ${chat.lookback_minutes} minutes`,
-        "Valid: whole number from 1 to 1440 minutes.",
-        "Example: 10",
-      ].join("\n"),
-    };
-    return [details[field], "", error ? `Invalid: ${error}` : "Send the new value."].join("\n");
-  }
-
-  async function beginPublicChatConfiguration(
-    ctx: Context,
-    chat: NonNullable<ReturnType<SupportDatabase["getManagedPublicChat"]>>,
-    field: PublicChatConfigurationField
-  ): Promise<void> {
-    if (!ctx.from) return;
-    privateControlPlane.setPendingPublicChatConfiguration(ctx.from.id, { chatId: chat.chat_id, field });
-    await retirePrivateScreens(ctx);
-    await sendFreshPrivateScreen(
-      ctx,
-      publicChatConfigurationPrompt(chat, field),
-      new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)
-    );
-  }
-
-  async function sendPublicChatPicker(ctx: Context): Promise<void> {
-    if (!ctx.from) return;
-    await retirePrivateScreens(ctx);
-    privateControlPlane.clearPublicChatSelection(ctx.from.id);
-    await privateControlPlane.retirePublicChatPickerPrompt(ctx.from.id, ctx.api);
-    privateControlPlane.beginPublicChatSelection(ctx.from.id);
-    const rights = {
-      is_anonymous: false,
-      can_manage_chat: true,
-      can_delete_messages: true,
-      can_manage_video_chats: false,
-      can_restrict_members: true,
-      can_promote_members: false,
-      can_change_info: false,
-      can_invite_users: true,
-      can_post_stories: false,
-      can_edit_stories: false,
-      can_delete_stories: false,
-      can_post_messages: false,
-      can_edit_messages: false,
-      can_pin_messages: false,
-      can_manage_topics: false,
-      can_send_welcome_messages: false,
-    };
-    const keyboard = new Keyboard()
-      .requestChat("Select public supergroup", 1400, {
-        chat_is_channel: false,
-        bot_is_member: true,
-        request_title: true,
-        request_username: true,
-        request_photo: false,
-        bot_administrator_rights: rights,
-        user_administrator_rights: rights,
-      })
-      .text("Cancel public chat selection")
-      .resized()
-      .oneTime();
-    const prompt = await ctx.reply(
-      "Choose a public supergroup. You may also paste its public @username or t.me link.",
-      { reply_markup: keyboard }
-    );
-    await privateControlPlane.rememberPublicChatPickerPrompt(
-      ctx.from.id,
-      { chatId: prompt.chat.id, messageId: prompt.message_id },
-      ctx.api
-    );
-  }
-
-  async function inspectAndSavePublicChat(
-    ctx: Context,
-    chatId: number,
-    shared?: { title?: string; username?: string }
-  ): Promise<void> {
-    if (!ctx.from || !bot.botInfo) return;
-    const workspace = installation.getActiveWorkspace();
-    if (!workspace) {
-      await clearPublicChatPicker(ctx);
-      await showPublicChats(ctx, "Configure the staff workspace first.");
-      return;
-    }
-    const result = await validatePublicModerationChat(ctx.api, chatId, bot.botInfo.id);
-    db.upsertManagedPublicChat({
-      chatId: result.chatId,
-      workspaceId: workspace.id,
-      title: result.title ?? shared?.title,
-      username: result.username ?? shared?.username,
-      isForum: result.isForum,
-    });
-    db.recordManagedPublicChatPermissionHealth({
-      chatId: result.chatId,
-      healthy: result.valid,
-      reactionsAvailable: result.reactionsAvailable,
-      connected: true,
-      title: result.title ?? shared?.title,
-      username: result.username ?? shared?.username,
-      isForum: result.isForum,
-    });
-    await clearPublicChatPicker(ctx);
-    const notice = result.valid
-      ? "Public chat saved. Moderation remains disabled until enabled explicitly."
-      : `Public chat saved, but moderation needs attention:\n${formatPublicChatPermissionChecklist(result)}`;
-    await showPublicChatSettings(ctx, result.chatId, notice);
-  }
-
-  async function savePendingPublicChatConfiguration(ctx: Context, text: string): Promise<boolean> {
-    if (!ctx.from) return false;
-    const pending = privateControlPlane.getPendingPublicChatConfiguration(ctx.from.id);
-    if (!pending) return false;
-    const chat = db.getManagedPublicChat(pending.chatId);
-    if (!chat) {
-      privateControlPlane.clearPendingPublicChatConfiguration(ctx.from.id);
-      await renderPrivateScreen(
-        ctx,
-        "This public chat is no longer managed.",
-        new InlineKeyboard().text("Back", "public:list")
-      );
-      return true;
-    }
-    let warningText = chat.warning_text;
-    let allowlist = chat.allowlist;
-    let warningCooldownMinutes = chat.warning_cooldown_minutes;
-    let warningMessageThreshold = chat.warning_message_threshold;
-    let lookbackMinutes = chat.lookback_minutes;
-    const trimmed = text.trim();
-    if (pending.field === "warning") {
-      if (!trimmed || trimmed.length > 500) {
-        await renderPrivateScreen(
-          ctx,
-          publicChatConfigurationPrompt(chat, pending.field, "use 1-500 characters."),
-          new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)
-        );
-        return true;
-      }
-      warningText = trimmed;
-    } else if (pending.field === "allowlist") {
-      const entries =
-        trimmed === "-"
-          ? []
-          : [
-              ...new Set(
-                trimmed
-                  .split(",")
-                  .map((entry) => entry.trim().toLowerCase())
-                  .filter(Boolean)
-              ),
-            ];
-      if (entries.length > 100 || entries.some((entry) => entry.length > 80)) {
-        await renderPrivateScreen(
-          ctx,
-          publicChatConfigurationPrompt(chat, pending.field, "use at most 100 terms, each up to 80 characters."),
-          new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)
-        );
-        return true;
-      }
-      allowlist = entries;
-    } else {
-      const parsed = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
-      const maximum = pending.field === "threshold" ? 10_000 : 1_440;
-      if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
-        await renderPrivateScreen(
-          ctx,
-          publicChatConfigurationPrompt(chat, pending.field, `enter a whole number from 1 to ${maximum}.`),
-          new InlineKeyboard().text("Back to settings", `public:open:${chat.chat_id}`)
-        );
-        return true;
-      }
-      if (pending.field === "cooldown") warningCooldownMinutes = parsed;
-      if (pending.field === "threshold") warningMessageThreshold = parsed;
-      if (pending.field === "lookback") lookbackMinutes = parsed;
-    }
-    db.updateManagedPublicChatConfig(chat.chat_id, {
-      warningText,
-      allowlist,
-      warningCooldownMinutes,
-      warningMessageThreshold,
-      lookbackMinutes,
-    });
-    privateControlPlane.clearPendingPublicChatConfiguration(ctx.from.id);
-    await retirePrivateScreens(ctx);
-    await showPublicChatSettings(ctx, chat.chat_id);
-    return true;
-  }
-
-  function teamMemberLabel(member: TeamMemberRecord): string {
-    if (member.username) return `@${member.username}`;
-    return member.display_name?.trim() || "Unnamed member";
-  }
-
-  function teamRoleLabel(role: TeamMemberRecord["role"]): string {
-    return { OWNER: "Owner", ADMIN: "Admin", SENIOR_AGENT: "Senior agent", AGENT: "Agent" }[role];
-  }
-
-  function teamKeyboard(actorId: number): InlineKeyboard {
-    const keyboard = new InlineKeyboard().text("Invite member", "team:invite").row();
-    for (const member of installation.listTeamMembers()) {
-      keyboard
-        .text(`${teamRoleLabel(member.role)}: ${teamMemberLabel(member)}`, `team:member:${member.user_telegram_id}`)
-        .row();
-    }
-    if (installation.getMember(actorId)?.role === "OWNER") keyboard.text("Transfer ownership", "team:transfer").row();
-    return keyboard.text("Back", "dashboard:home");
-  }
-
-  async function showTeam(ctx: Context): Promise<void> {
-    if (!ctx.from) return;
-    const members = installation.listTeamMembers();
-    await renderPrivateScreen(
-      ctx,
-      ["Team", "", ...members.map((member) => `${teamRoleLabel(member.role)}: ${teamMemberLabel(member)}`)].join("\n"),
-      teamKeyboard(ctx.from.id)
-    );
-  }
-
-  async function showTeamMember(ctx: Context, member: TeamMemberRecord): Promise<void> {
-    if (!ctx.from) return;
-    const actor = installation.getMember(ctx.from.id);
-    const keyboard = new InlineKeyboard();
-    const text = [
-      "Team member",
-      "",
-      `Member: ${teamMemberLabel(member)}`,
-      `Role: ${teamRoleLabel(member.role)}`,
-      "Staff workspace membership is required for access.",
-    ];
-    if (member.role === "OWNER") {
-      text.push("", "The OWNER cannot be changed through ordinary team controls.");
-    } else if (actor?.role === "OWNER" || (actor?.role === "ADMIN" && member.role !== "ADMIN")) {
-      if (actor.role === "OWNER") keyboard.text("Make admin", `team:set:${member.user_telegram_id}:ADMIN`).row();
-      keyboard.text("Make senior agent", `team:set:${member.user_telegram_id}:SENIOR_AGENT`).row();
-      keyboard.text("Make agent", `team:set:${member.user_telegram_id}:AGENT`).row();
-    }
-    keyboard.text("Back to team", "team:list").row().text("Back to dashboard", "dashboard:home");
-    await renderPrivateScreen(ctx, text.join("\n"), keyboard);
   }
 
   bot.command("start", async (ctx) => {
@@ -3890,6 +3505,10 @@ async function containModerationSanctionFailure(
     validation = await validatePublicModerationChat(input.api, input.chatId, input.botId);
   } catch (validationError) {
     const validationDiagnostic = normalizeTelegramDeliveryError(validationError);
+    if (isConfirmedTelegramChatAccessLoss(validationError)) {
+      disableModerationAfterConfirmedRightsLoss(input, sanctionKind, ["bot_member", "bot_admin"], true);
+      return;
+    }
     logger.warn(
       {
         chatId: input.chatId,
@@ -3908,17 +3527,39 @@ async function containModerationSanctionFailure(
   if (validation.valid) return;
 
   const missingChecks = validation.checks.filter((check) => !check.passed).map((check) => check.key);
+  disableModerationAfterConfirmedRightsLoss(input, sanctionKind, missingChecks, false, validation);
+}
+
+function disableModerationAfterConfirmedRightsLoss(
+  input: {
+    db: SupportDatabase;
+    chatId: number;
+    userId: number;
+    state: Pick<LanguageModerationUserState, "sanction_tier">;
+  },
+  sanctionKind: string,
+  missingChecks: readonly string[],
+  connectionUnreachable: boolean,
+  validation?: {
+    reactionsAvailable: boolean | null;
+    title: string | null;
+    username: string | null;
+    isForum: boolean;
+  }
+): void {
   const managed = input.db.getManagedPublicChat(input.chatId);
   if (managed) {
-    input.db.recordManagedPublicChatPermissionHealth({
-      chatId: input.chatId,
-      healthy: false,
-      reactionsAvailable: validation.reactionsAvailable,
-      connected: true,
-      title: validation.title,
-      username: validation.username,
-      isForum: validation.isForum,
-    });
+    if (connectionUnreachable) input.db.recordManagedPublicChatUnreachable(input.chatId);
+    else if (validation)
+      input.db.recordManagedPublicChatPermissionHealth({
+        chatId: input.chatId,
+        healthy: false,
+        reactionsAvailable: validation.reactionsAvailable,
+        connected: true,
+        title: validation.title,
+        username: validation.username,
+        isForum: validation.isForum,
+      });
     input.db.setManagedPublicChatModerationEnabled(input.chatId, false);
   } else {
     input.db.setSetting(moderationSettingKey("enabled"), "false");
@@ -3934,6 +3575,18 @@ async function containModerationSanctionFailure(
     },
     "MODERATION_RIGHTS_CONFIRMED_MISSING"
   );
+}
+
+function isConfirmedTelegramChatAccessLoss(error: unknown): boolean {
+  if (!(error instanceof GrammyError) || (error.error_code !== 400 && error.error_code !== 403)) return false;
+  const description = error.description.toLowerCase();
+  return [
+    "bot is not a member of the chat",
+    "bot is not a member of the supergroup chat",
+    "bot was kicked from the chat",
+    "bot was kicked from the supergroup chat",
+    "chat not found",
+  ].some((phrase) => description.includes(phrase));
 }
 
 function hasEmojiReaction(reactions: readonly ReactionType[], emoji: string): boolean {

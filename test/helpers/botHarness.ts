@@ -1,4 +1,4 @@
-import type { ApiCallFn, Context, Transformer } from "grammy";
+import type { ApiCallFn, Transformer } from "grammy";
 import type { PendingWarningScheduler, SupportBot } from "../../src/bot.js";
 import type { Update, User, UserFromGetMe } from "grammy/types";
 import type { QuickRepliesRegistry } from "../../src/quickReplies.js";

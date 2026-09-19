@@ -389,6 +389,49 @@ describe("public language moderation sanctions", () => {
     assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
   });
 
+  it("keeps a managed chat enabled when rights revalidation receives a Telegram server error", async () => {
+    const harness = createHarness();
+    manage(harness, PUBLIC_CHAT_ID);
+    seedSanctionState(harness, 25, 0);
+    harness.setApiResponseOverride("restrictChatMember", () => ({
+      ok: false,
+      error_code: 400,
+      description: "Bad Request: user is an administrator",
+    }));
+    harness.failNextApiCall("getChat", "Internal Server Error", 500);
+
+    await harness.bot.handleUpdate(publicMessage(118, 25));
+
+    const chat = harness.db.getManagedPublicChat(PUBLIC_CHAT_ID)!;
+    assert.equal(chat.moderation_enabled, 1);
+    assert.equal(chat.permission_status, "HEALTHY");
+    assert.equal(chat.connection_status, "CONNECTED");
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 25)?.current_strikes, 2);
+    assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
+  });
+
+  it("disables a managed chat when revalidation confirms the bot has lost chat membership", async () => {
+    const harness = createHarness();
+    manage(harness, PUBLIC_CHAT_ID);
+    seedSanctionState(harness, 26, 0);
+    harness.setApiResponseOverride("restrictChatMember", () => ({
+      ok: false,
+      error_code: 400,
+      description: "Bad Request: user is an administrator",
+    }));
+    harness.failNextApiCall("getChat", "Bad Request: bot is not a member of the chat", 400);
+
+    await harness.bot.handleUpdate(publicMessage(119, 26));
+
+    const chat = harness.db.getManagedPublicChat(PUBLIC_CHAT_ID)!;
+    assert.equal(chat.moderation_enabled, 0);
+    assert.equal(chat.permission_status, "UNHEALTHY");
+    assert.equal(chat.connection_status, "UNREACHABLE");
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 26)?.current_strikes, 2);
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 26)?.sanction_tier, 0);
+    assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
+  });
+
   it("keeps a durable cleanup job after immediate scheduling fails", async () => {
     const harness = createHarness({
       scheduleModerationCleanup: () => {
