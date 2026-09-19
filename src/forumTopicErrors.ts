@@ -16,21 +16,6 @@ export function isForumTopicUnavailable(error: unknown): boolean {
   );
 }
 
-/**
- * Ticket routing sends only to a ticket's forum thread, never to an arbitrary reply target.
- * Telegram's reply-target wording is therefore safe to treat as that thread no longer existing here.
- */
-export function isTicketRoutingTopicUnavailable(error: unknown): boolean {
-  const description = badRequestDescription(error);
-  return (
-    isForumTopicUnavailable(error) ||
-    (description !== null &&
-      (description.includes("message to be replied not found") ||
-        description.includes("reply message not found") ||
-        description.includes("replied message not found")))
-  );
-}
-
 /** Keeps a closed topic distinct from a missing topic so callers can reopen it safely. */
 export function isForumTopicClosed(error: unknown): boolean {
   const description = badRequestDescription(error);

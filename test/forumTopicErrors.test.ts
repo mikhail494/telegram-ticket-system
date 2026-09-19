@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { GrammyError, HttpError } from "grammy";
-import {
-  isForumTopicClosed,
-  isForumTopicUnavailable,
-  isTicketRoutingTopicUnavailable,
-} from "../src/forumTopicErrors.js";
+import { isForumTopicClosed, isForumTopicUnavailable } from "../src/forumTopicErrors.js";
 
 function telegramBadRequest(description: string): GrammyError {
   return new GrammyError("Telegram API error", { ok: false, error_code: 400, description }, "sendMessage", {});
@@ -23,10 +19,10 @@ describe("forum topic error classification", () => {
     assert.equal(isForumTopicUnavailable(closed), false);
   });
 
-  it("accepts reply-target wording only for ticket routing to its forum target", () => {
-    const replyTarget = telegramBadRequest("Bad Request: message to be replied not found");
-    assert.equal(isForumTopicUnavailable(replyTarget), false);
-    assert.equal(isTicketRoutingTopicUnavailable(replyTarget), true);
+  it("does not infer a missing topic from reply-target wording", () => {
+    assert.equal(isForumTopicUnavailable(telegramBadRequest("Bad Request: message to be replied not found")), false);
+    assert.equal(isForumTopicUnavailable(telegramBadRequest("Bad Request: reply message not found")), false);
+    assert.equal(isForumTopicUnavailable(telegramBadRequest("Bad Request: replied message not found")), false);
   });
 
   it("does not infer a missing topic from generic fields, errors, or transport failures", () => {

@@ -4,7 +4,7 @@ import type { Message, User } from "grammy/types";
 import { archiveTicketIfPossible, logBanEvent, type ArchiveActor } from "./archive.js";
 import { type SupportDatabase, type TicketRecord, type TicketWithUser } from "./db.js";
 import { normalizeTelegramDeliveryError, type NormalizedDeliveryError } from "./deliveryDiagnostics.js";
-import { isTicketRoutingTopicUnavailable } from "./forumTopicErrors.js";
+import { isForumTopicUnavailable } from "./forumTopicErrors.js";
 import {
   CLOSED_TEXT,
   DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME,
@@ -490,7 +490,7 @@ export class TicketRoutingService {
         activeTicket.id
       );
     } catch (error) {
-      if (isTicketRoutingTopicUnavailable(error)) {
+      if (isForumTopicUnavailable(error)) {
         logger.warn(
           { err: error, ticketId: activeTicket.id, messageThreadId: activeTicket.message_thread_id },
           "Staff forum topic is unavailable; creating a fresh ticket"

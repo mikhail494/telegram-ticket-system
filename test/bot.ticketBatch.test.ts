@@ -1121,6 +1121,46 @@ describe("ticket batch Telegram workflow", () => {
     assert.equal(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID)?.preview_token, null);
   });
 
+  it("treats already-applied preview and final-summary edits as successful", async () => {
+    const harness = createHarness();
+    const ticket = harness.seedTicket();
+    const token = getTicketSnapshotToken(ticket, []);
+    harness.db.createTicketBatchExport({
+      exportId: "export_preview_not_modified",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      selectionMode: "all_active",
+      ticketCount: 1,
+      items: [{ ticketId: ticket.id, snapshotToken: token }],
+    });
+    harness.setDownloadResponse(answerPackage("export_preview_not_modified", ticket.id, token));
+    await harness.bot.handleUpdate(
+      buildStaffDocumentUpdate({ fileName: "ticket-answers_export_preview_not_modified.json" })
+    );
+    const preview = harness
+      .findApiCalls("sendMessage")
+      .find((call) => String(call.payload.text).includes("Ticket answer package preview"));
+    assert.ok(preview);
+    harness.clearApiCalls();
+    harness.setApiResponseOverride("editMessageText", () => ({
+      ok: false,
+      error_code: 400,
+      description: "Bad Request: message is not modified",
+    }));
+
+    await harness.bot.handleUpdate(batchCallback(callbackData(preview, "Apply"), 27, preview));
+
+    assert.equal(harness.countApiCalls("editMessageText"), 2);
+    assert.equal(
+      harness.findApiCalls("sendMessage").some((call) => String(call.payload.text).includes("Ticket batch applied")),
+      false
+    );
+    assert.equal(
+      harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID)?.summary_delivery_state,
+      "SENT"
+    );
+  });
+
   it("records a failed batch summary independently after a successful delivery", async () => {
     const harness = createHarness();
     const ticket = harness.seedTicket();

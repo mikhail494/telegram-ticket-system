@@ -5,6 +5,7 @@ import type { ArchiveActor } from "./archive.js";
 import {
   formatDeliveryFailureCategory,
   normalizeTelegramDeliveryError,
+  runReplaySafeTelegramEdit,
   type NormalizedDeliveryError,
 } from "./deliveryDiagnostics.js";
 import { type SupportDatabase, type TicketBatchAnswerItemRecord, type TicketWithUser } from "./db.js";
@@ -1024,10 +1025,12 @@ export class TicketBatchRuntime {
           await this.awaitRecoveryOperation(staffChatId, () =>
             this.dependencies.runStaffChatOperation(
               () =>
-                this.api.editMessageText(originChatId, originMessageId, text, {
-                  reply_markup:
-                    originChatId > 0 ? new InlineKeyboard().text("Back to dashboard", "dashboard:home") : undefined,
-                }),
+                runReplaySafeTelegramEdit(() =>
+                  this.api.editMessageText(originChatId, originMessageId, text, {
+                    reply_markup:
+                      originChatId > 0 ? new InlineKeyboard().text("Back to dashboard", "dashboard:home") : undefined,
+                  })
+                ),
               { replaySafety: "REPLAY_SAFE", operationName: "editMessageText" },
               originChatId
             )

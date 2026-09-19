@@ -60,7 +60,11 @@ import {
   type ModerationCleanupScheduler,
 } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
-import { normalizeTelegramDeliveryError, type NormalizedDeliveryError } from "./deliveryDiagnostics.js";
+import {
+  normalizeTelegramDeliveryError,
+  runReplaySafeTelegramEdit,
+  type NormalizedDeliveryError,
+} from "./deliveryDiagnostics.js";
 import {
   StaffChatDeliveryCoordinator,
   type StaffChatDeliveryOptions,
@@ -2933,7 +2937,10 @@ export function createBot(
     const previewMessageId = packageRecord.preview_message_id;
     try {
       await runStaffChatOperation(
-        () => bot.api.editMessageText(previewChatId, previewMessageId, text, { reply_markup: undefined }),
+        () =>
+          runReplaySafeTelegramEdit(() =>
+            bot.api.editMessageText(previewChatId, previewMessageId, text, { reply_markup: undefined })
+          ),
         { replaySafety: "REPLAY_SAFE", operationName: "editMessageText" },
         previewChatId
       );

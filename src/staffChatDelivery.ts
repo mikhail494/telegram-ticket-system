@@ -23,7 +23,7 @@ export interface StaffChatDeliveryOptions {
 const MAX_INLINE_DELAY_MS = 5_000;
 const MAX_ATTEMPTS = 3;
 
-/** Serializes staff-only Telegram work for each supergroup and retries only confirmed temporary failures. */
+/** Serializes staff-only Telegram work and retries confirmed temporary or replay-safe transport failures. */
 export class StaffChatDeliveryCoordinator {
   private readonly queues = new Map<number, Promise<void>>();
   private readonly now: () => Date;
@@ -80,7 +80,7 @@ export class StaffChatDeliveryCoordinator {
       } catch (error) {
         const diagnostic = normalizeTelegramDeliveryError(error, this.now());
         const delay = retryDelay(diagnostic, attempt, options.replaySafety);
-        if (diagnostic.permanence !== "TEMPORARY" || delay === null) {
+        if (delay === null) {
           if (diagnostic.permanence === "UNKNOWN_DELIVERY") {
             logger.warn(
               { operation: options.operationName, category: diagnostic.category, permanence: diagnostic.permanence },
@@ -94,8 +94,10 @@ export class StaffChatDeliveryCoordinator {
         }
         if (delay > MAX_INLINE_DELAY_MS || attempt === MAX_ATTEMPTS) {
           const retryAt = futureIso(this.now(), delay);
-          this.blockedUntil.set(chatId, new Date(retryAt).getTime());
-          this.blockedDiagnostics.set(chatId, diagnostic);
+          if (blocksStaffChat(diagnostic)) {
+            this.blockedUntil.set(chatId, new Date(retryAt).getTime());
+            this.blockedDiagnostics.set(chatId, diagnostic);
+          }
           return { diagnostic, retryAt };
         }
         await this.sleep(delay);
@@ -115,8 +117,17 @@ function retryDelay(
 ): number | null {
   if (diagnostic.category === "RATE_LIMITED") return (diagnostic.retryAfterSeconds ?? 1) * 1_000 + 250;
   if (diagnostic.category === "TELEGRAM_SERVER_ERROR") return 500 * 2 ** (attempt - 1);
-  if (replaySafety === "REPLAY_SAFE" && diagnostic.permanence === "TEMPORARY") return 500 * 2 ** (attempt - 1);
+  if (
+    replaySafety === "REPLAY_SAFE" &&
+    (diagnostic.category === "NETWORK_TIMEOUT" || diagnostic.category === "NETWORK_ERROR")
+  ) {
+    return 500 * 2 ** (attempt - 1);
+  }
   return null;
+}
+
+function blocksStaffChat(diagnostic: NormalizedDeliveryError): boolean {
+  return diagnostic.category === "RATE_LIMITED" || diagnostic.category === "TELEGRAM_SERVER_ERROR";
 }
 
 function futureIso(now: Date, delay: number): string {
