@@ -206,7 +206,7 @@ describe("multi-public-chat moderation", () => {
     assert.equal(harness.db.getLanguageModerationUserState(CHAT_B, USER_ID)?.sanction_tier, 0);
   });
 
-  it("disables only the affected managed chat when core enforcement fails", async () => {
+  it("disables only the affected managed chat after validation confirms missing required rights", async () => {
     const { harness } = createHarness();
     manage(harness, CHAT_A, true);
     manage(harness, CHAT_B, true);
@@ -218,7 +218,21 @@ describe("multi-public-chat moderation", () => {
       sanction_tier: 0,
       first_strike_at: new Date().toISOString(),
     });
-    harness.failNextApiCall("restrictChatMember");
+    harness.failNextApiCall("restrictChatMember", "Bad Request: not enough rights to restrict chat member", 400);
+    harness.setApiResponseOverride("getChatMember", (call, success) =>
+      call.payload.user_id === TEST_BOT_IDENTITY.id
+        ? {
+            ok: true,
+            result: {
+              status: "administrator",
+              user: TEST_BOT_IDENTITY,
+              can_manage_chat: true,
+              can_delete_messages: true,
+              can_restrict_members: false,
+            },
+          }
+        : success
+    );
 
     await harness.bot.handleUpdate(publicMessage(CHAT_A, 1));
 

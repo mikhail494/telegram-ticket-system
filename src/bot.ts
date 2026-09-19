@@ -1326,6 +1326,7 @@ export function createBot(
         db,
         ctx,
         installation,
+        bot.botInfo?.id,
         moderationNow,
         moderationCleanupScheduler,
         pendingWarnings
@@ -2459,6 +2460,7 @@ export function createBot(
       messageId: reaction.message_id,
       state,
       now: moderationNow,
+      botId: bot.botInfo?.id,
       cleanupScheduler: moderationCleanupScheduler,
       staffChatId: requireStaffChatId(),
       setStrikeReaction: false,
@@ -2506,6 +2508,7 @@ export function createBot(
         db,
         ctx,
         installation,
+        bot.botInfo?.id,
         moderationNow,
         moderationCleanupScheduler,
         pendingWarnings
@@ -3577,6 +3580,7 @@ async function handlePublicLanguageModeration(
   db: SupportDatabase,
   ctx: Context,
   installation: InstallationService,
+  botId: number | undefined,
   now: () => Date,
   cleanupScheduler: ModerationCleanupScheduler,
   pendingWarnings: PendingWarningScheduler
@@ -3679,6 +3683,7 @@ async function handlePublicLanguageModeration(
         messageId: ctx.message.message_id,
         state,
         now,
+        botId,
         cleanupScheduler,
         staffChatId: installation.requireStaffChatId(),
         setStrikeReaction: true,
@@ -3697,6 +3702,7 @@ async function handlePublicLanguageModeration(
     messageId: ctx.message.message_id,
     state,
     now,
+    botId,
     cleanupScheduler,
     staffChatId: installation.requireStaffChatId(),
     setStrikeReaction: true,
@@ -3733,6 +3739,7 @@ async function advanceModerationStrike(input: {
   messageId: number;
   state: Pick<LanguageModerationUserState, "current_strikes" | "sanction_tier" | "first_strike_at">;
   now: () => Date;
+  botId: number | undefined;
   cleanupScheduler: ModerationCleanupScheduler;
   staffChatId: number;
   setStrikeReaction: boolean;
@@ -3758,8 +3765,9 @@ async function advanceModerationStrike(input: {
   }
 
   const tier = Math.min(input.state.sanction_tier, 2);
+  const sanctionKind = tier === 0 ? "24-hour mute" : tier === 1 ? "7-day mute" : "permanent ban";
+  await setModerationReaction(input.api, input.chatId, input.messageId, MODERATION_SANCTION_REACTION);
   try {
-    await setModerationReaction(input.api, input.chatId, input.messageId, MODERATION_SANCTION_REACTION);
     if (tier === 2) await input.api.banChatMember(input.chatId, input.userId);
     else
       await input.api.restrictChatMember(
@@ -3768,52 +3776,164 @@ async function advanceModerationStrike(input: {
         { can_send_messages: false },
         { until_date: Math.floor(input.now().getTime() / 1000) + (tier === 0 ? 86_400 : 604_800) }
       );
-    const nextTier = Math.min(3, input.state.sanction_tier + 1);
-    const violationCycleId = randomUUID();
-    input.db.assignLanguageModerationViolationCycle(
-      input.chatId,
-      input.userId,
-      input.state.sanction_tier,
-      violationCycleId
-    );
-    input.db.upsertLanguageModerationUserState({
-      chat_id: input.chatId,
-      user_telegram_id: input.userId,
-      username: input.username,
-      current_strikes: 0,
-      sanction_tier: nextTier,
-      first_strike_at: null,
-    });
-    const cleanupJobId = input.db.createLanguageModerationCleanupJob({
-      staff_chat_id: input.staffChatId,
-      chat_id: input.chatId,
-      user_telegram_id: input.userId,
-      username: input.username,
-      chat_title: input.chatTitle,
-      sanction_tier: nextTier,
-      sanction_kind: tier === 0 ? "24-hour mute" : tier === 1 ? "7-day mute" : "permanent ban",
-      violation_cycle_id: violationCycleId,
-      cleanup_due_at: new Date(input.now().getTime() + 10_000).toISOString(),
-    });
-    input.cleanupScheduler(input.api, input.db, cleanupJobId);
-    return { currentStrikes: 0, sanctionTier: nextTier };
   } catch (error) {
-    const managed = input.db.getManagedPublicChat(input.chatId);
-    if (managed) {
-      input.db.recordManagedPublicChatPermissionHealth({
-        chatId: input.chatId,
-        healthy: false,
-        reactionsAvailable: managed.reaction_status === "UNKNOWN" ? null : managed.reaction_status === "AVAILABLE",
-      });
-      input.db.setManagedPublicChatModerationEnabled(input.chatId, false);
-    } else {
-      input.db.setSetting(moderationSettingKey("enabled"), "false");
-    }
+    await containModerationSanctionFailure(input, sanctionKind, error);
+    return undefined;
+  }
+
+  const nextTier = Math.min(3, input.state.sanction_tier + 1);
+  const violationCycleId = randomUUID();
+  let cleanupJobId: number;
+  try {
+    cleanupJobId = input.db.completeLanguageModerationSanction({
+      chatId: input.chatId,
+      userId: input.userId,
+      cycleTier: input.state.sanction_tier,
+      violationCycleId,
+      userState: {
+        chat_id: input.chatId,
+        user_telegram_id: input.userId,
+        username: input.username,
+        current_strikes: 0,
+        sanction_tier: nextTier,
+        first_strike_at: null,
+      },
+      cleanupJob: {
+        staff_chat_id: input.staffChatId,
+        chat_id: input.chatId,
+        user_telegram_id: input.userId,
+        username: input.username,
+        chat_title: input.chatTitle,
+        sanction_tier: nextTier,
+        sanction_kind: sanctionKind,
+        violation_cycle_id: violationCycleId,
+        cleanup_due_at: new Date(input.now().getTime() + 10_000).toISOString(),
+      },
+    });
+  } catch (error) {
     logger.error(
-      { chatId: input.chatId, userId: input.userId, err: error },
-      "Language moderation sanction failed; moderation disabled"
+      {
+        phase: "post_sanction_persistence",
+        chatId: input.chatId,
+        userId: input.userId,
+        sanctionTier: tier,
+        sanctionKind,
+        errorName: error instanceof Error ? error.name : "unknown",
+      },
+      "MODERATION_POST_SANCTION_PERSISTENCE_FAILED"
+    );
+    throw error;
+  }
+
+  try {
+    input.cleanupScheduler(input.api, input.db, cleanupJobId);
+  } catch (error) {
+    logger.warn(
+      {
+        chatId: input.chatId,
+        userId: input.userId,
+        cleanupJobId,
+        sanctionTier: tier,
+        sanctionKind,
+        errorName: error instanceof Error ? error.name : "unknown",
+      },
+      "MODERATION_CLEANUP_SCHEDULE_FAILED"
     );
   }
+  return { currentStrikes: 0, sanctionTier: nextTier };
+}
+
+async function containModerationSanctionFailure(
+  input: {
+    db: SupportDatabase;
+    api: BotApi;
+    chatId: number;
+    userId: number;
+    botId: number | undefined;
+    state: Pick<LanguageModerationUserState, "sanction_tier">;
+  },
+  sanctionKind: string,
+  error: unknown
+): Promise<void> {
+  const diagnostic = normalizeTelegramDeliveryError(error);
+  logger.warn(
+    {
+      chatId: input.chatId,
+      userId: input.userId,
+      sanctionTier: input.state.sanction_tier,
+      sanctionKind,
+      category: diagnostic.category,
+      permanence: diagnostic.permanence,
+      telegramErrorCode: diagnostic.telegramErrorCode,
+    },
+    "MODERATION_SANCTION_FAILED"
+  );
+
+  if (diagnostic.permanence !== "PERMANENT") return;
+  if (input.botId === undefined) {
+    logger.warn(
+      {
+        chatId: input.chatId,
+        userId: input.userId,
+        sanctionTier: input.state.sanction_tier,
+        sanctionKind,
+        category: diagnostic.category,
+        permanence: diagnostic.permanence,
+      },
+      "MODERATION_RIGHTS_REVALIDATION_UNKNOWN"
+    );
+    return;
+  }
+
+  let validation;
+  try {
+    validation = await validatePublicModerationChat(input.api, input.chatId, input.botId);
+  } catch (validationError) {
+    const validationDiagnostic = normalizeTelegramDeliveryError(validationError);
+    logger.warn(
+      {
+        chatId: input.chatId,
+        userId: input.userId,
+        sanctionTier: input.state.sanction_tier,
+        sanctionKind,
+        category: validationDiagnostic.category,
+        permanence: validationDiagnostic.permanence,
+        telegramErrorCode: validationDiagnostic.telegramErrorCode,
+      },
+      "MODERATION_RIGHTS_REVALIDATION_UNKNOWN"
+    );
+    return;
+  }
+
+  if (validation.valid) return;
+
+  const missingChecks = validation.checks.filter((check) => !check.passed).map((check) => check.key);
+  const managed = input.db.getManagedPublicChat(input.chatId);
+  if (managed) {
+    input.db.recordManagedPublicChatPermissionHealth({
+      chatId: input.chatId,
+      healthy: false,
+      reactionsAvailable: validation.reactionsAvailable,
+      connected: true,
+      title: validation.title,
+      username: validation.username,
+      isForum: validation.isForum,
+    });
+    input.db.setManagedPublicChatModerationEnabled(input.chatId, false);
+  } else {
+    input.db.setSetting(moderationSettingKey("enabled"), "false");
+  }
+  logger.error(
+    {
+      chatId: input.chatId,
+      userId: input.userId,
+      sanctionTier: input.state.sanction_tier,
+      sanctionKind,
+      missingChecks,
+      managed: Boolean(managed),
+    },
+    "MODERATION_RIGHTS_CONFIRMED_MISSING"
+  );
 }
 
 function hasEmojiReaction(reactions: readonly ReactionType[], emoji: string): boolean {

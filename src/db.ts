@@ -780,6 +780,17 @@ export class SupportDatabase {
     return this.moderation.createLanguageModerationCleanupJob(input);
   }
 
+  completeLanguageModerationSanction(input: {
+    chatId: number;
+    userId: number;
+    cycleTier: number;
+    violationCycleId: string;
+    userState: Omit<LanguageModerationUserState, "updated_at">;
+    cleanupJob: Omit<LanguageModerationCleanupJob, "id" | "state" | "created_at" | "updated_at">;
+  }): number {
+    return this.moderation.completeLanguageModerationSanction(input);
+  }
+
   getLanguageModerationCleanupJob(jobId: number): LanguageModerationCleanupJob | undefined {
     return this.moderation.getLanguageModerationCleanupJob(jobId);
   }

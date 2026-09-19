@@ -9,6 +9,7 @@ All notable changes to this project are documented in this file. This project fo
 - Ticket Batch exports no longer fail entirely when Telegram cannot resolve a historical attachment file_id; the attachment is recorded as unavailable instead.
 - Interactive staff replies and Support Logs transcript archives now persist delivery intent and confirmed Telegram message IDs around external sends. Ambiguous outcomes become `UNKNOWN_DELIVERY` and require reconciliation instead of blind resend.
 - Telegram transport failures now remain `UNKNOWN_DELIVERY` unless Telegram returned a confirmed retryable API response; non-idempotent staff operations are not replayed automatically.
+- Moderation sanction failures now disable a chat only after validation positively confirms required bot rights are missing; temporary, ambiguous, target-specific, and cleanup scheduling failures remain contained to the failed action.
 
 ### Changed
 
