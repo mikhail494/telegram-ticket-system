@@ -1,6 +1,6 @@
 import { GrammyError, InlineKeyboard, Keyboard } from "grammy";
 import type { Context } from "grammy";
-import type { ManagedPublicChatRecord, SupportDatabase, TeamMemberRecord } from "./db.js";
+import type { DeliveryReconciliationRecord, ManagedPublicChatRecord, SupportDatabase, TeamMemberRecord } from "./db.js";
 import {
   DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME,
   DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE,
@@ -30,6 +30,11 @@ export type PendingQuickReplyInput =
 
 export type PendingSupportSettingsInput = "RESPONSE_TIME" | "ACKNOWLEDGEMENT";
 
+type PendingDeliveryReconciliationInput = {
+  action: "CONFIRMED_DELIVERED" | "CONFIRMED_FAILED";
+  caseToken: string;
+};
+
 export type PublicChatConfigurationField = "warning" | "allowlist" | "cooldown" | "threshold" | "lookback";
 
 type PrivateUiTarget = { chatId: number; messageId: number };
@@ -44,6 +49,7 @@ export interface PrivateControlPlaneOperatorDependencies {
   onStartTestTicket: (ctx: Context) => Promise<void>;
   onShowWorkspace: (ctx: Context) => Promise<void>;
   onShowBatch: (ctx: Context) => Promise<void>;
+  onFinalizeReconciledArchive: (ticketId: number) => Promise<boolean>;
   packageVersion: string;
   botUsername: () => string | undefined;
   botId: () => number | undefined;
@@ -63,6 +69,7 @@ export class PrivateControlPlane {
     "public",
     "quick",
     "support",
+    "delivery",
     "team",
     "rbac",
   ]);
@@ -77,6 +84,7 @@ export class PrivateControlPlane {
   >();
   private readonly pendingQuickReplyInputs = new Map<number, PendingQuickReplyInput>();
   private readonly pendingSupportSettingsInputs = new Map<number, PendingSupportSettingsInput>();
+  private readonly pendingDeliveryReconciliationInputs = new Map<number, PendingDeliveryReconciliationInput>();
   private readonly pendingWorkspaceSelections = new Map<number, "SETUP" | "RECONFIGURE">();
   private operatorDependencies: PrivateControlPlaneOperatorDependencies | undefined;
 
@@ -100,6 +108,10 @@ export class PrivateControlPlane {
 
   clearSupportSettingsInput(userId: number): void {
     this.pendingSupportSettingsInputs.delete(userId);
+  }
+
+  clearDeliveryReconciliationInput(userId: number): void {
+    this.pendingDeliveryReconciliationInputs.delete(userId);
   }
 
   getPendingSupportSettingsInput(userId: number): PendingSupportSettingsInput | undefined {
@@ -314,6 +326,7 @@ export class PrivateControlPlane {
   }
 
   async handlePrivateInput(ctx: Context, text: string): Promise<boolean> {
+    if (await this.consumeDeliveryReconciliationInput(ctx, text)) return true;
     if (await this.consumeQuickReplyInput(ctx, text)) return true;
     if (await this.consumeSupportSettingsInput(ctx, text)) return true;
     if (await this.consumePublicChatConfiguration(ctx, text)) return true;
@@ -354,6 +367,7 @@ export class PrivateControlPlane {
     if (namespace === "public") return this.handlePublicChatCallback(ctx, action, value, extra);
     if (namespace === "quick") return this.handleQuickRepliesCallback(ctx, action, value);
     if (namespace === "support") return this.handleSupportSettingsCallback(ctx, action);
+    if (namespace === "delivery") return this.handleDeliveryReconciliationCallback(ctx, action, value);
     if (namespace === "team") return this.handleTeamCallback(ctx, action, value, extra);
     if (namespace === "rbac") {
       await ctx.answerCallbackQuery({
@@ -388,6 +402,55 @@ export class PrivateControlPlane {
   async showSystemStatus(ctx: Context): Promise<void> {
     if (!ctx.from) return;
     await this.renderScreen(ctx, this.systemStatusText(), new InlineKeyboard().text("Back", "dashboard:home"));
+  }
+
+  async showDeliveryReconciliations(ctx: Context, notice?: string): Promise<void> {
+    const staffChatId = this.installation.getStaffChatId();
+    const dependencies = this.operatorDependenciesOrThrow();
+    const records = staffChatId === null ? [] : dependencies.db.listUnknownDeliveryReconciliations(staffChatId, 20);
+    const total = staffChatId === null ? 0 : dependencies.db.countUnknownDeliveryReconciliations(staffChatId);
+    const keyboard = new InlineKeyboard();
+    for (const record of records)
+      keyboard
+        .text(`#${record.ticketId} ${this.deliveryKindLabel(record.kind)}`, `delivery:view:${record.caseToken}`)
+        .row();
+    keyboard.text("Back", "dashboard:home");
+    await this.renderScreen(
+      ctx,
+      [
+        "Delivery reconciliation",
+        "",
+        ...(notice ? [notice, ""] : []),
+        total
+          ? `${total} unresolved delivery ${total === 1 ? "record" : "records"}. Verify the result in Telegram before reconciling.${total > records.length ? ` Showing the oldest ${records.length}.` : ""}`
+          : "No unresolved delivery records.",
+        "",
+        "UNKNOWN_DELIVERY is never resent automatically.",
+      ].join("\n"),
+      keyboard
+    );
+  }
+
+  async showDeliveryReconciliationDetail(ctx: Context, caseToken: string, notice?: string): Promise<void> {
+    const staffChatId = this.installation.getStaffChatId();
+    const record =
+      staffChatId === null
+        ? undefined
+        : this.operatorDependenciesOrThrow().db.getUnknownDeliveryReconciliation(staffChatId, caseToken);
+    if (!record) {
+      await this.showDeliveryReconciliations(ctx, notice ?? "This delivery is no longer unresolved.");
+      return;
+    }
+    await this.renderScreen(
+      ctx,
+      this.deliveryReconciliationText(record, notice),
+      new InlineKeyboard()
+        .text("Mark delivered", `delivery:delivered:${caseToken}`)
+        .row()
+        .text("Mark not delivered", `delivery:failed:${caseToken}`)
+        .row()
+        .text("Back", "delivery:list")
+    );
   }
 
   async showModerationDashboard(ctx: Context): Promise<void> {
@@ -688,6 +751,7 @@ export class PrivateControlPlane {
 
   private async handleDashboardCallback(ctx: Context, action: string | undefined): Promise<boolean> {
     if (!isPrivateChat(ctx) || !ctx.from) return false;
+    this.pendingDeliveryReconciliationInputs.delete(ctx.from.id);
     const dependencies = this.operatorDependenciesOrThrow();
     if (!this.installation.getMember(ctx.from.id)) {
       await ctx.answerCallbackQuery({ text: "Staff access required.", show_alert: true });
@@ -735,6 +799,12 @@ export class PrivateControlPlane {
     if (action === "support") {
       if (!(await dependencies.canConfigure(ctx))) return true;
       await this.showSupportSettings(ctx);
+      return true;
+    }
+    if (action === "delivery") {
+      if (!(await dependencies.canConfigure(ctx))) return true;
+      this.pendingDeliveryReconciliationInputs.delete(ctx.from.id);
+      await this.showDeliveryReconciliations(ctx);
       return true;
     }
     if (action === "batch") {
@@ -1024,6 +1094,128 @@ export class PrivateControlPlane {
       return true;
     }
     await ctx.answerCallbackQuery({ text: "Unknown Quick Replies action.", show_alert: true });
+    return true;
+  }
+
+  private async handleDeliveryReconciliationCallback(
+    ctx: Context,
+    action: string | undefined,
+    caseToken: string | undefined
+  ): Promise<boolean> {
+    const dependencies = this.operatorDependenciesOrThrow();
+    if (!(await dependencies.canConfigure(ctx)) || !ctx.from) return true;
+    if (action === "list") {
+      this.pendingDeliveryReconciliationInputs.delete(ctx.from.id);
+      await ctx.answerCallbackQuery();
+      await this.showDeliveryReconciliations(ctx);
+      return true;
+    }
+    if (action === "view" && caseToken) {
+      this.pendingDeliveryReconciliationInputs.delete(ctx.from.id);
+      await ctx.answerCallbackQuery();
+      await this.showDeliveryReconciliationDetail(ctx, caseToken);
+      return true;
+    }
+    if ((action === "delivered" || action === "failed") && caseToken) {
+      const staffChatId = this.installation.getStaffChatId();
+      const record =
+        staffChatId === null ? undefined : dependencies.db.getUnknownDeliveryReconciliation(staffChatId, caseToken);
+      if (!record) {
+        await ctx.answerCallbackQuery({ text: "This delivery is no longer unresolved.", show_alert: true });
+        await this.showDeliveryReconciliations(ctx);
+        return true;
+      }
+      this.pendingDeliveryReconciliationInputs.set(ctx.from.id, {
+        action: action === "delivered" ? "CONFIRMED_DELIVERED" : "CONFIRMED_FAILED",
+        caseToken,
+      });
+      await ctx.answerCallbackQuery();
+      await this.renderScreen(
+        ctx,
+        action === "delivered"
+          ? "Confirm delivered\n\nVerify the message in Telegram, then send its numeric Telegram message ID. This records proof; it does not resend anything."
+          : "Confirm not delivered\n\nVerify that Telegram did not deliver this operation, then send a concise operator note. This does not retry the operation.",
+        new InlineKeyboard().text("Cancel", `delivery:view:${caseToken}`)
+      );
+      return true;
+    }
+    await ctx.answerCallbackQuery({ text: "Unknown delivery reconciliation action.", show_alert: true });
+    return true;
+  }
+
+  private async consumeDeliveryReconciliationInput(ctx: Context, text: string): Promise<boolean> {
+    if (!ctx.from) return false;
+    const pending = this.pendingDeliveryReconciliationInputs.get(ctx.from.id);
+    if (!pending) return false;
+    const dependencies = this.operatorDependenciesOrThrow();
+    if (!(await dependencies.canConfigure(ctx))) return true;
+    const staffChatId = this.installation.getStaffChatId();
+    if (staffChatId === null) {
+      this.pendingDeliveryReconciliationInputs.delete(ctx.from.id);
+      await ctx.reply("The staff workspace is not configured.");
+      return true;
+    }
+    const trimmed = text.trim();
+    const telegramMessageId = pending.action === "CONFIRMED_DELIVERED" ? Number(trimmed) : undefined;
+    if (
+      pending.action === "CONFIRMED_DELIVERED" &&
+      (!Number.isSafeInteger(telegramMessageId) || telegramMessageId! <= 0)
+    ) {
+      await this.showDeliveryReconciliationDetail(
+        ctx,
+        pending.caseToken,
+        "Send a positive numeric Telegram message ID."
+      );
+      return true;
+    }
+    if (pending.action === "CONFIRMED_FAILED" && (!trimmed || trimmed.length > 500)) {
+      await this.showDeliveryReconciliationDetail(
+        ctx,
+        pending.caseToken,
+        "Send an operator note of 1 to 500 characters."
+      );
+      return true;
+    }
+    const result = dependencies.db.reconcileUnknownDelivery({
+      staffChatId,
+      caseToken: pending.caseToken,
+      action: pending.action,
+      telegramMessageId,
+      reconciledBy: ctx.from.id,
+      note: pending.action === "CONFIRMED_FAILED" ? trimmed : null,
+    });
+    logger.info(
+      {
+        actorId: ctx.from.id,
+        caseToken: pending.caseToken,
+        action: pending.action,
+        outcome: result.outcome,
+        deliveryKind: result.kind,
+        ticketId: result.ticketId,
+      },
+      "Delivery reconciliation reviewed"
+    );
+    this.pendingDeliveryReconciliationInputs.delete(ctx.from.id);
+    if (result.archiveFinalizationRequired && result.ticketId !== undefined) {
+      try {
+        await dependencies.onFinalizeReconciledArchive(result.ticketId);
+      } catch (error) {
+        logger.error(
+          { err: error, ticketId: result.ticketId, reconciliationOutcome: result.outcome },
+          "Reconciled archive delivery but local archive finalization remains pending"
+        );
+      }
+    }
+    const notice =
+      result.outcome === "APPLIED"
+        ? `Reconciled ticket #${result.ticketId}. Result: ${result.resultingState}.`
+        : result.outcome === "IDEMPOTENT"
+          ? "This reconciliation was already recorded."
+          : result.outcome === "CONFLICT"
+            ? "Another operator already reconciled this delivery differently. No state was changed."
+            : "This delivery is no longer unresolved.";
+    await this.retireScreens(ctx);
+    await this.showDeliveryReconciliations(ctx, notice);
     return true;
   }
 
@@ -1317,6 +1509,8 @@ export class PrivateControlPlane {
         )
         .text("Batch status", "batch-ui:recent")
         .row()
+        .text("Delivery review", "dashboard:delivery")
+        .row()
         .text("System status", "dashboard:status")
         .row();
     }
@@ -1348,6 +1542,32 @@ export class PrivateControlPlane {
       `Pending batch staff operations: ${counts.pendingBatchStaffOperations}`,
       "Database: available",
     ].join("\n");
+  }
+
+  private deliveryReconciliationText(record: DeliveryReconciliationRecord, notice?: string): string {
+    return [
+      this.deliveryKindLabel(record.kind),
+      "",
+      ...(notice ? [notice, ""] : []),
+      `Ticket: #${record.ticketId}`,
+      `Operation: ${record.operationIdentity}`,
+      `State: ${record.state}`,
+      `Source chat/message: ${record.sourceChatId ?? "not recorded"}/${record.sourceMessageId ?? "not recorded"}`,
+      `Destination chat: ${record.destinationChatId ?? "not recorded"}`,
+      `Related Telegram message: ${record.relatedTelegramMessageId ?? "none"}`,
+      `Known delivery message: ${record.knownTelegramMessageId ?? "none"}`,
+      `Diagnostic: ${record.diagnosticCategory ?? "not recorded"}`,
+      `Updated: ${record.updatedAt}`,
+      "",
+      "Verify the outcome directly in Telegram. Reconciliation never resends the operation.",
+    ].join("\n");
+  }
+
+  private deliveryKindLabel(kind: DeliveryReconciliationRecord["kind"]): string {
+    if (kind === "INTERACTIVE") return "Interactive reply";
+    if (kind === "ARCHIVE_SUMMARY") return "Archive summary";
+    if (kind === "ARCHIVE_DOCUMENT") return "Archive transcript";
+    return "Batch reply";
   }
 
   private publicChatLabel(chat: ManagedPublicChatRecord | undefined): string {

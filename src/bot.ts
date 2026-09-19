@@ -384,6 +384,7 @@ export function createBot(
       if (exportId) await showPrivateBatchWaiting(ctx, exportId);
       else await privateControlPlane.showDashboard(ctx);
     },
+    onFinalizeReconciledArchive: (ticketId) => ticketRouting.finalizeReconciledArchive(ticketId),
     packageVersion: packageMetadata.version,
     botUsername: () => bot.botInfo?.username,
     botId: () => bot.botInfo?.id,
@@ -1704,6 +1705,9 @@ export function createBot(
     }
     if (isPrivateChat(ctx) && ctx.from && namespace !== "support") {
       privateControlPlane.clearSupportSettingsInput(ctx.from.id);
+    }
+    if (isPrivateChat(ctx) && ctx.from && namespace !== "delivery") {
+      privateControlPlane.clearDeliveryReconciliationInput(ctx.from.id);
     }
 
     if (await privateControlPlane.handleCallback(ctx, data)) return;

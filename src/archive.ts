@@ -185,6 +185,14 @@ export async function archiveTicketIfPossible(
     return false;
   }
 
+  if (delivery?.state === "FAILED" && delivery.failure_category === "OPERATOR_CONFIRMED_NOT_DELIVERED") {
+    logger.warn(
+      { ticketId: ticket.id },
+      "Ticket archive was confirmed not delivered and requires a new operator action"
+    );
+    return false;
+  }
+
   if (delivery?.state === "DELIVERED") {
     const finalized = db.finalizeTicketArchiveDelivery(ticket.id);
     if (finalized) await removeTicketTopicAfterArchive(api, ticket);

@@ -15,6 +15,7 @@ import { type BackgroundTaskTracker } from "./lifecycle.js";
 import { logger } from "./logger.js";
 import type { StaffChatOperationOptions } from "./staffChatDelivery.js";
 import { getTicketSnapshotToken } from "./ticketBatch.js";
+import type { InteractiveStaffReplySource } from "./ticketRouting.js";
 
 const STAFF_OPERATION_NO_RETRY_AT = "9999-12-31T23:59:59.999Z";
 
@@ -54,7 +55,12 @@ export interface TicketBatchRuntimeDependencies {
     options: StaffChatOperationOptions,
     chatId?: number
   ): Promise<T>;
-  deliverUserReply(ticket: TicketWithUser, text: string, staffUser: User | undefined): Promise<number>;
+  deliverUserReply(
+    ticket: TicketWithUser,
+    text: string,
+    staffUser: User | undefined,
+    source: InteractiveStaffReplySource
+  ): Promise<number>;
   closeTicket(ticketId: number, options: TicketBatchCloseOptions, staffChatId?: number): Promise<void>;
   staffActor(staffUser: User | undefined): ArchiveActor;
   refreshTicket(ticketId: number, staffChatId?: number): Promise<void>;
@@ -293,7 +299,11 @@ export class TicketBatchRuntime {
       }
       let deliveryMessageId: number;
       try {
-        deliveryMessageId = await this.dependencies.deliverUserReply(ticket, item.reply_text ?? "", staffUser);
+        deliveryMessageId = await this.dependencies.deliverUserReply(ticket, item.reply_text ?? "", staffUser, {
+          chatId: packageRecord.source_chat_id,
+          messageId: packageRecord.source_message_id,
+          operationKey: `ticket-batch:${answerPackageId}:${item.ticket_id}`,
+        });
       } catch (error) {
         const diagnostic = normalizeTelegramDeliveryError(error);
         const state = diagnostic.permanence === "UNKNOWN_DELIVERY" ? "UNKNOWN_DELIVERY" : "FAILED";

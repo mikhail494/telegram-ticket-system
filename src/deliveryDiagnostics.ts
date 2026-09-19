@@ -11,6 +11,7 @@ export const DELIVERY_ERROR_CATEGORIES = [
   "NETWORK_TIMEOUT",
   "NETWORK_ERROR",
   "UNKNOWN_TELEGRAM_ERROR",
+  "OPERATOR_CONFIRMED_NOT_DELIVERED",
 ] as const;
 
 export type DeliveryErrorCategory = (typeof DELIVERY_ERROR_CATEGORIES)[number];

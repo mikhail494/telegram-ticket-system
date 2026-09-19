@@ -29,10 +29,10 @@ interface CloseTicketOptions {
   onArchiveFailure?: (diagnostic: NormalizedDeliveryError) => void;
 }
 
-interface StaffTextReplySource {
-  chatId: number;
-  messageId: number;
-  operationKey?: string;
+export interface InteractiveStaffReplySource {
+  chatId: number | null;
+  messageId: number | null;
+  operationKey: string;
 }
 
 export class InteractiveReplyNotResentError extends Error {
@@ -59,13 +59,13 @@ export class TicketRoutingService {
     ticket: TicketWithUser,
     text: string,
     staffUser: User | undefined,
-    source?: StaffTextReplySource
+    source: InteractiveStaffReplySource
   ): Promise<number> {
     const message = {
       ticketId: ticket.id,
       direction: "STAFF_TO_USER",
-      sourceChatId: source?.chatId ?? ticket.staff_chat_id ?? this.requireStaffChatId(),
-      sourceMessageId: source?.messageId ?? null,
+      sourceChatId: source.chatId ?? ticket.staff_chat_id ?? this.requireStaffChatId(),
+      sourceMessageId: source.messageId,
       deliveryChatId: ticket.user_telegram_id,
       fromTelegramId: staffUser?.id ?? null,
       fromUsername: usernameOf(staffUser),
@@ -77,11 +77,6 @@ export class TicketRoutingService {
       filename: null,
       fileId: null,
     } as const;
-    if (!source?.operationKey) {
-      const sent = await this.dependencies.api.sendMessage(ticket.user_telegram_id, truncate(text.trim(), 3500));
-      this.dependencies.db.addMessage({ ...message, deliveryMessageId: sent.message_id });
-      return sent.message_id;
-    }
     return this.deliverInteractiveStaffReply(source.operationKey, message, () =>
       this.dependencies.api
         .sendMessage(ticket.user_telegram_id, truncate(text.trim(), 3500))
@@ -230,6 +225,10 @@ export class TicketRoutingService {
     return archived
       ? `Ticket #${closedTicket?.id ?? ticketId} closed and archived.`
       : `Ticket #${closedTicket?.id ?? ticketId} closed. Transcript archive is pending retry.`;
+  }
+
+  async finalizeReconciledArchive(ticketId: number, staffChatId = this.requireStaffChatId()): Promise<boolean> {
+    return archiveTicketIfPossible(this.dependencies.api, this.dependencies.db, staffChatId, ticketId);
   }
 
   async refreshTicket(ticketId: number, staffChatId = this.requireStaffChatId()): Promise<void> {

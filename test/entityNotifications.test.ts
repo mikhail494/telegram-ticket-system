@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
+import { HttpError, type Context } from "grammy";
 import type { EntityNotificationProvider } from "../src/entityNotifications.js";
 import {
   EntityNotificationValidationError,
@@ -211,6 +212,23 @@ describe("entity notification publication state", () => {
     assert.equal(failed.status, "FAILED");
     assert.equal(replay.status, "PUBLISHED");
     assert.equal(harness.db.countEntityNotificationPublications("PUBLISHED"), 1);
+  });
+
+  it("records ambiguous transport as UNKNOWN_DELIVERY and never replays it", async () => {
+    const harness = createHarness();
+    const ambiguousApi = {
+      sendMessage: async () => {
+        throw new HttpError("socket closed", Object.assign(new Error("socket closed"), { code: "ECONNRESET" }));
+      },
+    } as unknown as Context["api"];
+
+    const first = await processEntityNotificationEvent(ambiguousApi, harness.db, EVENT, settings());
+    const replay = await processEntityNotificationEvent(harness.bot.api, harness.db, EVENT, settings());
+
+    assert.equal(first.status, "UNKNOWN_DELIVERY");
+    assert.equal(replay.status, "IN_FLIGHT");
+    assert.equal(harness.db.countEntityNotificationPublications("UNKNOWN_DELIVERY"), 1);
+    assert.equal(harness.countApiCalls("sendMessage"), 0);
   });
 
   it("suppresses an interrupted CLAIMED identity conservatively", async () => {

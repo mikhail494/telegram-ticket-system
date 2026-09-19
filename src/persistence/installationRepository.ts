@@ -133,6 +133,20 @@ export class InstallationRepository {
       .run(error.slice(0, 160), now(), provider, entityType, entityId);
   }
 
+  recordEntityNotificationUnknown(
+    provider: string,
+    entityType: string,
+    entityId: string,
+    eventType: "created",
+    error: string
+  ): void {
+    this.db
+      .prepare(
+        "UPDATE entity_notification_publications SET state = 'UNKNOWN_DELIVERY', last_error = ?, updated_at = ? WHERE provider = ? AND entity_type = ? AND entity_id = ? AND event_type = 'created' AND state = 'CLAIMED'"
+      )
+      .run(error.slice(0, 160), now(), provider, entityType, entityId);
+  }
+
   countEntityNotificationPublications(state?: EntityNotificationPublicationState): number {
     const row = state
       ? (this.db
