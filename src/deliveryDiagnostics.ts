@@ -29,6 +29,24 @@ export interface NormalizedDeliveryError {
 
 const MAX_DESCRIPTION_LENGTH = 180;
 
+export function isTelegramMessageNotModified(error: unknown): boolean {
+  return (
+    error instanceof GrammyError &&
+    error.error_code === 400 &&
+    error.description.toLowerCase().includes("message is not modified")
+  );
+}
+
+/** Executes a replay-safe Telegram edit while accepting Telegram's confirmed already-applied response. */
+export async function runReplaySafeTelegramEdit(operation: () => Promise<unknown>): Promise<true> {
+  try {
+    await operation();
+  } catch (error) {
+    if (!isTelegramMessageNotModified(error)) throw error;
+  }
+  return true;
+}
+
 export function normalizeTelegramDeliveryError(error: unknown, occurredAt = new Date()): NormalizedDeliveryError {
   if (error instanceof GrammyError) {
     const description = sanitizeDescription(error.description);
@@ -79,7 +97,8 @@ export function normalizeTelegramDeliveryError(error: unknown, occurredAt = new 
     const isTimeout = name === "AbortError" || code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT";
     return {
       category: isTimeout ? "NETWORK_TIMEOUT" : "NETWORK_ERROR",
-      permanence: isTimeout ? "UNKNOWN_DELIVERY" : "TEMPORARY",
+      // HttpError does not prove whether Telegram accepted a side-effecting request.
+      permanence: "UNKNOWN_DELIVERY",
       method: null,
       telegramErrorCode: null,
       httpStatus: null,

@@ -47,12 +47,21 @@ describe("batch delivery diagnostics", () => {
     assert.equal(normalized.retryAfterSeconds, 39);
   });
 
-  it("classifies Telegram 5xx and uncertain network failures safely", () => {
-    assert.equal(
-      normalizeTelegramDeliveryError(grammy("Internal Server Error", 500)).category,
-      "TELEGRAM_SERVER_ERROR"
-    );
+  it("classifies confirmed Telegram 5xx as temporary", () => {
+    const normalized = normalizeTelegramDeliveryError(grammy("Internal Server Error", 500));
+    assert.equal(normalized.category, "TELEGRAM_SERVER_ERROR");
+    assert.equal(normalized.permanence, "TEMPORARY");
+  });
+
+  it("keeps all transport failures unknown because Telegram acceptance cannot be proven", () => {
     const timeout = new HttpError("request timed out", Object.assign(new Error("timeout"), { name: "AbortError" }));
     assert.equal(normalizeTelegramDeliveryError(timeout).permanence, "UNKNOWN_DELIVERY");
+    const socket = new HttpError("socket closed", Object.assign(new Error("socket closed"), { code: "ECONNRESET" }));
+    assert.equal(normalizeTelegramDeliveryError(socket).category, "NETWORK_ERROR");
+    assert.equal(normalizeTelegramDeliveryError(socket).permanence, "UNKNOWN_DELIVERY");
+  });
+
+  it("treats arbitrary exceptions as unknown delivery outcomes", () => {
+    assert.equal(normalizeTelegramDeliveryError(new Error("unclassified")).permanence, "UNKNOWN_DELIVERY");
   });
 });

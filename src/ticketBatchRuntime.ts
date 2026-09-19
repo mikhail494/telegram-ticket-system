@@ -5,6 +5,7 @@ import type { ArchiveActor } from "./archive.js";
 import {
   formatDeliveryFailureCategory,
   normalizeTelegramDeliveryError,
+  runReplaySafeTelegramEdit,
   type NormalizedDeliveryError,
 } from "./deliveryDiagnostics.js";
 import { type SupportDatabase, type TicketBatchAnswerItemRecord, type TicketWithUser } from "./db.js";
@@ -12,6 +13,7 @@ import { formatEscalationTarget, formatFollowUpState, truncate } from "./format.
 import type { InstallationService } from "./installation.js";
 import { type BackgroundTaskTracker } from "./lifecycle.js";
 import { logger } from "./logger.js";
+import type { StaffChatOperationOptions } from "./staffChatDelivery.js";
 import { getTicketSnapshotToken } from "./ticketBatch.js";
 
 const STAFF_OPERATION_NO_RETRY_AT = "9999-12-31T23:59:59.999Z";
@@ -47,7 +49,11 @@ export interface TicketBatchRuntimeDependencies {
   api: Context["api"];
   installation: InstallationService;
   backgroundTasks: BackgroundTaskTracker;
-  runStaffChatOperation<T>(operation: () => Promise<T>, chatId?: number): Promise<T>;
+  runStaffChatOperation<T>(
+    operation: () => Promise<T>,
+    options: StaffChatOperationOptions,
+    chatId?: number
+  ): Promise<T>;
   deliverUserReply(ticket: TicketWithUser, text: string, staffUser: User | undefined): Promise<number>;
   closeTicket(ticketId: number, options: TicketBatchCloseOptions, staffChatId?: number): Promise<void>;
   staffActor(staffUser: User | undefined): ArchiveActor;
@@ -585,11 +591,20 @@ export class TicketBatchRuntime {
     return STAFF_OPERATION_NO_RETRY_AT;
   }
 
-  private batchStaffFailure(error: unknown): { category: string; retryAt: string | null } {
+  private batchStaffFailure(error: unknown): {
+    category: string;
+    permanence: NormalizedDeliveryError["permanence"];
+    retryAt: string | null;
+  } {
     if (error instanceof TicketBatchStaffOperationError) {
-      return { category: error.diagnostic.category, retryAt: error.retryAt };
+      return {
+        category: error.diagnostic.category,
+        permanence: error.diagnostic.permanence,
+        retryAt: error.retryAt,
+      };
     }
-    return { category: normalizeTelegramDeliveryError(error).category, retryAt: null };
+    const diagnostic = normalizeTelegramDeliveryError(error);
+    return { category: diagnostic.category, permanence: diagnostic.permanence, retryAt: null };
   }
 
   private staffNextRetryAt(error: unknown): string | null {
@@ -702,6 +717,7 @@ export class TicketBatchRuntime {
     const echoed = await this.awaitRecoveryOperation(recoveryStaffChatId, () =>
       this.dependencies.runStaffChatOperation(
         () => this.api.sendMessage(staffChatId, truncate(lines.join("\n"), 3500), { message_thread_id: threadId }),
+        { replaySafety: "NON_IDEMPOTENT", operationName: "sendMessage" },
         staffChatId
       )
     );
@@ -759,6 +775,7 @@ export class TicketBatchRuntime {
       const sent = await this.awaitRecoveryOperation(recoveryStaffChatId, () =>
         this.dependencies.runStaffChatOperation(
           () => this.api.sendMessage(staffChatId, lines.join("\n"), { message_thread_id: threadId }),
+          { replaySafety: "NON_IDEMPOTENT", operationName: "sendMessage" },
           staffChatId
         )
       );
@@ -1008,10 +1025,13 @@ export class TicketBatchRuntime {
           await this.awaitRecoveryOperation(staffChatId, () =>
             this.dependencies.runStaffChatOperation(
               () =>
-                this.api.editMessageText(originChatId, originMessageId, text, {
-                  reply_markup:
-                    originChatId > 0 ? new InlineKeyboard().text("Back to dashboard", "dashboard:home") : undefined,
-                }),
+                runReplaySafeTelegramEdit(() =>
+                  this.api.editMessageText(originChatId, originMessageId, text, {
+                    reply_markup:
+                      originChatId > 0 ? new InlineKeyboard().text("Back to dashboard", "dashboard:home") : undefined,
+                  })
+                ),
+              { replaySafety: "REPLAY_SAFE", operationName: "editMessageText" },
               originChatId
             )
           );
@@ -1027,6 +1047,7 @@ export class TicketBatchRuntime {
                       ? new InlineKeyboard().text("Back to dashboard", "dashboard:home")
                       : undefined,
                 }),
+              { replaySafety: "NON_IDEMPOTENT", operationName: "sendMessage" },
               destinationChatId
             )
           );
@@ -1044,7 +1065,7 @@ export class TicketBatchRuntime {
             failure.retryAt
           );
           this.scheduleRecovery(failure.retryAt);
-        } else if (item.final_summary_origin_message_id !== null) {
+        } else if (failure.permanence === "PERMANENT" && item.final_summary_origin_message_id !== null) {
           this.db.queueTicketBatchFinalSummary(item.answer_package_id, staffChatId, {
             text,
             chatId: item.final_summary_chat_id ?? staffChatId,
