@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
+import { HttpError } from "grammy";
 import type { Update } from "grammy/types";
 import {
   TEST_STAFF_CHAT_ID,
   createBotHarness,
   type ApiMockSuccess,
   type BotHarness,
+  type BotHarnessOptions,
   type RecordedApiCall,
 } from "./helpers/botHarness.js";
 import {
@@ -28,8 +30,8 @@ afterEach(() => {
   harnesses.length = 0;
 });
 
-function createHarness(): BotHarness {
-  const harness = createBotHarness({ moderationNow: () => FIXED_NOW });
+function createHarness(options: BotHarnessOptions = {}): BotHarness {
+  const harness = createBotHarness({ moderationNow: () => FIXED_NOW, ...options });
   harnesses.push(harness);
   return harness;
 }
@@ -39,14 +41,26 @@ function enable(harness: BotHarness): void {
   harness.db.setSetting("language_moderation:target", String(PUBLIC_CHAT_ID));
 }
 
-function publicMessage(messageId: number, userId: number, text = CYRILLIC): Update {
+function manage(harness: BotHarness, chatId: number, enabled = true): void {
+  const workspaceId = harness.db.getActiveWorkspace()!.id;
+  harness.db.upsertManagedPublicChat({ chatId, workspaceId, title: `Community ${Math.abs(chatId)}`, isForum: true });
+  harness.db.setManagedPublicChatModerationEnabled(chatId, enabled);
+  harness.db.recordManagedPublicChatPermissionHealth({
+    chatId,
+    healthy: true,
+    reactionsAvailable: null,
+    connected: true,
+  });
+}
+
+function publicMessage(messageId: number, userId: number, text = CYRILLIC, chatId = PUBLIC_CHAT_ID): Update {
   return {
     update_id: messageId,
     message: {
       message_id: messageId,
       date: Math.floor(FIXED_NOW.getTime() / 1000),
       from: { id: userId, is_bot: false, first_name: "Public User", username: `public_${userId}` },
-      chat: { id: PUBLIC_CHAT_ID, type: "supergroup", title: "Public Community" },
+      chat: { id: chatId, type: "supergroup", title: "Public Community" },
       text,
     },
   };
@@ -239,11 +253,11 @@ describe("public language moderation sanctions", () => {
     assert.equal(harness.db.getSetting("language_moderation:enabled"), "true");
   });
 
-  it("fails closed without changing state or scheduling cleanup when enforcement fails", async () => {
+  it("contains a rate-limited sanction failure without disabling moderation", async () => {
     const harness = createHarness();
     enable(harness);
     seedSanctionState(harness, 13, 0);
-    harness.failNextApiCall("restrictChatMember");
+    harness.failNextApiCall("restrictChatMember", "Too Many Requests", 429);
 
     await harness.bot.handleUpdate(publicMessage(106, 13));
 
@@ -251,11 +265,11 @@ describe("public language moderation sanctions", () => {
     assert.equal(state?.current_strikes, 2);
     assert.equal(state?.sanction_tier, 0);
     assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
-    assert.equal(harness.db.getSetting("language_moderation:enabled"), "false");
+    assert.equal(harness.db.getSetting("language_moderation:enabled"), "true");
     assert.equal(harness.db.getBannedUser(13), undefined);
   });
 
-  it("preserves strikes and tier when a permanent-ban request fails", async () => {
+  it("contains a confirmed Telegram server sanction failure without an immediate retry", async () => {
     const harness = createHarness();
     enable(harness);
     seedSanctionState(harness, 16, 2);
@@ -267,7 +281,256 @@ describe("public language moderation sanctions", () => {
     assert.equal(state?.current_strikes, 2);
     assert.equal(state?.sanction_tier, 2);
     assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
-    assert.equal(harness.db.getSetting("language_moderation:enabled"), "false");
+    assert.equal(harness.db.getSetting("language_moderation:enabled"), "true");
+    assert.equal(harness.countApiCalls("banChatMember"), 1);
+  });
+
+  it("contains an ambiguous sanction transport outcome without an immediate retry", async () => {
+    const harness = createHarness();
+    enable(harness);
+    seedSanctionState(harness, 17, 0);
+    harness.setApiResponseOverride("restrictChatMember", () => {
+      throw new HttpError("socket closed", Object.assign(new Error("socket closed"), { code: "ECONNRESET" }));
+    });
+
+    await harness.bot.handleUpdate(publicMessage(110, 17));
+
+    const state = harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 17);
+    assert.equal(harness.countApiCalls("restrictChatMember"), 1);
+    assert.equal(state?.current_strikes, 2);
+    assert.equal(state?.sanction_tier, 0);
+    assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
+    assert.equal(harness.db.getSetting("language_moderation:enabled"), "true");
+  });
+
+  it("contains an unknown internal sanction error without changing moderation state", async () => {
+    const harness = createHarness();
+    enable(harness);
+    seedSanctionState(harness, 18, 0);
+    harness.setApiResponseOverride("restrictChatMember", () => {
+      throw new Error("synthetic internal failure");
+    });
+
+    await harness.bot.handleUpdate(publicMessage(111, 18));
+
+    assert.equal(harness.countApiCalls("restrictChatMember"), 1);
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 18)?.current_strikes, 2);
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 18)?.sanction_tier, 0);
+    assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
+    assert.equal(harness.db.getSetting("language_moderation:enabled"), "true");
+  });
+
+  it("contains a target-specific permanent sanction rejection when moderation rights remain valid", async () => {
+    const harness = createHarness();
+    manage(harness, PUBLIC_CHAT_ID);
+    seedSanctionState(harness, 19, 0);
+    harness.setApiResponseOverride("restrictChatMember", () => ({
+      ok: false,
+      error_code: 400,
+      description: "Bad Request: user is an administrator",
+    }));
+    harness.setApiResponseOverride("getChatMember", (call, success) =>
+      call.payload.user_id === 777 ? administrator() : success
+    );
+
+    await harness.bot.handleUpdate(publicMessage(112, 19));
+
+    const chat = harness.db.getManagedPublicChat(PUBLIC_CHAT_ID)!;
+    assert.equal(harness.countApiCalls("restrictChatMember"), 1);
+    assert.equal(chat.moderation_enabled, 1);
+    assert.equal(chat.permission_status, "HEALTHY");
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 19)?.current_strikes, 2);
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 19)?.sanction_tier, 0);
+    assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
+  });
+
+  it("disables only a managed chat when revalidation confirms required moderation rights are missing", async () => {
+    const harness = createHarness();
+    manage(harness, PUBLIC_CHAT_ID);
+    seedSanctionState(harness, 20, 0);
+    harness.setApiResponseOverride("restrictChatMember", () => ({
+      ok: false,
+      error_code: 400,
+      description: "Bad Request: not enough rights to restrict/unrestrict chat member",
+    }));
+    harness.setApiResponseOverride("getChatMember", (call, success) =>
+      call.payload.user_id === 777 ? administrator(true, false) : success
+    );
+
+    await harness.bot.handleUpdate(publicMessage(113, 20));
+
+    const chat = harness.db.getManagedPublicChat(PUBLIC_CHAT_ID)!;
+    assert.equal(chat.moderation_enabled, 0);
+    assert.equal(chat.permission_status, "UNHEALTHY");
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 20)?.current_strikes, 2);
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 20)?.sanction_tier, 0);
+    assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
+  });
+
+  it("keeps a managed chat enabled when rights revalidation cannot establish its state", async () => {
+    const harness = createHarness();
+    manage(harness, PUBLIC_CHAT_ID);
+    seedSanctionState(harness, 21, 0);
+    harness.setApiResponseOverride("restrictChatMember", () => ({
+      ok: false,
+      error_code: 400,
+      description: "Bad Request: user is an administrator",
+    }));
+    harness.setApiResponseOverride("getChat", () => {
+      throw new HttpError("socket closed", Object.assign(new Error("socket closed"), { code: "ECONNRESET" }));
+    });
+
+    await harness.bot.handleUpdate(publicMessage(114, 21));
+
+    const chat = harness.db.getManagedPublicChat(PUBLIC_CHAT_ID)!;
+    assert.equal(chat.moderation_enabled, 1);
+    assert.equal(chat.permission_status, "HEALTHY");
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 21)?.current_strikes, 2);
+    assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
+  });
+
+  it("keeps a managed chat enabled when rights revalidation receives a Telegram server error", async () => {
+    const harness = createHarness();
+    manage(harness, PUBLIC_CHAT_ID);
+    seedSanctionState(harness, 25, 0);
+    harness.setApiResponseOverride("restrictChatMember", () => ({
+      ok: false,
+      error_code: 400,
+      description: "Bad Request: user is an administrator",
+    }));
+    harness.failNextApiCall("getChat", "Internal Server Error", 500);
+
+    await harness.bot.handleUpdate(publicMessage(118, 25));
+
+    const chat = harness.db.getManagedPublicChat(PUBLIC_CHAT_ID)!;
+    assert.equal(chat.moderation_enabled, 1);
+    assert.equal(chat.permission_status, "HEALTHY");
+    assert.equal(chat.connection_status, "CONNECTED");
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 25)?.current_strikes, 2);
+    assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
+  });
+
+  it("disables a managed chat when revalidation confirms the bot has lost chat membership", async () => {
+    const harness = createHarness();
+    manage(harness, PUBLIC_CHAT_ID);
+    seedSanctionState(harness, 26, 0);
+    harness.setApiResponseOverride("restrictChatMember", () => ({
+      ok: false,
+      error_code: 400,
+      description: "Bad Request: user is an administrator",
+    }));
+    harness.failNextApiCall("getChat", "Bad Request: bot is not a member of the chat", 400);
+
+    await harness.bot.handleUpdate(publicMessage(119, 26));
+
+    const chat = harness.db.getManagedPublicChat(PUBLIC_CHAT_ID)!;
+    assert.equal(chat.moderation_enabled, 0);
+    assert.equal(chat.permission_status, "UNHEALTHY");
+    assert.equal(chat.connection_status, "UNREACHABLE");
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 26)?.current_strikes, 2);
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 26)?.sanction_tier, 0);
+    assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
+  });
+
+  it("keeps a durable cleanup job after immediate scheduling fails", async () => {
+    const harness = createHarness({
+      scheduleModerationCleanup: () => {
+        throw new Error("synthetic scheduler failure");
+      },
+    });
+    enable(harness);
+    seedSanctionState(harness, 22, 0);
+
+    await harness.bot.handleUpdate(publicMessage(115, 22));
+
+    assert.equal(harness.countApiCalls("restrictChatMember"), 1);
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 22)?.current_strikes, 0);
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 22)?.sanction_tier, 1);
+    assert.equal(
+      harness.db.listLanguageModerationRecoveryJobs(TEST_STAFF_CHAT_ID, "2026-08-01T00:00:00.000Z").length,
+      1
+    );
+    assert.equal(harness.db.getSetting("language_moderation:enabled"), "true");
+  });
+
+  it("does not downgrade chat permissions when post-sanction persistence fails", async () => {
+    const harness = createHarness();
+    enable(harness);
+    seedSanctionState(harness, 23, 0);
+    const completeSanction = harness.db.completeLanguageModerationSanction.bind(harness.db);
+    harness.db.completeLanguageModerationSanction = () => {
+      throw new Error("synthetic persistence failure");
+    };
+
+    try {
+      await assert.rejects(harness.bot.handleUpdate(publicMessage(116, 23)), /synthetic persistence failure/);
+    } finally {
+      harness.db.completeLanguageModerationSanction = completeSanction;
+    }
+
+    assert.equal(harness.countApiCalls("restrictChatMember"), 1);
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 23)?.current_strikes, 2);
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 23)?.sanction_tier, 0);
+    assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
+    assert.equal(harness.db.getSetting("language_moderation:enabled"), "true");
+  });
+
+  it("rolls back the complete post-sanction persistence phase when cleanup-job creation fails", () => {
+    const harness = createHarness();
+    const userId = 24;
+    enable(harness);
+    seedSanctionState(harness, userId, 0);
+    assert.equal(
+      harness.db.addLanguageModerationViolation({
+        chat_id: PUBLIC_CHAT_ID,
+        user_telegram_id: userId,
+        message_id: 117,
+        username: `public_${userId}`,
+        cycle_tier: 0,
+      }),
+      true
+    );
+
+    assert.throws(
+      () =>
+        harness.db.completeLanguageModerationSanction({
+          chatId: PUBLIC_CHAT_ID,
+          userId,
+          cycleTier: 0,
+          violationCycleId: "synthetic-cycle",
+          userState: {
+            chat_id: PUBLIC_CHAT_ID,
+            user_telegram_id: userId,
+            username: `public_${userId}`,
+            current_strikes: 0,
+            sanction_tier: 1,
+            first_strike_at: null,
+          },
+          cleanupJob: {
+            staff_chat_id: null as unknown as number,
+            chat_id: PUBLIC_CHAT_ID,
+            user_telegram_id: userId,
+            username: `public_${userId}`,
+            chat_title: "Public Community",
+            sanction_tier: 1,
+            sanction_kind: "24-hour mute",
+            violation_cycle_id: "synthetic-cycle",
+            cleanup_due_at: FIXED_NOW.toISOString(),
+          },
+        }),
+      /NOT NULL/
+    );
+
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, userId)?.current_strikes, 2);
+    assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, userId)?.sanction_tier, 0);
+    assert.equal(
+      harness.db.listLanguageModerationViolations(PUBLIC_CHAT_ID, "1970-01-01T00:00:00.000Z")[0]?.moderation_cycle_id,
+      null
+    );
+    assert.equal(
+      harness.db.listLanguageModerationRecoveryJobs(TEST_STAFF_CHAT_ID, "2026-08-01T00:00:00.000Z").length,
+      0
+    );
   });
 
   it("does not sanction a duplicate public Telegram message twice and gives nearby users distinct job ids", async () => {

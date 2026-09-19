@@ -521,6 +521,26 @@ export class ModerationRepository {
     return Number(result.lastInsertRowid);
   }
 
+  completeLanguageModerationSanction(input: {
+    chatId: number;
+    userId: number;
+    cycleTier: number;
+    violationCycleId: string;
+    userState: Omit<LanguageModerationUserState, "updated_at">;
+    cleanupJob: Omit<LanguageModerationCleanupJob, "id" | "state" | "created_at" | "updated_at">;
+  }): number {
+    const transaction = this.db.transaction(() => {
+      this.db
+        .prepare(
+          "UPDATE language_moderation_violations SET moderation_cycle_id = ? WHERE chat_id = ? AND user_telegram_id = ? AND cycle_tier = ? AND moderation_cycle_id IS NULL"
+        )
+        .run(input.violationCycleId, input.chatId, input.userId, input.cycleTier);
+      this.upsertLanguageModerationUserState(input.userState);
+      return this.createLanguageModerationCleanupJob(input.cleanupJob);
+    });
+    return transaction();
+  }
+
   getLanguageModerationCleanupJob(jobId: number): LanguageModerationCleanupJob | undefined {
     return this.db.prepare("SELECT * FROM language_moderation_cleanup_jobs WHERE id = ?").get(jobId) as
       LanguageModerationCleanupJob | undefined;

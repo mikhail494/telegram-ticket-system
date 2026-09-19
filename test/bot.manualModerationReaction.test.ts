@@ -357,7 +357,7 @@ describe("OWNER manual moderation reaction", () => {
     assert.equal(permanent.db.getLanguageModerationUserState(PUBLIC_CHAT_A, USER_ID)?.sanction_tier, 3);
   });
 
-  it("preserves existing fail-closed sanction behavior", async () => {
+  it("contains a failed manual sanction without disabling the managed chat", async () => {
     const { harness } = createHarness();
     harness.db.upsertLanguageModerationUserState({
       chat_id: PUBLIC_CHAT_A,
@@ -374,7 +374,7 @@ describe("OWNER manual moderation reaction", () => {
     const state = harness.db.getLanguageModerationUserState(PUBLIC_CHAT_A, USER_ID);
     assert.equal(state?.current_strikes, 2);
     assert.equal(state?.sanction_tier, 0);
-    assert.equal(harness.db.getManagedPublicChat(PUBLIC_CHAT_A)?.moderation_enabled, 0);
+    assert.equal(harness.db.getManagedPublicChat(PUBLIC_CHAT_A)?.moderation_enabled, 1);
     assert.equal(harness.scheduledModerationCleanupJobIds.length, 0);
   });
 

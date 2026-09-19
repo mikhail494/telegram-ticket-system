@@ -780,6 +780,17 @@ export class SupportDatabase {
     return this.moderation.createLanguageModerationCleanupJob(input);
   }
 
+  completeLanguageModerationSanction(input: {
+    chatId: number;
+    userId: number;
+    cycleTier: number;
+    violationCycleId: string;
+    userState: Omit<LanguageModerationUserState, "updated_at">;
+    cleanupJob: Omit<LanguageModerationCleanupJob, "id" | "state" | "created_at" | "updated_at">;
+  }): number {
+    return this.moderation.completeLanguageModerationSanction(input);
+  }
+
   getLanguageModerationCleanupJob(jobId: number): LanguageModerationCleanupJob | undefined {
     return this.moderation.getLanguageModerationCleanupJob(jobId);
   }
@@ -2073,23 +2084,4 @@ export class SupportDatabase {
 
     this.db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition};`);
   }
-}
-
-function parseJsonStringArray(value: string): readonly string[] {
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function normalizeManagedChatAllowlist(values: readonly string[]): readonly string[] {
-  return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))];
-}
-
-function positiveIntegerOr(value: string | undefined, fallback: number): number {
-  if (!value || !/^\d+$/.test(value)) return fallback;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
