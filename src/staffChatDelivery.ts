@@ -1,4 +1,12 @@
 import { normalizeTelegramDeliveryError, type NormalizedDeliveryError } from "./deliveryDiagnostics.js";
+import { logger } from "./logger.js";
+
+export type StaffOperationReplaySafety = "REPLAY_SAFE" | "NON_IDEMPOTENT";
+
+export interface StaffChatOperationOptions {
+  replaySafety: StaffOperationReplaySafety;
+  operationName: string;
+}
 
 export interface StaffDeliveryResult<T> {
   value?: T;
@@ -31,9 +39,13 @@ export class StaffChatDeliveryCoordinator {
     this.minimumIntervalMs = options.minimumIntervalMs ?? 250;
   }
 
-  run<T>(chatId: number, operation: () => Promise<T>): Promise<StaffDeliveryResult<T>> {
+  run<T>(
+    chatId: number,
+    operation: () => Promise<T>,
+    options: StaffChatOperationOptions
+  ): Promise<StaffDeliveryResult<T>> {
     const previous = this.queues.get(chatId) ?? Promise.resolve();
-    const task = previous.catch(() => undefined).then(() => this.execute(chatId, operation));
+    const task = previous.catch(() => undefined).then(() => this.execute(chatId, operation, options));
     this.queues.set(
       chatId,
       task.then(
@@ -44,7 +56,11 @@ export class StaffChatDeliveryCoordinator {
     return task;
   }
 
-  private async execute<T>(chatId: number, operation: () => Promise<T>): Promise<StaffDeliveryResult<T>> {
+  private async execute<T>(
+    chatId: number,
+    operation: () => Promise<T>,
+    options: StaffChatOperationOptions
+  ): Promise<StaffDeliveryResult<T>> {
     const now = this.now().getTime();
     const blockedUntil = this.blockedUntil.get(chatId) ?? 0;
     if (blockedUntil > now) {
@@ -63,12 +79,17 @@ export class StaffChatDeliveryCoordinator {
         return { value, retryAt: null };
       } catch (error) {
         const diagnostic = normalizeTelegramDeliveryError(error, this.now());
-        const delay = retryDelay(diagnostic, attempt);
+        const delay = retryDelay(diagnostic, attempt, options.replaySafety);
         if (diagnostic.permanence !== "TEMPORARY" || delay === null) {
+          if (diagnostic.permanence === "UNKNOWN_DELIVERY") {
+            logger.warn(
+              { operation: options.operationName, category: diagnostic.category, permanence: diagnostic.permanence },
+              "Staff Telegram operation outcome is unknown and will not be retried"
+            );
+          }
           return {
             diagnostic,
-            retryAt:
-              diagnostic.permanence === "TEMPORARY" ? futureIso(this.now(), retryDelay(diagnostic, 1) ?? 1_000) : null,
+            retryAt: null,
           };
         }
         if (delay > MAX_INLINE_DELAY_MS || attempt === MAX_ATTEMPTS) {
@@ -87,10 +108,14 @@ export class StaffChatDeliveryCoordinator {
   }
 }
 
-function retryDelay(diagnostic: NormalizedDeliveryError, attempt: number): number | null {
+function retryDelay(
+  diagnostic: NormalizedDeliveryError,
+  attempt: number,
+  replaySafety: StaffOperationReplaySafety
+): number | null {
   if (diagnostic.category === "RATE_LIMITED") return (diagnostic.retryAfterSeconds ?? 1) * 1_000 + 250;
-  if (diagnostic.category === "TELEGRAM_SERVER_ERROR" || diagnostic.category === "NETWORK_ERROR")
-    return 500 * 2 ** (attempt - 1);
+  if (diagnostic.category === "TELEGRAM_SERVER_ERROR") return 500 * 2 ** (attempt - 1);
+  if (replaySafety === "REPLAY_SAFE" && diagnostic.permanence === "TEMPORARY") return 500 * 2 ** (attempt - 1);
   return null;
 }
 

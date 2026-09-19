@@ -79,7 +79,8 @@ export function normalizeTelegramDeliveryError(error: unknown, occurredAt = new 
     const isTimeout = name === "AbortError" || code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT";
     return {
       category: isTimeout ? "NETWORK_TIMEOUT" : "NETWORK_ERROR",
-      permanence: isTimeout ? "UNKNOWN_DELIVERY" : "TEMPORARY",
+      // HttpError does not prove whether Telegram accepted a side-effecting request.
+      permanence: "UNKNOWN_DELIVERY",
       method: null,
       telegramErrorCode: null,
       httpStatus: null,

@@ -10,7 +10,7 @@ Telegram operations can be interrupted after a remote side effect may have occur
 
 ## Decision
 
-Persist `UNKNOWN_DELIVERY` for ambiguous outcomes and require deliberate reconciliation rather than automatic user-facing retry. This applies to Ticket Batch, interactive staff replies, and each Support Logs archive delivery stage. Staff-only work uses separately persisted recovery state only where a prior Telegram outcome is durably confirmed.
+Persist `UNKNOWN_DELIVERY` for ambiguous outcomes and require deliberate reconciliation rather than automatic user-facing retry. This applies to Ticket Batch, interactive staff replies, and each Support Logs archive delivery stage. StaffChatDeliveryCoordinator is staff-only infrastructure: non-idempotent staff sends are replayed only after a confirmed retryable Bot API rejection, while replay-safe state mutations such as edits may use their own retry policy. Customer interactive delivery remains governed by its durable intent state machine.
 
 ## Consequences
 

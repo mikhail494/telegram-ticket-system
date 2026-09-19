@@ -21,6 +21,17 @@ const temporaryDiagnostic: NormalizedDeliveryError = {
   occurredAt: "2026-01-01T00:00:00.000Z",
 };
 
+const unknownDiagnostic: NormalizedDeliveryError = {
+  category: "NETWORK_ERROR",
+  permanence: "UNKNOWN_DELIVERY",
+  method: null,
+  telegramErrorCode: null,
+  httpStatus: null,
+  retryAfterSeconds: null,
+  description: null,
+  occurredAt: "2026-01-01T00:00:00.000Z",
+};
+
 function createRuntime(
   timers: Array<{ callback: () => void; delayMs: number; unref(): void }>,
   cleared: unknown[]
@@ -36,6 +47,56 @@ function createRuntime(
 }
 
 describe("ticket batch runtime ownership", () => {
+  it("does not turn an unknown replay-safe edit outcome into a fallback staff send", async () => {
+    const failures: Array<{ state: string; retryAt: string | null }> = [];
+    const sent: string[] = [];
+    const database = {
+      listPendingTicketBatchFinalSummaries: () => [
+        {
+          answer_package_id: "package-a",
+          final_summary_chat_id: -1001,
+          final_summary_origin_chat_id: 42,
+          final_summary_origin_message_id: 99,
+        },
+      ],
+      listTicketBatchAnswerItems: () => [],
+      queueTicketBatchFinalSummary: () => undefined,
+      recordTicketBatchFinalSummaryAttempt: () => undefined,
+      recordTicketBatchFinalSummaryFailure: (
+        _packageId: string,
+        _staffChatId: number,
+        state: string,
+        _category: string,
+        retryAt: string | null
+      ) => failures.push({ state, retryAt }),
+    } as unknown as SupportDatabase;
+    const runtime = new TicketBatchRuntime({
+      db: database,
+      installation: { requireStaffChatId: () => -1001 } as unknown as InstallationService,
+      api: {
+        editMessageText: async () => {
+          sent.push("editMessageText");
+          return true;
+        },
+        sendMessage: async () => {
+          sent.push("sendMessage");
+          return { message_id: 1 };
+        },
+      },
+      runStaffChatOperation: async () => {
+        throw new TicketBatchStaffOperationError(unknownDiagnostic, null);
+      },
+      backgroundTasks: { run: () => true },
+    } as unknown as TicketBatchRuntimeDependencies);
+
+    await (
+      runtime as unknown as { recoverFinalSummaries: (id: undefined, chatId: number) => Promise<void> }
+    ).recoverFinalSummaries(undefined, -1001);
+
+    assert.deepEqual(sent, []);
+    assert.deepEqual(failures, [{ state: "UNKNOWN_DELIVERY", retryAt: null }]);
+  });
+
   it("keeps recovery timers isolated between coordinator instances", () => {
     const firstTimers: Array<{ callback: () => void; delayMs: number; unref(): void }> = [];
     const secondTimers: Array<{ callback: () => void; delayMs: number; unref(): void }> = [];

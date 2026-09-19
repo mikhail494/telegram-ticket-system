@@ -1,4 +1,4 @@
-import { GrammyError, HttpError, InputFile } from "grammy";
+import { GrammyError, InputFile } from "grammy";
 import type { Context } from "grammy";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -8,6 +8,7 @@ import { formatDate, truncate } from "./format.js";
 import { displayTelegramUser } from "./telegram.js";
 import { logger } from "./logger.js";
 import { normalizeTelegramDeliveryError, type NormalizedDeliveryError } from "./deliveryDiagnostics.js";
+import { isForumTopicClosed, isForumTopicUnavailable } from "./forumTopicErrors.js";
 import { runBoundedRecoveryPass, type StartupRecoveryBudget } from "./startup.js";
 
 const SUPPORT_LOGS_TOPIC_NAME = "📜 Support Logs";
@@ -808,35 +809,4 @@ function formatTranscriptTime(value: string): string {
   const hours = String(date.getUTCHours()).padStart(2, "0");
   const minutes = String(date.getUTCMinutes()).padStart(2, "0");
   return `${hours}:${minutes}`;
-}
-
-function describeError(error: unknown): string {
-  if (error instanceof GrammyError) {
-    return `${error.error_code}: ${error.description}`;
-  }
-
-  if (error instanceof HttpError) {
-    return `HTTP error: ${error.message}`;
-  }
-
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return String(error);
-}
-
-function isForumTopicUnavailable(error: unknown): boolean {
-  const message = describeError(error).toLowerCase();
-  return (
-    message.includes("message thread not found") ||
-    message.includes("message_thread_id") ||
-    message.includes("topic not found") ||
-    message.includes("not found")
-  );
-}
-
-function isForumTopicClosed(error: unknown): boolean {
-  const message = describeError(error).toLowerCase();
-  return message.includes("topic_closed") || message.includes("topic is closed");
 }

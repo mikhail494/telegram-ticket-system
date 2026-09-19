@@ -61,7 +61,11 @@ import {
 } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
 import { normalizeTelegramDeliveryError, type NormalizedDeliveryError } from "./deliveryDiagnostics.js";
-import { StaffChatDeliveryCoordinator, type StaffChatDeliveryOptions } from "./staffChatDelivery.js";
+import {
+  StaffChatDeliveryCoordinator,
+  type StaffChatDeliveryOptions,
+  type StaffChatOperationOptions,
+} from "./staffChatDelivery.js";
 import { InstallationService, type Permission } from "./installation.js";
 import { BackgroundTaskRegistry, type BackgroundTaskTracker } from "./lifecycle.js";
 import { SupportIngressLimiter, type SupportIngressDecision } from "./supportIngressLimiter.js";
@@ -391,8 +395,12 @@ export function createBot(
     botId: () => bot.botInfo?.id,
   });
 
-  async function runStaffChatOperation<T>(operation: () => Promise<T>, chatId = requireStaffChatId()): Promise<T> {
-    const outcome = await staffChatDelivery.run(chatId, operation);
+  async function runStaffChatOperation<T>(
+    operation: () => Promise<T>,
+    options: StaffChatOperationOptions,
+    chatId = requireStaffChatId()
+  ): Promise<T> {
+    const outcome = await staffChatDelivery.run(chatId, operation, options);
     if (outcome.value !== undefined) return outcome.value;
     throw new TicketBatchStaffOperationError(
       outcome.diagnostic ?? normalizeTelegramDeliveryError(new Error("Staff operation failed")),
@@ -2926,6 +2934,7 @@ export function createBot(
     try {
       await runStaffChatOperation(
         () => bot.api.editMessageText(previewChatId, previewMessageId, text, { reply_markup: undefined }),
+        { replaySafety: "REPLAY_SAFE", operationName: "editMessageText" },
         previewChatId
       );
     } catch (error) {

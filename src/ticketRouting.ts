@@ -4,6 +4,7 @@ import type { Message, User } from "grammy/types";
 import { archiveTicketIfPossible, logBanEvent, type ArchiveActor } from "./archive.js";
 import { type SupportDatabase, type TicketRecord, type TicketWithUser } from "./db.js";
 import { normalizeTelegramDeliveryError, type NormalizedDeliveryError } from "./deliveryDiagnostics.js";
+import { isTicketRoutingTopicUnavailable } from "./forumTopicErrors.js";
 import {
   CLOSED_TEXT,
   DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME,
@@ -489,7 +490,7 @@ export class TicketRoutingService {
         activeTicket.id
       );
     } catch (error) {
-      if (isForumTopicUnavailable(error)) {
+      if (isTicketRoutingTopicUnavailable(error)) {
         logger.warn(
           { err: error, ticketId: activeTicket.id, messageThreadId: activeTicket.message_thread_id },
           "Staff forum topic is unavailable; creating a fresh ticket"
@@ -678,18 +679,6 @@ function describeError(error: unknown): string {
   if (error instanceof HttpError) return `HTTP error: ${error.message}`;
   if (error instanceof Error) return error.message;
   return String(error);
-}
-
-function isForumTopicUnavailable(error: unknown): boolean {
-  const message = describeError(error).toLowerCase();
-  return (
-    message.includes("message thread not found") ||
-    message.includes("message_thread_id") ||
-    message.includes("topic not found") ||
-    message.includes("message to be replied not found") ||
-    message.includes("reply message not found") ||
-    message.includes("replied message not found")
-  );
 }
 
 interface ErrorWithCode extends Error {
