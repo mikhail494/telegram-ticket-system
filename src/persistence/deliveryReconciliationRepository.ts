@@ -52,6 +52,16 @@ interface BatchReconciliationRow {
   source_chat_id: number | null;
   source_message_id: number | null;
   user_telegram_id: number;
+  ticket_status: string;
+}
+
+class ReconciliationConflictError extends Error {
+  constructor(
+    readonly kind: DeliveryReconciliationKind,
+    readonly ticketId: number
+  ) {
+    super("Delivery reconciliation state changed before it could be committed.");
+  }
 }
 
 const UNKNOWN_DELIVERY_ROWS_SQL = `
@@ -85,7 +95,7 @@ const UNKNOWN_DELIVERY_ROWS_SQL = `
   JOIN tickets t ON t.id = i.ticket_id
   LEFT JOIN ticket_outbound_deliveries d
     ON d.operation_key = 'ticket-batch:' || i.answer_package_id || ':' || i.ticket_id
-  WHERE p.staff_chat_id = ? AND i.state = 'UNKNOWN_DELIVERY'
+  WHERE p.staff_chat_id = ? AND t.staff_chat_id = p.staff_chat_id AND i.state = 'UNKNOWN_DELIVERY'
 `;
 
 function caseToken(kind: DeliveryReconciliationKind, deliveryKey: string): string {
@@ -142,28 +152,37 @@ export class DeliveryReconciliationRepository {
   }
 
   reconcile(input: ReconcileUnknownDeliveryInput): DeliveryReconciliationResult {
+    const note = input.note?.trim() ?? null;
+    if (input.action === "CONFIRMED_FAILED" && (!note || note.length > 500)) return { outcome: "CONFLICT" };
+    const normalizedInput = { ...input, note };
     const tx = this.db.transaction((): DeliveryReconciliationResult => {
-      const existingAudit = this.getAuditByCaseToken(input.staffChatId, input.caseToken);
-      if (existingAudit) return this.auditOutcome(existingAudit, input);
+      const existingAudit = this.getAuditByCaseToken(normalizedInput.staffChatId, normalizedInput.caseToken);
+      if (existingAudit) return this.auditOutcome(existingAudit, normalizedInput);
 
-      const record = this.getUnknown(input.staffChatId, input.caseToken);
+      const record = this.getUnknown(normalizedInput.staffChatId, normalizedInput.caseToken);
       if (!record) return { outcome: "NOT_FOUND" };
-      if (input.action === "CONFIRMED_DELIVERED" && !isPositiveInteger(input.telegramMessageId)) {
+      if (normalizedInput.action === "CONFIRMED_DELIVERED" && !isPositiveInteger(normalizedInput.telegramMessageId)) {
         return { outcome: "CONFLICT", kind: record.kind, ticketId: record.ticketId };
       }
 
-      const resultingState = this.applyReconciliation(record, input);
-      if (resultingState === undefined) return { outcome: "CONFLICT", kind: record.kind, ticketId: record.ticketId };
-      this.insertAudit(record, input, resultingState);
-      return {
-        outcome: "APPLIED",
-        kind: record.kind,
-        ticketId: record.ticketId,
-        resultingState,
-        archiveFinalizationRequired: record.kind === "ARCHIVE_DOCUMENT" && resultingState === "DELIVERED",
-      };
+      const resultingState = this.applyReconciliation(record, normalizedInput);
+      if (resultingState === undefined) throw new ReconciliationConflictError(record.kind, record.ticketId);
+      this.insertAudit(record, normalizedInput, resultingState);
+      return this.reconciliationOutcome(
+        "APPLIED",
+        record.kind,
+        record.ticketId,
+        record.operationIdentity,
+        resultingState
+      );
     });
-    return tx();
+    try {
+      return tx();
+    } catch (error) {
+      if (error instanceof ReconciliationConflictError)
+        return { outcome: "CONFLICT", kind: error.kind, ticketId: error.ticketId };
+      throw error;
+    }
   }
 
   listAudit(staffChatId: number, limit = 100): DeliveryReconciliationAuditRecord[] {
@@ -287,20 +306,21 @@ export class DeliveryReconciliationRepository {
     const item = this.db
       .prepare(
         `SELECT i.action, i.reply_text, i.follow_up_state, i.internal_note, i.escalation_target,
-                p.source_chat_id, p.source_message_id, t.user_telegram_id
+                p.source_chat_id, p.source_message_id, t.user_telegram_id, t.status AS ticket_status
          FROM ticket_batch_answer_items i
          JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
          JOIN tickets t ON t.id = i.ticket_id
          WHERE i.answer_package_id = ? AND i.ticket_id = ? AND i.state = 'UNKNOWN_DELIVERY'
+           AND p.staff_chat_id = ? AND t.staff_chat_id = p.staff_chat_id
            AND i.action IN ('reply_keep_open', 'reply_and_close') AND i.reply_text IS NOT NULL`
       )
-      .get(answerPackageId, ticketId) as BatchReconciliationRow | undefined;
+      .get(answerPackageId, ticketId, record.staffChatId) as BatchReconciliationRow | undefined;
     if (!item) return undefined;
     const outbound = this.db
       .prepare("SELECT * FROM ticket_outbound_deliveries WHERE operation_key = ?")
       .get(record.operationIdentity) as (InteractiveDeliveryRow & { state: string }) | undefined;
     if (input.action === "CONFIRMED_FAILED") {
-      if (outbound && outbound.state !== "UNKNOWN_DELIVERY") return undefined;
+      if (outbound && outbound.state !== "UNKNOWN_DELIVERY" && outbound.state !== "FAILED") return undefined;
       if (outbound?.state === "UNKNOWN_DELIVERY") {
         const updatedOutbound = this.db
           .prepare(
@@ -319,10 +339,22 @@ export class DeliveryReconciliationRepository {
       const updated = this.db
         .prepare(
           `UPDATE ticket_batch_answer_items
-           SET state = 'FAILED', last_error = 'Operator confirmed reply was not delivered.', updated_at = ?
+           SET state = 'FAILED', last_error = 'Operator confirmed reply was not delivered.',
+               delivery_error_category = 'OPERATOR_CONFIRMED_NOT_DELIVERED',
+               delivery_error_permanence = 'PERMANENT', delivery_error_code = NULL,
+               delivery_http_status = NULL, delivery_error_method = NULL,
+               delivery_retry_after_seconds = NULL, delivery_error_description = ?,
+               delivery_failed_at = ?, delivery_failure_event_state = 'NOT_REQUIRED',
+               delivery_failure_event_message_id = NULL, delivery_failure_event_next_retry_at = NULL,
+               topic_echo_state = 'NOT_REQUIRED', topic_echo_chat_id = NULL,
+               topic_echo_thread_id = NULL, topic_echo_message_id = NULL, topic_echo_last_error = NULL,
+               topic_echo_next_retry_at = NULL, topic_echo_error_category = NULL,
+               topic_echo_error_code = NULL, topic_echo_http_status = NULL,
+               topic_echo_error_method = NULL, topic_echo_error_description = NULL,
+               topic_echo_terminal_at = NULL, updated_at = ?
            WHERE answer_package_id = ? AND ticket_id = ? AND state = 'UNKNOWN_DELIVERY'`
         )
-        .run(now(), answerPackageId, ticketId);
+        .run(input.note, now(), now(), answerPackageId, ticketId);
       return updated.changes === 1 ? "FAILED" : undefined;
     }
     if (!isPositiveInteger(input.telegramMessageId)) return undefined;
@@ -346,61 +378,73 @@ export class DeliveryReconciliationRepository {
       if (updated.changes !== 1) return undefined;
       this.insertTranscriptMessage(outbound, input.telegramMessageId);
     } else if (!outbound) {
-      this.insertTranscriptMessage(
-        {
-          operation_key: record.operationIdentity,
-          ticket_id: ticketId,
-          source_chat_id: item.source_chat_id,
-          source_message_id: item.source_message_id,
-          delivery_chat_id: item.user_telegram_id,
-          delivery_message_id: null,
-          from_telegram_id: null,
-          from_username: null,
-          sender_type: "STAFF",
-          sender_display_name: "Support",
-          sender_username: null,
-          text: item.reply_text,
-          media_type: null,
-          filename: null,
-          file_id: null,
-        },
-        input.telegramMessageId
-      );
+      const hasTranscript = this.db
+        .prepare(
+          `SELECT 1 FROM messages
+           WHERE ticket_id = ? AND direction = 'STAFF_TO_USER'
+             AND delivery_chat_id = ? AND delivery_message_id = ? LIMIT 1`
+        )
+        .get(ticketId, item.user_telegram_id, input.telegramMessageId);
+      if (!hasTranscript) {
+        this.insertTranscriptMessage(
+          {
+            operation_key: record.operationIdentity,
+            ticket_id: ticketId,
+            source_chat_id: item.source_chat_id,
+            source_message_id: item.source_message_id,
+            delivery_chat_id: item.user_telegram_id,
+            delivery_message_id: null,
+            from_telegram_id: null,
+            from_username: null,
+            sender_type: "STAFF",
+            sender_display_name: "Support",
+            sender_username: null,
+            text: item.reply_text,
+            media_type: null,
+            filename: null,
+            file_id: null,
+          },
+          input.telegramMessageId
+        );
+      }
     }
     const timestamp = now();
-    this.db
-      .prepare(
-        `UPDATE tickets
-         SET follow_up_state = ?, internal_note = ?, escalation_target = ?,
-             follow_up_updated_at = ?, follow_up_source_answer_package_id = ?,
-             status = CASE
-               WHEN status = 'CLOSED' THEN status
-               WHEN ? = 'WAITING_USER' THEN 'WAITING_USER'
-               WHEN ? != 'NONE' OR status = 'OPEN' THEN 'IN_PROGRESS'
-               ELSE status
-             END,
-             updated_at = ?
-         WHERE id = ?`
-      )
-      .run(
-        item.follow_up_state,
-        item.internal_note,
-        item.escalation_target,
-        timestamp,
-        answerPackageId,
-        item.follow_up_state,
-        item.follow_up_state,
-        timestamp,
-        ticketId
-      );
-    this.db
-      .prepare(
-        `INSERT INTO ticket_follow_up_history (
-           ticket_id, follow_up_state, internal_note, escalation_target,
-           source_answer_package_id, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?)`
-      )
-      .run(ticketId, item.follow_up_state, item.internal_note, item.escalation_target, answerPackageId, timestamp);
+    if (item.ticket_status !== "CLOSED") {
+      const updatedTicket = this.db
+        .prepare(
+          `UPDATE tickets
+           SET follow_up_state = ?, internal_note = ?, escalation_target = ?,
+               follow_up_updated_at = ?, follow_up_source_answer_package_id = ?,
+               status = CASE
+                 WHEN ? = 'WAITING_USER' THEN 'WAITING_USER'
+                 WHEN ? != 'NONE' OR status = 'OPEN' THEN 'IN_PROGRESS'
+                 ELSE status
+               END,
+               updated_at = ?
+           WHERE id = ? AND staff_chat_id = ? AND status != 'CLOSED'`
+        )
+        .run(
+          item.follow_up_state,
+          item.internal_note,
+          item.escalation_target,
+          timestamp,
+          answerPackageId,
+          item.follow_up_state,
+          item.follow_up_state,
+          timestamp,
+          ticketId,
+          record.staffChatId
+        );
+      if (updatedTicket.changes !== 1) return undefined;
+      this.db
+        .prepare(
+          `INSERT INTO ticket_follow_up_history (
+             ticket_id, follow_up_state, internal_note, escalation_target,
+             source_answer_package_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(ticketId, item.follow_up_state, item.internal_note, item.escalation_target, answerPackageId, timestamp);
+    }
     const updated = this.db
       .prepare(
         `UPDATE ticket_batch_answer_items
@@ -477,7 +521,12 @@ export class DeliveryReconciliationRepository {
     requestedCaseToken: string
   ): DeliveryReconciliationAuditRecord | undefined {
     return this.db
-      .prepare("SELECT * FROM delivery_reconciliation_audit WHERE staff_chat_id = ? AND case_token = ?")
+      .prepare(
+        `SELECT audit.* FROM delivery_reconciliation_audit audit
+         JOIN tickets ticket ON ticket.id = audit.ticket_id
+         WHERE audit.staff_chat_id = ? AND audit.case_token = ?
+           AND ticket.staff_chat_id = audit.staff_chat_id`
+      )
       .get(staffChatId, requestedCaseToken) as DeliveryReconciliationAuditRecord | undefined;
   }
 
@@ -487,14 +536,43 @@ export class DeliveryReconciliationRepository {
   ): DeliveryReconciliationResult {
     const sameMessageId =
       audit.action !== "CONFIRMED_DELIVERED" || audit.telegram_message_id === (input.telegramMessageId ?? null);
+    return this.reconciliationOutcome(
+      audit.action === input.action && sameMessageId ? "IDEMPOTENT" : "CONFLICT",
+      audit.delivery_kind,
+      audit.ticket_id,
+      audit.delivery_key,
+      audit.resulting_state
+    );
+  }
+
+  private reconciliationOutcome(
+    outcome: DeliveryReconciliationResult["outcome"],
+    kind: DeliveryReconciliationKind,
+    ticketId: number,
+    operationIdentity: string,
+    resultingState: string
+  ): DeliveryReconciliationResult {
+    const batchAnswerPackageId = kind === "BATCH_REPLY" ? batchAnswerPackageIdFor(operationIdentity) : undefined;
     return {
-      outcome: audit.action === input.action && sameMessageId ? "IDEMPOTENT" : "CONFLICT",
-      kind: audit.delivery_kind,
-      ticketId: audit.ticket_id,
-      resultingState: audit.resulting_state,
-      archiveFinalizationRequired: audit.delivery_kind === "ARCHIVE_DOCUMENT" && audit.resulting_state === "DELIVERED",
+      outcome,
+      kind,
+      ticketId,
+      resultingState,
+      archiveContinuationRequired:
+        (kind === "ARCHIVE_SUMMARY" && resultingState === "SUMMARY_SENT") ||
+        (kind === "ARCHIVE_DOCUMENT" && resultingState === "DELIVERED"),
+      batchContinuationRequired:
+        kind === "BATCH_REPLY" && (resultingState === "STAFF_SYNC_PENDING" || resultingState === "FAILED"),
+      batchAnswerPackageId,
     };
   }
+}
+
+function batchAnswerPackageIdFor(operationIdentity: string): string | undefined {
+  if (!operationIdentity.startsWith("ticket-batch:")) return undefined;
+  const identity = operationIdentity.slice("ticket-batch:".length);
+  const separator = identity.lastIndexOf(":");
+  return separator > 0 ? identity.slice(0, separator) : undefined;
 }
 
 function isPositiveInteger(value: number | null | undefined): value is number {

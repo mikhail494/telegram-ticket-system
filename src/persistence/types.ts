@@ -275,7 +275,9 @@ export interface DeliveryReconciliationResult {
   kind?: DeliveryReconciliationKind;
   ticketId?: number;
   resultingState?: string;
-  archiveFinalizationRequired?: boolean;
+  archiveContinuationRequired?: boolean;
+  batchContinuationRequired?: boolean;
+  batchAnswerPackageId?: string;
 }
 
 export interface DeliveryReconciliationAuditRecord {

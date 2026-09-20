@@ -914,6 +914,10 @@ export class TicketBatchRuntime {
     const at = this.now().toISOString();
     const packagesToFinalize = new Set<string>();
     const packagesToRefresh = new Set<string>();
+    if (answerPackageId !== undefined) {
+      packagesToFinalize.add(answerPackageId);
+      packagesToRefresh.add(answerPackageId);
+    }
     const matchesPackage = (item: { answer_package_id: string }): boolean =>
       answerPackageId === undefined || item.answer_package_id === answerPackageId;
     for (const item of this.db.listInvalidTicketBatchSuccessEchoes(staffChatId, 20).filter(matchesPackage)) {

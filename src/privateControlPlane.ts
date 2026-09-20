@@ -49,7 +49,8 @@ export interface PrivateControlPlaneOperatorDependencies {
   onStartTestTicket: (ctx: Context) => Promise<void>;
   onShowWorkspace: (ctx: Context) => Promise<void>;
   onShowBatch: (ctx: Context) => Promise<void>;
-  onFinalizeReconciledArchive: (ticketId: number) => Promise<boolean>;
+  onContinueReconciledArchive: (ticketId: number) => Promise<boolean>;
+  onContinueReconciledBatch: (answerPackageId: string) => Promise<void>;
   packageVersion: string;
   botUsername: () => string | undefined;
   botId: () => number | undefined;
@@ -1196,13 +1197,24 @@ export class PrivateControlPlane {
       "Delivery reconciliation reviewed"
     );
     this.pendingDeliveryReconciliationInputs.delete(ctx.from.id);
-    if (result.archiveFinalizationRequired && result.ticketId !== undefined) {
+    const continuationApplied = result.outcome === "APPLIED" || result.outcome === "IDEMPOTENT";
+    if (continuationApplied && result.archiveContinuationRequired && result.ticketId !== undefined) {
       try {
-        await dependencies.onFinalizeReconciledArchive(result.ticketId);
+        await dependencies.onContinueReconciledArchive(result.ticketId);
       } catch (error) {
         logger.error(
           { err: error, ticketId: result.ticketId, reconciliationOutcome: result.outcome },
-          "Reconciled archive delivery but local archive finalization remains pending"
+          "Reconciled archive delivery but archive continuation remains pending"
+        );
+      }
+    }
+    if (continuationApplied && result.batchContinuationRequired && result.batchAnswerPackageId) {
+      try {
+        await dependencies.onContinueReconciledBatch(result.batchAnswerPackageId);
+      } catch (error) {
+        logger.error(
+          { err: error, answerPackageId: result.batchAnswerPackageId, reconciliationOutcome: result.outcome },
+          "Reconciled batch delivery but staff-only continuation remains pending"
         );
       }
     }
