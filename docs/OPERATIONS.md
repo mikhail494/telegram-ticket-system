@@ -16,7 +16,14 @@ OPS_HTTP_PORT=3000
 
 ## Delivery reconciliation
 
-Interactive staff replies and Support Logs archive delivery persist a durable intent before Telegram is called. A process interruption while an intent is `PENDING`, or any ambiguous transport outcome, becomes `UNKNOWN_DELIVERY` during startup recovery. The application deliberately does not resend those operations because Telegram has no application idempotency key. Operators must reconcile an unknown interactive reply or archive manually; confirmed archive stages can still safely continue or finalize without duplicate Support Logs sends.
+Interactive staff replies, Ticket Batch user replies, and Support Logs archive delivery persist a durable intent before Telegram is called. A process interruption while an intent is `PENDING`, or any ambiguous transport outcome, becomes `UNKNOWN_DELIVERY` during startup recovery. The application deliberately does not resend those operations because Telegram has no application idempotency key. Ambiguous entity-notification sends are likewise retained without replay.
+
+OWNER and ADMIN operators can open **Delivery review** from the private dashboard. For each unresolved operation, verify the destination directly in Telegram before choosing an action:
+
+1. **Mark delivered** requires the numeric Telegram message ID and completes the corresponding local transcript, Batch, or archive state without sending anything.
+2. **Mark not delivered** requires a concise operator note and records a reviewed terminal outcome. It does not retry the operation.
+
+The first valid reconciliation wins. Repeating the same reconciliation is idempotent; a contradictory later action is rejected. Every applied action records the operator, time, prior and resulting state, note, and supplied Telegram message ID in an append-only audit trail. A demoted operator or an operator no longer present in the active staff workspace cannot act through a stale screen. There is intentionally no "retry unknown delivery" action; any later deliberate delivery must use a new audited operation identity.
 
 ```bash
 curl http://127.0.0.1:3000/healthz

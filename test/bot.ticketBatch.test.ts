@@ -690,6 +690,12 @@ describe("ticket batch Telegram workflow", () => {
       1
     );
     assert.equal(harness.db.listMessagesChronological(ticket.id).length, 1);
+    const delivery = harness.db.getTicketOutboundDelivery(`ticket-batch:answers_1:${ticket.id}`);
+    assert.equal(delivery?.state, "DELIVERED");
+    assert.equal(
+      delivery?.delivery_message_id,
+      harness.db.listMessagesChronological(ticket.id)[0]?.delivery_message_id
+    );
     assert.equal(harness.db.getTicket(ticket.id)?.status, "IN_PROGRESS");
   });
 

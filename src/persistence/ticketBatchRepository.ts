@@ -291,6 +291,24 @@ export class TicketBatchRepository {
     return result.changes === 1;
   }
 
+  markOrphanedTicketBatchReplyDeliveriesUnknown(): number {
+    const timestamp = now();
+    const result = this.db
+      .prepare(
+        `UPDATE ticket_batch_answer_items
+         SET state = 'UNKNOWN_DELIVERY', last_error = 'Interrupted Batch reply delivery requires reconciliation.',
+             delivery_error_category = COALESCE(delivery_error_category, 'UNKNOWN_TELEGRAM_ERROR'),
+             delivery_error_permanence = COALESCE(delivery_error_permanence, 'UNKNOWN_DELIVERY'),
+             delivery_error_description = COALESCE(delivery_error_description, 'Interrupted before Batch reply delivery was finalized.'),
+             delivery_failed_at = COALESCE(delivery_failed_at, ?),
+             delivery_failure_event_state = 'NOT_REQUIRED', delivery_failure_event_next_retry_at = NULL,
+             topic_echo_state = 'NOT_REQUIRED', topic_echo_next_retry_at = NULL, updated_at = ?
+         WHERE state = 'APPLYING' AND action IN ('reply_keep_open', 'reply_and_close')`
+      )
+      .run(timestamp, timestamp);
+    return result.changes;
+  }
+
   updateTicketBatchAnswerItem(
     answerPackageId: string,
     ticketId: number,

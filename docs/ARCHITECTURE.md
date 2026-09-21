@@ -93,7 +93,7 @@ stateDiagram-v2
   Completed --> [*]
 ```
 
-`UNKNOWN_DELIVERY` is conservative: when Telegram delivery may have happened but cannot be confirmed, the service records the ambiguity instead of blindly retrying and risking a duplicate user message. Staff-only synchronization has its own durable retry state and can recover without resending user delivery.
+`UNKNOWN_DELIVERY` is conservative: when Telegram delivery may have happened but cannot be confirmed, the service records the ambiguity instead of blindly retrying and risking a duplicate user message. OWNER/ADMIN reconciliation records externally verified outcomes through conditional SQLite transitions and an append-only audit trail; it never replays the original send. Staff-only synchronization has its own durable retry state and can recover without resending user delivery.
 
 ## Startup and Recovery
 

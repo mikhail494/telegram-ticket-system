@@ -10,10 +10,15 @@ All notable changes to this project are documented in this file. This project fo
 - Interactive staff replies and Support Logs transcript archives now persist delivery intent and confirmed Telegram message IDs around external sends. Ambiguous outcomes become `UNKNOWN_DELIVERY` and require reconciliation instead of blind resend.
 - Telegram transport failures now remain `UNKNOWN_DELIVERY` unless Telegram returned a confirmed retryable API response; non-idempotent staff operations are not replayed automatically.
 - Moderation sanction failures now disable a chat only after validation positively confirms required bot rights are missing; temporary, ambiguous, target-specific, and cleanup scheduling failures remain contained to the failed action.
+- OWNER and ADMIN operators can now review and reconcile ambiguous interactive, archive, and Ticket Batch deliveries without replaying Telegram sends; Batch replies now always use a durable operation identity, and ambiguous entity-notification transport is retained as `UNKNOWN_DELIVERY`.
 
 ### Changed
 
 - Bounded synchronous archive/moderation startup recovery to 50 durable items or a 10-second soft budget, leaving unfinished work durable for a later startup; Ticket Batch recovery begins after polling as tracked background work, with a 30-second graceful shutdown deadline.
+
+### Database
+
+- Added migration 26 for the append-only operator delivery-reconciliation audit trail.
 
 ## [2.0.0] - 2026-09-10
 
