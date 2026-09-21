@@ -251,6 +251,32 @@ describe("ticket batch runtime ownership", () => {
     assert.deepEqual(new Set(secondCalls), new Set([-1002]));
   });
 
+  it("does not recover a reconciled package through a workspace that became active later", async () => {
+    const queriedWorkspaces: number[] = [];
+    const staffOperations: string[] = [];
+    const activeWorkspace = -1002;
+    const runtime = new TicketBatchRuntime({
+      db: {
+        getNextTicketBatchStaffRetryAt: (staffChatId: number) => {
+          queriedWorkspaces.push(staffChatId);
+          return null;
+        },
+      } as unknown as SupportDatabase,
+      installation: { requireStaffChatId: () => activeWorkspace } as unknown as InstallationService,
+      api: {
+        sendMessage: async () => {
+          staffOperations.push("sendMessage");
+          return { message_id: 1 };
+        },
+      },
+    } as unknown as TicketBatchRuntimeDependencies);
+
+    await runtime.recoverPendingStaffOperationsForWorkspace("package-owned-by-old-workspace", -1001);
+
+    assert.deepEqual(staffOperations, []);
+    assert.deepEqual(queriedWorkspaces, []);
+  });
+
   it("abandons a recovery pass when its workspace changes during staff delivery", async () => {
     const calls: number[] = [];
     const topicEchoes: Array<{ chatId: number; state: string }> = [];

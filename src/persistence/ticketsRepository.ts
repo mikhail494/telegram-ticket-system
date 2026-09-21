@@ -725,6 +725,13 @@ export class TicketRepository {
             WHERE ticket_archive_deliveries.ticket_id = tickets.id
               AND ticket_archive_deliveries.state = 'UNKNOWN_DELIVERY'
           )
+          AND NOT EXISTS (
+            SELECT 1 FROM delivery_reconciliation_audit
+            WHERE delivery_reconciliation_audit.ticket_id = tickets.id
+              AND delivery_reconciliation_audit.staff_chat_id = tickets.staff_chat_id
+              AND delivery_reconciliation_audit.delivery_kind IN ('ARCHIVE_SUMMARY', 'ARCHIVE_DOCUMENT')
+              AND delivery_reconciliation_audit.action = 'CONFIRMED_FAILED'
+          )
           AND EXISTS (
             SELECT 1 FROM messages WHERE messages.ticket_id = tickets.id
           )

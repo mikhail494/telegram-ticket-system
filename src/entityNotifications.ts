@@ -1,4 +1,4 @@
-import type { Context } from "grammy";
+import { GrammyError, type Context } from "grammy";
 import type { SupportDatabase } from "./db.js";
 
 const MAX_PROVIDER_LENGTH = 64;
@@ -239,8 +239,12 @@ export async function processEntityNotificationEvent(
     return { status: "PUBLISHED", telegramMessageId: sent.message_id };
   } catch (error) {
     const reason = conciseError(error);
-    db.recordEntityNotificationFailure(event.provider, event.entityType, event.entityId, event.eventType, reason);
-    return { status: "FAILED", reason };
+    if (error instanceof GrammyError) {
+      db.recordEntityNotificationFailure(event.provider, event.entityType, event.entityId, event.eventType, reason);
+      return { status: "FAILED", reason };
+    }
+    db.recordEntityNotificationUnknown(event.provider, event.entityType, event.entityId, event.eventType, reason);
+    return { status: "UNKNOWN_DELIVERY", reason };
   }
 }
 

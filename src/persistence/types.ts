@@ -239,6 +239,65 @@ export interface TicketArchiveDeliveryClaim {
   delivery: TicketArchiveDeliveryRecord;
 }
 
+export type DeliveryReconciliationKind = "INTERACTIVE" | "ARCHIVE_SUMMARY" | "ARCHIVE_DOCUMENT" | "BATCH_REPLY";
+
+export type DeliveryReconciliationAction = "CONFIRMED_DELIVERED" | "CONFIRMED_FAILED";
+
+export interface DeliveryReconciliationRecord {
+  caseToken: string;
+  kind: DeliveryReconciliationKind;
+  operationIdentity: string;
+  ticketId: number;
+  staffChatId: number;
+  sourceChatId: number | null;
+  sourceMessageId: number | null;
+  destinationChatId: number | null;
+  relatedTelegramMessageId: number | null;
+  knownTelegramMessageId: number | null;
+  state: "UNKNOWN_DELIVERY";
+  diagnosticCategory: DeliveryErrorCategory | null;
+  diagnosticDescription: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReconcileUnknownDeliveryInput {
+  staffChatId: number;
+  caseToken: string;
+  action: DeliveryReconciliationAction;
+  telegramMessageId?: number | null;
+  reconciledBy: number;
+  note?: string | null;
+}
+
+export interface DeliveryReconciliationResult {
+  outcome: "APPLIED" | "IDEMPOTENT" | "CONFLICT" | "NOT_FOUND";
+  kind?: DeliveryReconciliationKind;
+  ticketId?: number;
+  staffChatId?: number;
+  resultingState?: string;
+  archiveContinuationRequired?: boolean;
+  batchContinuationRequired?: boolean;
+  batchAnswerPackageId?: string;
+  ticketSummaryRefreshRequired?: boolean;
+}
+
+export interface DeliveryReconciliationAuditRecord {
+  id: number;
+  case_token: string;
+  delivery_kind: DeliveryReconciliationKind;
+  delivery_key: string;
+  ticket_id: number;
+  staff_chat_id: number;
+  reconciled_by: number;
+  action: DeliveryReconciliationAction;
+  previous_state: string;
+  resulting_state: string;
+  telegram_message_id: number | null;
+  note: string | null;
+  reconciled_at: string;
+}
+
 export interface BanUserInput {
   userTelegramId: number;
   username?: string | null;

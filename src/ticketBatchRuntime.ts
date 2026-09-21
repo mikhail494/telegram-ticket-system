@@ -15,6 +15,7 @@ import { type BackgroundTaskTracker } from "./lifecycle.js";
 import { logger } from "./logger.js";
 import type { StaffChatOperationOptions } from "./staffChatDelivery.js";
 import { getTicketSnapshotToken } from "./ticketBatch.js";
+import type { InteractiveStaffReplySource } from "./ticketRouting.js";
 
 const STAFF_OPERATION_NO_RETRY_AT = "9999-12-31T23:59:59.999Z";
 
@@ -54,7 +55,12 @@ export interface TicketBatchRuntimeDependencies {
     options: StaffChatOperationOptions,
     chatId?: number
   ): Promise<T>;
-  deliverUserReply(ticket: TicketWithUser, text: string, staffUser: User | undefined): Promise<number>;
+  deliverUserReply(
+    ticket: TicketWithUser,
+    text: string,
+    staffUser: User | undefined,
+    source: InteractiveStaffReplySource
+  ): Promise<number>;
   closeTicket(ticketId: number, options: TicketBatchCloseOptions, staffChatId?: number): Promise<void>;
   staffActor(staffUser: User | undefined): ArchiveActor;
   refreshTicket(ticketId: number, staffChatId?: number): Promise<void>;
@@ -293,7 +299,11 @@ export class TicketBatchRuntime {
       }
       let deliveryMessageId: number;
       try {
-        deliveryMessageId = await this.dependencies.deliverUserReply(ticket, item.reply_text ?? "", staffUser);
+        deliveryMessageId = await this.dependencies.deliverUserReply(ticket, item.reply_text ?? "", staffUser, {
+          chatId: packageRecord.source_chat_id,
+          messageId: packageRecord.source_message_id,
+          operationKey: `ticket-batch:${answerPackageId}:${item.ticket_id}`,
+        });
       } catch (error) {
         const diagnostic = normalizeTelegramDeliveryError(error);
         const state = diagnostic.permanence === "UNKNOWN_DELIVERY" ? "UNKNOWN_DELIVERY" : "FAILED";
@@ -888,9 +898,22 @@ export class TicketBatchRuntime {
     return queued;
   }
 
+  recoverPendingStaffOperationsForWorkspace(answerPackageId: string, staffChatId: number): Promise<void> {
+    const queued = this.recoveryQueue.then(() => this.runRecoveryForExpectedWorkspace(answerPackageId, staffChatId));
+    this.recoveryQueue = queued.catch(() => undefined);
+    return queued;
+  }
+
   private async runRecovery(answerPackageId?: string): Promise<void> {
     if (this.stopped) return;
-    const staffChatId = this.requireStaffChatId();
+    await this.runRecoveryForExpectedWorkspace(answerPackageId, this.requireStaffChatId());
+  }
+
+  private async runRecoveryForExpectedWorkspace(
+    answerPackageId: string | undefined,
+    staffChatId: number
+  ): Promise<void> {
+    if (this.stopped) return;
     try {
       await this.runRecoveryForWorkspace(answerPackageId, staffChatId);
     } catch (error) {
@@ -904,6 +927,10 @@ export class TicketBatchRuntime {
     const at = this.now().toISOString();
     const packagesToFinalize = new Set<string>();
     const packagesToRefresh = new Set<string>();
+    if (answerPackageId !== undefined) {
+      packagesToFinalize.add(answerPackageId);
+      packagesToRefresh.add(answerPackageId);
+    }
     const matchesPackage = (item: { answer_package_id: string }): boolean =>
       answerPackageId === undefined || item.answer_package_id === answerPackageId;
     for (const item of this.db.listInvalidTicketBatchSuccessEchoes(staffChatId, 20).filter(matchesPackage)) {

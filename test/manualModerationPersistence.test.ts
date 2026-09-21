@@ -152,7 +152,7 @@ describe("manual moderation persistence", () => {
     }
   });
 
-  it("adds migrations 24 and 25 once with safe durable defaults and preserved data", async () => {
+  it("adds migrations 24 through 26 once with safe durable defaults and preserved data", async () => {
     const filename = await databasePath();
     const legacy = new Database(filename);
     legacy.exec(`
@@ -295,7 +295,7 @@ describe("manual moderation persistence", () => {
         (inspected.prepare("SELECT id FROM schema_migrations ORDER BY id").all() as Array<{ id: number }>).map(
           (row) => row.id
         ),
-        Array.from({ length: 25 }, (_, index) => index + 1)
+        Array.from({ length: 26 }, (_, index) => index + 1)
       );
       assert.equal(
         (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 23").get() as { count: number })

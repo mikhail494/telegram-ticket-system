@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { InstallationRepository } from "./persistence/installationRepository.js";
+import { DeliveryReconciliationRepository } from "./persistence/deliveryReconciliationRepository.js";
 import { ModerationRepository } from "./persistence/moderationRepository.js";
 import { QuickRepliesRepository } from "./persistence/quickRepliesRepository.js";
 import { TicketBatchRepository } from "./persistence/ticketBatchRepository.js";
@@ -11,6 +12,9 @@ import type { NormalizedDeliveryError } from "./deliveryDiagnostics.js";
 import type {
   AddMessageInput,
   CreateTicketOutboundDeliveryIntentInput,
+  DeliveryReconciliationAuditRecord,
+  DeliveryReconciliationRecord,
+  DeliveryReconciliationResult,
   BanUserInput,
   BannedUserRecord,
   CloseTicketInput,
@@ -31,6 +35,7 @@ import type {
   OnboardingSessionRecord,
   QuickReplyCategoryRecord,
   QuickReplyTemplateRecord,
+  ReconcileUnknownDeliveryInput,
   SecureTokenRecord,
   TeamMemberRecord,
   TeamRole,
@@ -115,6 +120,7 @@ export class SupportDatabase {
   private readonly installation: InstallationRepository;
   private readonly moderation: ModerationRepository;
   private readonly quickReplies: QuickRepliesRepository;
+  private readonly deliveryReconciliation: DeliveryReconciliationRepository;
   readonly databasePath: string;
   constructor(databaseUrl: string) {
     const databasePath = resolveDatabasePath(databaseUrl);
@@ -132,6 +138,7 @@ export class SupportDatabase {
     this.batch = new TicketBatchRepository(this.db);
     this.moderation = new ModerationRepository(this.db);
     this.quickReplies = new QuickRepliesRepository(this.db);
+    this.deliveryReconciliation = new DeliveryReconciliationRepository(this.db);
     secureDatabaseArtifacts(databasePath);
   }
   close(): void {
@@ -259,8 +266,32 @@ export class SupportDatabase {
     return this.tickets.markPendingTicketOutboundDeliveriesUnknown();
   }
 
+  markOrphanedTicketBatchReplyDeliveriesUnknown(): number {
+    return this.batch.markOrphanedTicketBatchReplyDeliveriesUnknown();
+  }
+
   hasUnresolvedTicketOutboundDeliveries(ticketId: number): boolean {
     return this.tickets.hasUnresolvedTicketOutboundDeliveries(ticketId);
+  }
+
+  listUnknownDeliveryReconciliations(staffChatId: number, limit = 50): DeliveryReconciliationRecord[] {
+    return this.deliveryReconciliation.listUnknown(staffChatId, limit);
+  }
+
+  countUnknownDeliveryReconciliations(staffChatId: number): number {
+    return this.deliveryReconciliation.countUnknown(staffChatId);
+  }
+
+  getUnknownDeliveryReconciliation(staffChatId: number, caseToken: string): DeliveryReconciliationRecord | undefined {
+    return this.deliveryReconciliation.getUnknown(staffChatId, caseToken);
+  }
+
+  reconcileUnknownDelivery(input: ReconcileUnknownDeliveryInput): DeliveryReconciliationResult {
+    return this.deliveryReconciliation.reconcile(input);
+  }
+
+  listDeliveryReconciliationAudit(staffChatId: number, limit = 100): DeliveryReconciliationAuditRecord[] {
+    return this.deliveryReconciliation.listAudit(staffChatId, limit);
   }
 
   getTicketArchiveDelivery(ticketId: number): TicketArchiveDeliveryRecord | undefined {
@@ -842,6 +873,16 @@ export class SupportDatabase {
     error: string
   ): void {
     return this.installation.recordEntityNotificationFailure(provider, entityType, entityId, eventType, error);
+  }
+
+  recordEntityNotificationUnknown(
+    provider: string,
+    entityType: string,
+    entityId: string,
+    eventType: "created",
+    error: string
+  ): void {
+    return this.installation.recordEntityNotificationUnknown(provider, entityType, entityId, eventType, error);
   }
 
   countEntityNotificationPublications(state?: EntityNotificationPublicationState): number {
@@ -2013,6 +2054,42 @@ export class SupportDatabase {
             );
             CREATE INDEX IF NOT EXISTS idx_ticket_archive_deliveries_state
               ON ticket_archive_deliveries(state, updated_at, ticket_id);
+          `);
+        },
+      },
+      {
+        id: 26,
+        name: "add_delivery_reconciliation_audit",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS delivery_reconciliation_audit (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              case_token TEXT NOT NULL UNIQUE,
+              delivery_kind TEXT NOT NULL CHECK(delivery_kind IN ('INTERACTIVE','ARCHIVE_SUMMARY','ARCHIVE_DOCUMENT','BATCH_REPLY')),
+              delivery_key TEXT NOT NULL,
+              ticket_id INTEGER NOT NULL,
+              staff_chat_id INTEGER NOT NULL,
+              reconciled_by INTEGER NOT NULL,
+              action TEXT NOT NULL CHECK(action IN ('CONFIRMED_DELIVERED','CONFIRMED_FAILED')),
+              previous_state TEXT NOT NULL,
+              resulting_state TEXT NOT NULL,
+              telegram_message_id INTEGER,
+              note TEXT,
+              reconciled_at TEXT NOT NULL,
+              FOREIGN KEY(ticket_id) REFERENCES tickets(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_delivery_reconciliation_audit_workspace
+              ON delivery_reconciliation_audit(staff_chat_id, reconciled_at, id);
+            CREATE TRIGGER IF NOT EXISTS prevent_delivery_reconciliation_audit_update
+            BEFORE UPDATE ON delivery_reconciliation_audit
+            BEGIN
+              SELECT RAISE(ABORT, 'delivery reconciliation audit is append-only');
+            END;
+            CREATE TRIGGER IF NOT EXISTS prevent_delivery_reconciliation_audit_delete
+            BEFORE DELETE ON delivery_reconciliation_audit
+            BEGIN
+              SELECT RAISE(ABORT, 'delivery reconciliation audit is append-only');
+            END;
           `);
         },
       },
