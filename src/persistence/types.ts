@@ -274,10 +274,12 @@ export interface DeliveryReconciliationResult {
   outcome: "APPLIED" | "IDEMPOTENT" | "CONFLICT" | "NOT_FOUND";
   kind?: DeliveryReconciliationKind;
   ticketId?: number;
+  staffChatId?: number;
   resultingState?: string;
   archiveContinuationRequired?: boolean;
   batchContinuationRequired?: boolean;
   batchAnswerPackageId?: string;
+  ticketSummaryRefreshRequired?: boolean;
 }
 
 export interface DeliveryReconciliationAuditRecord {

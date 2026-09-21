@@ -227,7 +227,15 @@ export class TicketRoutingService {
       : `Ticket #${closedTicket?.id ?? ticketId} closed. Transcript archive is pending retry.`;
   }
 
-  async finalizeReconciledArchive(ticketId: number, staffChatId = this.requireStaffChatId()): Promise<boolean> {
+  async finalizeReconciledArchive(ticketId: number, staffChatId: number): Promise<boolean> {
+    const activeStaffChatId = this.requireStaffChatId();
+    if (activeStaffChatId !== staffChatId) {
+      logger.warn(
+        { ticketId, staffChatId, activeStaffChatId },
+        "Skipped reconciled archive continuation after workspace changed"
+      );
+      return false;
+    }
     return archiveTicketIfPossible(this.dependencies.api, this.dependencies.db, staffChatId, ticketId);
   }
 

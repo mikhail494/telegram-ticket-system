@@ -160,11 +160,17 @@ async function startApplication(): Promise<void> {
   if (!lifecycle.isRunning()) return;
   bot.botInfo = botInfo;
   const orphanInteractiveDeliveries = db.markPendingTicketOutboundDeliveriesUnknown();
+  const orphanBatchReplyDeliveries = db.markOrphanedTicketBatchReplyDeliveriesUnknown();
   const orphanArchiveDeliveries = db.markPendingTicketArchiveDeliveriesUnknown();
   if (orphanInteractiveDeliveries > 0)
     logger.warn(
       { count: orphanInteractiveDeliveries },
       "Converted orphan interactive delivery intents to UNKNOWN_DELIVERY"
+    );
+  if (orphanBatchReplyDeliveries > 0)
+    logger.warn(
+      { count: orphanBatchReplyDeliveries },
+      "Converted orphan Ticket Batch reply deliveries to UNKNOWN_DELIVERY"
     );
   if (orphanArchiveDeliveries > 0)
     logger.warn({ count: orphanArchiveDeliveries }, "Converted orphan archive delivery intents to UNKNOWN_DELIVERY");

@@ -384,8 +384,11 @@ export function createBot(
       if (exportId) await showPrivateBatchWaiting(ctx, exportId);
       else await privateControlPlane.showDashboard(ctx);
     },
-    onContinueReconciledArchive: (ticketId) => ticketRouting.finalizeReconciledArchive(ticketId),
-    onContinueReconciledBatch: (answerPackageId) => ticketBatchRuntime.recoverPendingStaffOperations(answerPackageId),
+    onContinueReconciledArchive: (ticketId, staffChatId) =>
+      ticketRouting.finalizeReconciledArchive(ticketId, staffChatId),
+    onContinueReconciledBatch: (answerPackageId, staffChatId) =>
+      ticketBatchRuntime.recoverPendingStaffOperationsForWorkspace(answerPackageId, staffChatId),
+    onRefreshReconciledTicket: (ticketId, staffChatId) => ticketRouting.refreshTicket(ticketId, staffChatId),
     packageVersion: packageMetadata.version,
     botUsername: () => bot.botInfo?.username,
     botId: () => bot.botInfo?.id,

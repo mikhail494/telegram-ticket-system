@@ -162,7 +162,7 @@ export class DeliveryReconciliationRepository {
       const record = this.getUnknown(normalizedInput.staffChatId, normalizedInput.caseToken);
       if (!record) return { outcome: "NOT_FOUND" };
       if (normalizedInput.action === "CONFIRMED_DELIVERED" && !isPositiveInteger(normalizedInput.telegramMessageId)) {
-        return { outcome: "CONFLICT", kind: record.kind, ticketId: record.ticketId };
+        return { outcome: "CONFLICT", kind: record.kind, ticketId: record.ticketId, staffChatId: record.staffChatId };
       }
 
       const resultingState = this.applyReconciliation(record, normalizedInput);
@@ -172,6 +172,7 @@ export class DeliveryReconciliationRepository {
         "APPLIED",
         record.kind,
         record.ticketId,
+        record.staffChatId,
         record.operationIdentity,
         resultingState
       );
@@ -254,6 +255,12 @@ export class DeliveryReconciliationRepository {
       .run(input.telegramMessageId, now(), record.operationIdentity);
     if (updated.changes !== 1) return undefined;
     this.insertTranscriptMessage(delivery, input.telegramMessageId);
+    this.db
+      .prepare(
+        `UPDATE tickets SET status = 'IN_PROGRESS', updated_at = ?
+         WHERE id = ? AND staff_chat_id = ? AND status = 'OPEN'`
+      )
+      .run(now(), record.ticketId, record.staffChatId);
     return "DELIVERED";
   }
 
@@ -445,19 +452,29 @@ export class DeliveryReconciliationRepository {
         )
         .run(ticketId, item.follow_up_state, item.internal_note, item.escalation_target, answerPackageId, timestamp);
     }
+    const closedTicket = item.ticket_status === "CLOSED";
     const updated = this.db
       .prepare(
         `UPDATE ticket_batch_answer_items
-         SET state = 'STAFF_SYNC_PENDING', delivery_message_id = ?, applied_at = ?, last_error = NULL,
+         SET state = ?, delivery_message_id = ?, applied_at = ?, last_error = NULL,
              delivery_error_category = NULL, delivery_error_permanence = NULL,
              delivery_error_code = NULL, delivery_http_status = NULL, delivery_error_method = NULL,
              delivery_retry_after_seconds = NULL, delivery_error_description = NULL,
              delivery_failure_event_state = 'NOT_REQUIRED', delivery_failure_event_next_retry_at = NULL,
-             topic_echo_state = 'PENDING', topic_echo_next_retry_at = ?, updated_at = ?
+             topic_echo_state = ?, topic_echo_next_retry_at = ?, updated_at = ?
          WHERE answer_package_id = ? AND ticket_id = ? AND state = 'UNKNOWN_DELIVERY'`
       )
-      .run(input.telegramMessageId, timestamp, timestamp, timestamp, answerPackageId, ticketId);
-    return updated.changes === 1 ? "STAFF_SYNC_PENDING" : undefined;
+      .run(
+        closedTicket ? "INACTIVE" : "STAFF_SYNC_PENDING",
+        input.telegramMessageId,
+        timestamp,
+        closedTicket ? "NOT_REQUIRED" : "PENDING",
+        closedTicket ? null : timestamp,
+        timestamp,
+        answerPackageId,
+        ticketId
+      );
+    return updated.changes === 1 ? (closedTicket ? "INACTIVE" : "STAFF_SYNC_PENDING") : undefined;
   }
 
   private insertTranscriptMessage(delivery: InteractiveDeliveryRow, deliveryMessageId: number): void {
@@ -540,6 +557,7 @@ export class DeliveryReconciliationRepository {
       audit.action === input.action && sameMessageId ? "IDEMPOTENT" : "CONFLICT",
       audit.delivery_kind,
       audit.ticket_id,
+      audit.staff_chat_id,
       audit.delivery_key,
       audit.resulting_state
     );
@@ -549,21 +567,30 @@ export class DeliveryReconciliationRepository {
     outcome: DeliveryReconciliationResult["outcome"],
     kind: DeliveryReconciliationKind,
     ticketId: number,
+    staffChatId: number,
     operationIdentity: string,
     resultingState: string
   ): DeliveryReconciliationResult {
     const batchAnswerPackageId = kind === "BATCH_REPLY" ? batchAnswerPackageIdFor(operationIdentity) : undefined;
+    const ticket = this.db
+      .prepare("SELECT status FROM tickets WHERE id = ? AND staff_chat_id = ?")
+      .get(ticketId, staffChatId) as { status: string } | undefined;
+    const closedTicket = ticket?.status === "CLOSED";
     return {
       outcome,
       kind,
       ticketId,
+      staffChatId,
       resultingState,
       archiveContinuationRequired:
         (kind === "ARCHIVE_SUMMARY" && resultingState === "SUMMARY_SENT") ||
-        (kind === "ARCHIVE_DOCUMENT" && resultingState === "DELIVERED"),
+        (kind === "ARCHIVE_DOCUMENT" && resultingState === "DELIVERED") ||
+        (closedTicket && (kind === "INTERACTIVE" || kind === "BATCH_REPLY")),
       batchContinuationRequired:
-        kind === "BATCH_REPLY" && (resultingState === "STAFF_SYNC_PENDING" || resultingState === "FAILED"),
+        kind === "BATCH_REPLY" &&
+        (resultingState === "STAFF_SYNC_PENDING" || resultingState === "FAILED" || resultingState === "INACTIVE"),
       batchAnswerPackageId,
+      ticketSummaryRefreshRequired: kind === "INTERACTIVE" && resultingState === "DELIVERED" && !closedTicket,
     };
   }
 }

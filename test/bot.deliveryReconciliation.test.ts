@@ -84,6 +84,55 @@ function seedUnknownInteractive(harness: BotHarness, sourceMessageId = 7001) {
   return { ticket, operationKey, record: harness.db.listUnknownDeliveryReconciliations(TEST_STAFF_CHAT_ID)[0]! };
 }
 
+function seedUnknownBatchReply(
+  harness: BotHarness,
+  ticket: ReturnType<BotHarness["seedTicket"]>,
+  answerPackageId: string
+) {
+  const operationKey = `ticket-batch:${answerPackageId}:${ticket.id}`;
+  harness.db.createTicketBatchExport({
+    exportId: `${answerPackageId}-export`,
+    staffChatId: TEST_STAFF_CHAT_ID,
+    createdAt: "2026-09-21T00:00:00.000Z",
+    selectionMode: "all_active",
+    ticketCount: 1,
+    items: [{ ticketId: ticket.id, snapshotToken: `sha256:${answerPackageId}` }],
+  });
+  harness.db.createTicketBatchAnswerPackage({
+    answerPackageId,
+    exportId: `${answerPackageId}-export`,
+    staffChatId: TEST_STAFF_CHAT_ID,
+    packageHash: `sha256:${answerPackageId}`,
+    sourceChatId: TEST_STAFF_CHAT_ID,
+    sourceMessageId: 79,
+    packageCreatedAt: "2026-09-21T00:00:00.000Z",
+    items: [
+      {
+        ticket_id: ticket.id,
+        snapshot_token: `sha256:${answerPackageId}`,
+        action: "reply_keep_open",
+        reply_text: "Confirmed customer reply",
+      },
+    ],
+  });
+  harness.db.createTicketOutboundDeliveryIntent({
+    operationKey,
+    ticketId: ticket.id,
+    direction: "STAFF_TO_USER",
+    sourceChatId: TEST_STAFF_CHAT_ID,
+    sourceMessageId: 79,
+    deliveryChatId: ticket.user_telegram_id,
+    senderType: "STAFF",
+    senderDisplayName: "Support",
+    text: "Confirmed customer reply",
+  });
+  harness.db.markTicketOutboundDeliveryUnknown(operationKey, "Ambiguous customer delivery.");
+  harness.db.updateTicketBatchAnswerItem(answerPackageId, ticket.id, "UNKNOWN_DELIVERY", {
+    lastError: "Manual review required.",
+  });
+  return { operationKey, record: harness.db.listUnknownDeliveryReconciliations(TEST_STAFF_CHAT_ID)[0]! };
+}
+
 test("OWNER reconciles an UNKNOWN interactive delivery without resending it", async () => {
   const { harness } = createReadyHarness({ rbac: true });
   const { ticket, operationKey, record } = seedUnknownInteractive(harness);
@@ -100,6 +149,96 @@ test("OWNER reconciles an UNKNOWN interactive delivery without resending it", as
   assert.equal(harness.db.getTicketOutboundDelivery(operationKey)?.delivery_message_id, 8123);
   assert.equal(harness.db.listMessagesChronological(ticket.id).length, 1);
   assert.equal(harness.db.listDeliveryReconciliationAudit(TEST_STAFF_CHAT_ID).length, 1);
+  assert.equal(
+    harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id).length,
+    0
+  );
+});
+
+test("reconciling a delivered OPEN interactive reply restores local progress and refreshes its staff summary", async () => {
+  const { harness } = createReadyHarness({ rbac: true });
+  const { ticket, operationKey, record } = seedUnknownInteractive(harness, 7101);
+  harness.db.updateTicketStaffMessage(ticket.id, TEST_STAFF_CHAT_ID, 910);
+
+  await harness.bot.handleUpdate(privateCallback(1, "dashboard:delivery"));
+  await harness.bot.handleUpdate(privateCallback(1, `delivery:delivered:${record.caseToken}`));
+  harness.clearApiCalls();
+  await harness.bot.handleUpdate(privateMessage(1, "8124"));
+
+  assert.equal(harness.db.getTicketOutboundDelivery(operationKey)?.state, "DELIVERED");
+  assert.equal(harness.db.listMessagesChronological(ticket.id).length, 1);
+  assert.equal(harness.db.getTicket(ticket.id)?.status, "IN_PROGRESS");
+  assert.equal(
+    harness
+      .findApiCalls("editMessageText")
+      .filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID && call.payload.message_id === 910).length,
+    1
+  );
+  assert.equal(
+    harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id).length,
+    0
+  );
+});
+
+test("reconciling a delivered WAITING_USER interactive reply preserves its ticket state", async () => {
+  const { harness } = createReadyHarness({ rbac: true });
+  const { ticket, record } = seedUnknownInteractive(harness, 7102);
+  harness.db.updateTicketStatus(ticket.id, "WAITING_USER");
+
+  await harness.bot.handleUpdate(privateCallback(1, "dashboard:delivery"));
+  await harness.bot.handleUpdate(privateCallback(1, `delivery:delivered:${record.caseToken}`));
+  harness.clearApiCalls();
+  await harness.bot.handleUpdate(privateMessage(1, "8125"));
+
+  assert.equal(harness.db.getTicket(ticket.id)?.status, "WAITING_USER");
+  assert.equal(harness.db.listMessagesChronological(ticket.id).length, 1);
+  assert.equal(
+    harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id).length,
+    0
+  );
+});
+
+test("a delivered closed interactive reply is archived without replaying the original staff send", async () => {
+  const { harness } = createReadyHarness({ rbac: true });
+  const { ticket, operationKey, record } = seedUnknownInteractive(harness, 7103);
+  harness.db.updateTicketStatus(ticket.id, "CLOSED");
+
+  await harness.bot.handleUpdate(privateCallback(1, "dashboard:delivery"));
+  await harness.bot.handleUpdate(privateCallback(1, `delivery:delivered:${record.caseToken}`));
+  harness.clearApiCalls();
+  await harness.bot.handleUpdate(privateMessage(1, "8126"));
+
+  assert.equal(harness.db.getTicketOutboundDelivery(operationKey), undefined);
+  assert.equal(harness.db.getTicket(ticket.id)?.archived_at !== null, true);
+  assert.equal(
+    harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id).length,
+    0
+  );
+  assert.equal(
+    harness.findApiCalls("sendDocument").filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID).length,
+    1
+  );
+});
+
+test("a failed closed interactive reply can continue the archive without replaying the reply", async () => {
+  const { harness } = createReadyHarness({ rbac: true });
+  const { ticket, operationKey, record } = seedUnknownInteractive(harness, 7104);
+  harness.db.addMessage({
+    ticketId: ticket.id,
+    direction: "USER_TO_STAFF",
+    sourceChatId: ticket.user_telegram_id,
+    sourceMessageId: 45,
+    text: "Existing ticket transcript",
+  });
+  harness.db.updateTicketStatus(ticket.id, "CLOSED");
+
+  await harness.bot.handleUpdate(privateCallback(1, "dashboard:delivery"));
+  await harness.bot.handleUpdate(privateCallback(1, `delivery:failed:${record.caseToken}`));
+  harness.clearApiCalls();
+  await harness.bot.handleUpdate(privateMessage(1, "Confirmed absent from Telegram."));
+
+  assert.equal(harness.db.getTicketOutboundDelivery(operationKey), undefined);
+  assert.equal(harness.db.getTicket(ticket.id)?.archived_at !== null, true);
   assert.equal(
     harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id).length,
     0
@@ -305,6 +444,32 @@ test("reconciling a delivered Batch reply immediately resumes staff-only recover
   );
   assert.equal(harness.db.listTicketBatchAnswerItems(answerPackageId)[0]?.state, "COMPLETED");
   assert.equal(harness.db.getTicketBatchAnswerPackage(answerPackageId, TEST_STAFF_CHAT_ID)?.status, "COMPLETED");
+});
+
+test("reconciling a delivered reply_keep_open on a closed ticket leaves no staff retry loop", async () => {
+  const { harness } = createReadyHarness({ rbac: true });
+  const ticket = harness.seedTicket({ status: "CLOSED" });
+  const answerPackageId = "reconcile-closed-batch";
+  const { operationKey, record } = seedUnknownBatchReply(harness, ticket, answerPackageId);
+
+  await harness.bot.handleUpdate(privateCallback(1, "dashboard:delivery"));
+  await harness.bot.handleUpdate(privateCallback(1, `delivery:delivered:${record.caseToken}`));
+  harness.clearApiCalls();
+  await harness.bot.handleUpdate(privateMessage(1, "8301"));
+  await harness.bot.recoverPendingTicketBatchStaffOperations();
+  await harness.bot.recoverPendingTicketBatchStaffOperations();
+
+  const item = harness.db.listTicketBatchAnswerItems(answerPackageId)[0]!;
+  assert.equal(harness.db.getTicketOutboundDelivery(operationKey), undefined);
+  assert.equal(item.state, "INACTIVE");
+  assert.equal(item.topic_echo_state, "NOT_REQUIRED");
+  assert.equal(item.topic_echo_next_retry_at, null);
+  assert.equal(harness.db.getNextTicketBatchStaffRetryAt(TEST_STAFF_CHAT_ID), undefined);
+  assert.equal(harness.db.getTicket(ticket.id)?.follow_up_state, "NONE");
+  assert.equal(
+    harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id).length,
+    0
+  );
 });
 
 test("reconciling a failed Batch reply refreshes staff-only package status without a customer retry", async () => {

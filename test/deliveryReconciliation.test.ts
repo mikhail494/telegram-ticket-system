@@ -19,7 +19,8 @@ function seedUnknownBatch(
   options: {
     ticketId?: number;
     staffChatId?: number;
-    outboundState?: "UNKNOWN_DELIVERY" | "FAILED" | "DELIVERED" | "NONE";
+    outboundState?: "PENDING" | "UNKNOWN_DELIVERY" | "FAILED" | "DELIVERED" | "NONE";
+    itemState?: "UNKNOWN_DELIVERY" | "APPLYING";
     followUpState?: "NONE" | "WAITING_USER";
     internalNote?: string | null;
   } = {}
@@ -70,9 +71,13 @@ function seedUnknownBatch(
     if (outboundState === "UNKNOWN_DELIVERY") db.markTicketOutboundDeliveryUnknown(operationKey, "Ambiguous reply.");
     else if (outboundState === "FAILED")
       db.markTicketOutboundDeliveryFailed(operationKey, "TELEGRAM_BAD_REQUEST", "Rejected.");
-    else db.markTicketOutboundDeliveryDelivered(operationKey, 901);
+    else if (outboundState === "DELIVERED") db.markTicketOutboundDeliveryDelivered(operationKey, 901);
   }
-  db.updateTicketBatchAnswerItem(id, ticketId, "UNKNOWN_DELIVERY", { lastError: "Manual review required." });
+  if (options.itemState === "APPLYING") {
+    assert.equal(db.claimTicketBatchAnswerItem(id, ticketId), true);
+  } else {
+    db.updateTicketBatchAnswerItem(id, ticketId, "UNKNOWN_DELIVERY", { lastError: "Manual review required." });
+  }
   return { ticketId, operationKey, record: db.listUnknownDeliveryReconciliations(staffChatId)[0] };
 }
 
@@ -122,6 +127,7 @@ describe("unknown delivery reconciliation persistence", () => {
       });
 
       assert.equal(first.outcome, "APPLIED");
+      assert.equal(first.staffChatId, STAFF_CHAT_ID);
       assert.equal(duplicate.outcome, "IDEMPOTENT");
       assert.equal(contradiction.outcome, "CONFLICT");
       assert.equal(db.getTicketOutboundDelivery(operationKey)?.state, "DELIVERED");
@@ -167,6 +173,97 @@ describe("unknown delivery reconciliation persistence", () => {
       assert.equal(afterRestart.markPendingTicketOutboundDeliveriesUnknown(), 0);
       afterRestart.close();
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers an APPLYING Batch reply with a PENDING outbound intent into an operator-review case", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "telegram-batch-applying-pending-"));
+    const databasePath = path.join(directory, "support.db");
+    let afterRestart: SupportDatabase | undefined;
+    try {
+      const beforeCrash = new SupportDatabase(`file:${databasePath}`);
+      const { ticketId, operationKey } = seedUnknownBatch(beforeCrash, "batch-applying-pending", {
+        outboundState: "PENDING",
+        itemState: "APPLYING",
+      });
+      beforeCrash.close();
+
+      afterRestart = new SupportDatabase(`file:${databasePath}`);
+      assert.equal(afterRestart.markPendingTicketOutboundDeliveriesUnknown(), 1);
+      assert.equal(afterRestart.markOrphanedTicketBatchReplyDeliveriesUnknown(), 1);
+      assert.equal(afterRestart.getTicketOutboundDelivery(operationKey)?.state, "UNKNOWN_DELIVERY");
+      assert.equal(afterRestart.listTicketBatchAnswerItems("batch-applying-pending")[0]?.state, "UNKNOWN_DELIVERY");
+      const [reviewCase] = afterRestart.listUnknownDeliveryReconciliations(STAFF_CHAT_ID);
+      assert.equal(reviewCase?.kind, "BATCH_REPLY");
+      assert.equal(reviewCase?.ticketId, ticketId);
+      assert.equal(afterRestart.listMessagesChronological(ticketId).length, 0);
+    } finally {
+      afterRestart?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("makes an APPLYING Batch reply with durable delivered proof reviewable without another customer send", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "telegram-batch-applying-delivered-"));
+    const databasePath = path.join(directory, "support.db");
+    let afterRestart: SupportDatabase | undefined;
+    try {
+      const beforeCrash = new SupportDatabase(`file:${databasePath}`);
+      const { ticketId, operationKey } = seedUnknownBatch(beforeCrash, "batch-applying-delivered", {
+        outboundState: "DELIVERED",
+        itemState: "APPLYING",
+      });
+      beforeCrash.close();
+
+      afterRestart = new SupportDatabase(`file:${databasePath}`);
+      assert.equal(afterRestart.markPendingTicketOutboundDeliveriesUnknown(), 0);
+      assert.equal(afterRestart.markOrphanedTicketBatchReplyDeliveriesUnknown(), 1);
+      const [reviewCase] = afterRestart.listUnknownDeliveryReconciliations(STAFF_CHAT_ID);
+      assert.equal(reviewCase?.kind, "BATCH_REPLY");
+      const result = afterRestart.reconcileUnknownDelivery({
+        staffChatId: STAFF_CHAT_ID,
+        caseToken: reviewCase!.caseToken,
+        action: "CONFIRMED_DELIVERED",
+        telegramMessageId: 901,
+        reconciledBy: 1,
+      });
+      assert.equal(result.outcome, "APPLIED");
+      assert.equal(afterRestart.getTicketOutboundDelivery(operationKey)?.state, "DELIVERED");
+      assert.equal(afterRestart.listMessagesChronological(ticketId).length, 1);
+    } finally {
+      afterRestart?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("makes an APPLYING Batch reply with durable failed proof reviewable as failed without a customer replay", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "telegram-batch-applying-failed-"));
+    const databasePath = path.join(directory, "support.db");
+    let afterRestart: SupportDatabase | undefined;
+    try {
+      const beforeCrash = new SupportDatabase(`file:${databasePath}`);
+      const { operationKey } = seedUnknownBatch(beforeCrash, "batch-applying-failed", {
+        outboundState: "FAILED",
+        itemState: "APPLYING",
+      });
+      beforeCrash.close();
+
+      afterRestart = new SupportDatabase(`file:${databasePath}`);
+      assert.equal(afterRestart.markOrphanedTicketBatchReplyDeliveriesUnknown(), 1);
+      const [reviewCase] = afterRestart.listUnknownDeliveryReconciliations(STAFF_CHAT_ID);
+      const result = afterRestart.reconcileUnknownDelivery({
+        staffChatId: STAFF_CHAT_ID,
+        caseToken: reviewCase!.caseToken,
+        action: "CONFIRMED_FAILED",
+        reconciledBy: 1,
+        note: "Verified absent from Telegram.",
+      });
+      assert.equal(result.outcome, "APPLIED");
+      assert.equal(afterRestart.getTicketOutboundDelivery(operationKey)?.state, "FAILED");
+      assert.equal(afterRestart.listTicketBatchAnswerItems("batch-applying-failed")[0]?.state, "FAILED");
+    } finally {
+      afterRestart?.close();
       await rm(directory, { recursive: true, force: true });
     }
   });
@@ -639,21 +736,27 @@ describe("unknown delivery reconciliation persistence", () => {
       assert.ok(record);
       db.closeTicketRecord(ticketId, { type: "STAFF", displayName: "Agent" });
 
-      assert.equal(
-        db.reconcileUnknownDelivery({
-          staffChatId: STAFF_CHAT_ID,
-          caseToken: record.caseToken,
-          action: "CONFIRMED_DELIVERED",
-          telegramMessageId: 904,
-          reconciledBy: 1,
-        }).outcome,
-        "APPLIED"
-      );
+      const result = db.reconcileUnknownDelivery({
+        staffChatId: STAFF_CHAT_ID,
+        caseToken: record.caseToken,
+        action: "CONFIRMED_DELIVERED",
+        telegramMessageId: 904,
+        reconciledBy: 1,
+      });
+      assert.equal(result.outcome, "APPLIED");
+      assert.equal(result.resultingState, "INACTIVE");
+      assert.equal(result.archiveContinuationRequired, true);
+      assert.equal(result.batchContinuationRequired, true);
       const ticket = db.getTicket(ticketId)!;
       assert.equal(ticket.status, "CLOSED");
       assert.equal(ticket.follow_up_state, "NONE");
       assert.equal(ticket.internal_note, null);
       assert.equal(db.listTicketFollowUpHistory(ticketId).length, 0);
+      const item = db.listTicketBatchAnswerItems("batch-closed-ticket")[0]!;
+      assert.equal(item.state, "INACTIVE");
+      assert.equal(item.topic_echo_state, "NOT_REQUIRED");
+      assert.equal(item.topic_echo_next_retry_at, null);
+      assert.equal(db.getNextTicketBatchStaffRetryAt(STAFF_CHAT_ID), undefined);
     } finally {
       db.close();
     }

@@ -266,6 +266,10 @@ export class SupportDatabase {
     return this.tickets.markPendingTicketOutboundDeliveriesUnknown();
   }
 
+  markOrphanedTicketBatchReplyDeliveriesUnknown(): number {
+    return this.batch.markOrphanedTicketBatchReplyDeliveriesUnknown();
+  }
+
   hasUnresolvedTicketOutboundDeliveries(ticketId: number): boolean {
     return this.tickets.hasUnresolvedTicketOutboundDeliveries(ticketId);
   }

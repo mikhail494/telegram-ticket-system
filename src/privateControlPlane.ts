@@ -49,8 +49,9 @@ export interface PrivateControlPlaneOperatorDependencies {
   onStartTestTicket: (ctx: Context) => Promise<void>;
   onShowWorkspace: (ctx: Context) => Promise<void>;
   onShowBatch: (ctx: Context) => Promise<void>;
-  onContinueReconciledArchive: (ticketId: number) => Promise<boolean>;
-  onContinueReconciledBatch: (answerPackageId: string) => Promise<void>;
+  onContinueReconciledArchive: (ticketId: number, staffChatId: number) => Promise<boolean>;
+  onContinueReconciledBatch: (answerPackageId: string, staffChatId: number) => Promise<void>;
+  onRefreshReconciledTicket: (ticketId: number, staffChatId: number) => Promise<void>;
   packageVersion: string;
   botUsername: () => string | undefined;
   botId: () => number | undefined;
@@ -1198,9 +1199,34 @@ export class PrivateControlPlane {
     );
     this.pendingDeliveryReconciliationInputs.delete(ctx.from.id);
     const continuationApplied = result.outcome === "APPLIED" || result.outcome === "IDEMPOTENT";
-    if (continuationApplied && result.archiveContinuationRequired && result.ticketId !== undefined) {
+    if (
+      continuationApplied &&
+      result.ticketSummaryRefreshRequired &&
+      result.ticketId !== undefined &&
+      result.staffChatId !== undefined
+    ) {
       try {
-        await dependencies.onContinueReconciledArchive(result.ticketId);
+        await dependencies.onRefreshReconciledTicket(result.ticketId, result.staffChatId);
+      } catch (error) {
+        logger.error(
+          {
+            err: error,
+            ticketId: result.ticketId,
+            staffChatId: result.staffChatId,
+            reconciliationOutcome: result.outcome,
+          },
+          "Reconciled interactive delivery but ticket summary refresh remains pending"
+        );
+      }
+    }
+    if (
+      continuationApplied &&
+      result.archiveContinuationRequired &&
+      result.ticketId !== undefined &&
+      result.staffChatId !== undefined
+    ) {
+      try {
+        await dependencies.onContinueReconciledArchive(result.ticketId, result.staffChatId);
       } catch (error) {
         logger.error(
           { err: error, ticketId: result.ticketId, reconciliationOutcome: result.outcome },
@@ -1208,9 +1234,14 @@ export class PrivateControlPlane {
         );
       }
     }
-    if (continuationApplied && result.batchContinuationRequired && result.batchAnswerPackageId) {
+    if (
+      continuationApplied &&
+      result.batchContinuationRequired &&
+      result.batchAnswerPackageId &&
+      result.staffChatId !== undefined
+    ) {
       try {
-        await dependencies.onContinueReconciledBatch(result.batchAnswerPackageId);
+        await dependencies.onContinueReconciledBatch(result.batchAnswerPackageId, result.staffChatId);
       } catch (error) {
         logger.error(
           { err: error, answerPackageId: result.batchAnswerPackageId, reconciliationOutcome: result.outcome },

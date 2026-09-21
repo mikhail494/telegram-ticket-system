@@ -898,9 +898,22 @@ export class TicketBatchRuntime {
     return queued;
   }
 
+  recoverPendingStaffOperationsForWorkspace(answerPackageId: string, staffChatId: number): Promise<void> {
+    const queued = this.recoveryQueue.then(() => this.runRecoveryForExpectedWorkspace(answerPackageId, staffChatId));
+    this.recoveryQueue = queued.catch(() => undefined);
+    return queued;
+  }
+
   private async runRecovery(answerPackageId?: string): Promise<void> {
     if (this.stopped) return;
-    const staffChatId = this.requireStaffChatId();
+    await this.runRecoveryForExpectedWorkspace(answerPackageId, this.requireStaffChatId());
+  }
+
+  private async runRecoveryForExpectedWorkspace(
+    answerPackageId: string | undefined,
+    staffChatId: number
+  ): Promise<void> {
+    if (this.stopped) return;
     try {
       await this.runRecoveryForWorkspace(answerPackageId, staffChatId);
     } catch (error) {
