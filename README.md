@@ -1,16 +1,20 @@
+<div align="center">
+
 # Telegram Support Ticket Bot
 
-A Telegram-native support desk that turns private user messages into structured staff forum topics, replies, and archived transcripts.
+**A Telegram-native support desk with forum-based tickets, durable state, batch operations, moderation, and archived transcripts.**
 
 [![CI](https://github.com/mikhail494/telegram-ticket-system/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mikhail494/telegram-ticket-system/actions/workflows/ci.yml)
-[![Latest Release](https://img.shields.io/github/v/release/mikhail494/telegram-ticket-system)](https://github.com/mikhail494/telegram-ticket-system/releases/latest)
-[![Node.js 24 LTS](https://img.shields.io/badge/Node.js-24%20LTS-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-7A3E9D.svg)](LICENSE)
+[![Latest Release](https://img.shields.io/github/v/release/mikhail494/telegram-ticket-system?style=flat-square)](https://github.com/mikhail494/telegram-ticket-system/releases/latest)
+[![Node.js 24 LTS](https://img.shields.io/badge/Node.js-24%20LTS-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-7A3E9D.svg?style=flat-square)](LICENSE)
+
+[Quick start](#quick-start) · [Architecture](docs/ARCHITECTURE.md) · [Operations](docs/OPERATIONS.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [Releases](https://github.com/mikhail494/telegram-ticket-system/releases)
+
+</div>
 
 Version: `2.0.0`
-
-[Architecture](docs/ARCHITECTURE.md) · [Operations](docs/OPERATIONS.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [Latest release](https://github.com/mikhail494/telegram-ticket-system/releases/latest)
 
 Users contact the bot in private chat, while staff work entirely in a dedicated Telegram forum supergroup. Each ticket receives its own topic, Quick Replies speed up routine responses, and closed conversations are archived as text transcripts in Support Logs.
 
