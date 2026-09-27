@@ -11,6 +11,11 @@ All notable changes to this project are documented in this file. This project fo
 - Telegram transport failures now remain `UNKNOWN_DELIVERY` unless Telegram returned a confirmed retryable API response; non-idempotent staff operations are not replayed automatically.
 - Moderation sanction failures now disable a chat only after validation positively confirms required bot rights are missing; temporary, ambiguous, target-specific, and cleanup scheduling failures remain contained to the failed action.
 - OWNER and ADMIN operators can now review and reconcile ambiguous interactive, archive, and Ticket Batch deliveries without replaying Telegram sends; Batch replies now always use a durable operation identity, and ambiguous entity-notification transport is retained as `UNKNOWN_DELIVERY`.
+- Customer-to-staff ticket routing now persists a source-bound operation before creating a ticket topic or sending staff-topic content, preventing duplicate ticket/topic/transcript creation on update replay and retaining ambiguous routing outcomes without blind resend.
+- Delivery Review now reconciles every inbound routing stage, including required original media/long-text copies. Confirmed non-delivery requires a separate audited new attempt; unresolved routing blocks archive, and closed tickets cannot be reopened through ordinary status transitions.
+- Confirmed missing-topic rejections now rebind inbound content and required copies to one replacement topic with a new attempt identity. Historical topicless tickets elect a durable provisioning owner instead of waiting indefinitely.
+- Ticket Batch replies proven delivered now finish staff-only recovery after concurrent ticket changes, without overwriting newer follow-up state or reporting rejected follow-up context as applied.
+- Closed tickets resume archive when in-flight inbound routing reaches a proven terminal outcome; confirmed original-copy failures are cancelled without losing received content. Ready inbound routing now drains beyond one 20-item chunk with workspace and progress guards.
 
 ### Changed
 
@@ -19,6 +24,7 @@ All notable changes to this project are documented in this file. This project fo
 ### Database
 
 - Added migration 26 for the append-only operator delivery-reconciliation audit trail.
+- Added migration 27 for durable customer-to-staff ticket-routing operations, stage/attempt identities, required original-copy progress, and append-only inbound reconciliation decisions.
 
 ## [2.0.0] - 2026-09-10
 

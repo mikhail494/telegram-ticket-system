@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import type { NormalizedDeliveryError } from "../deliveryDiagnostics.js";
 import { now } from "./helpers.js";
+import { TICKET_BATCH_FOLLOW_UP_CONFLICT, TICKET_BATCH_FOLLOW_UP_PERSISTENCE_FAILURE } from "./types.js";
 import type {
   CreateTicketBatchAnswerPackageInput,
   CreateTicketBatchExportInput,
@@ -105,6 +106,17 @@ export class TicketBatchRepository {
       WHERE export_id = ? AND staff_chat_id = ? AND delivery_state = 'PREPARING'`
       )
       .run(error.slice(0, 160), exportId, staffChatId);
+  }
+
+  markPendingTicketBatchExportsUnknown(): number {
+    const result = this.db
+      .prepare(
+        `UPDATE ticket_batch_exports
+         SET delivery_state = 'UNKNOWN_DELIVERY', last_error = ?
+         WHERE delivery_state = 'PREPARING'`
+      )
+      .run("Process ended while Ticket Batch export delivery outcome was pending.");
+    return result.changes;
   }
 
   getTicketBatchAnswerPackage(
@@ -260,14 +272,13 @@ export class TicketBatchRepository {
     staffChatId: number
   ): TicketBatchAnswerPackageRecord | undefined {
     const tx = this.db.transaction(() => {
-      const item = this.getTicketBatchAnswerPackage(answerPackageId, staffChatId);
-      if (!item || item.status !== "PENDING") return item;
       const timestamp = now();
-      this.db
+      const result = this.db
         .prepare(
-          "UPDATE ticket_batch_answer_packages SET status = 'APPLYING', started_at = COALESCE(started_at, ?), updated_at = ? WHERE answer_package_id = ? AND status = 'PENDING'"
+          "UPDATE ticket_batch_answer_packages SET status = 'APPLYING', started_at = COALESCE(started_at, ?), updated_at = ? WHERE answer_package_id = ? AND staff_chat_id = ? AND status = 'PENDING'"
         )
-        .run(timestamp, timestamp, answerPackageId);
+        .run(timestamp, timestamp, answerPackageId, staffChatId);
+      if (result.changes !== 1) return undefined;
       return this.getTicketBatchAnswerPackage(answerPackageId, staffChatId);
     });
     return tx();
@@ -317,11 +328,13 @@ export class TicketBatchRepository {
   ): void {
     this.db
       .prepare(
-        "UPDATE ticket_batch_answer_items SET state = ?, delivery_message_id = COALESCE(?, delivery_message_id), last_error = ?, applied_at = CASE WHEN ? THEN ? ELSE applied_at END, updated_at = ? WHERE answer_package_id = ? AND ticket_id = ?"
+        "UPDATE ticket_batch_answer_items SET state = ?, delivery_message_id = COALESCE(?, delivery_message_id), last_error = CASE WHEN last_error IN (?, ?) THEN last_error ELSE ? END, applied_at = CASE WHEN ? THEN ? ELSE applied_at END, updated_at = ? WHERE answer_package_id = ? AND ticket_id = ?"
       )
       .run(
         state,
         options.deliveryMessageId ?? null,
+        TICKET_BATCH_FOLLOW_UP_CONFLICT,
+        TICKET_BATCH_FOLLOW_UP_PERSISTENCE_FAILURE,
         options.lastError ?? null,
         options.applied ? 1 : 0,
         options.applied ? now() : null,
@@ -556,7 +569,8 @@ export class TicketBatchRepository {
         `SELECT i.* FROM ticket_batch_answer_items i
       JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
       JOIN tickets t ON t.id = i.ticket_id
-      WHERE p.staff_chat_id = ? AND i.topic_echo_state IN ('PENDING', 'FAILED')
+      WHERE p.staff_chat_id = ? AND (i.topic_echo_state IN ('PENDING', 'FAILED')
+        OR (i.action = 'reply_keep_open' AND i.state = 'REPLY_SENT' AND i.topic_echo_state = 'SENT'))
         AND t.status != 'CLOSED'
         AND (i.topic_echo_next_retry_at IS NULL OR i.topic_echo_next_retry_at <= ?)
         AND (
@@ -572,7 +586,7 @@ export class TicketBatchRepository {
       .all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
   }
 
-  listClosedTicketBatchReplyAndClosePendingEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {
+  listClosedTicketBatchPendingReplyEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {
     return this.db
       .prepare(
         `SELECT i.* FROM ticket_batch_answer_items i
@@ -580,13 +594,14 @@ export class TicketBatchRepository {
       JOIN tickets t ON t.id = i.ticket_id
       WHERE p.staff_chat_id = ? AND p.status IN ('APPLYING', 'PARTIAL')
         AND t.status = 'CLOSED'
-        AND i.action = 'reply_and_close'
+        AND t.staff_chat_id = p.staff_chat_id
+        AND i.action IN ('reply_and_close', 'reply_keep_open')
         AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING')
         AND i.delivery_message_id IS NOT NULL
         AND i.delivery_error_category IS NULL
         AND i.delivery_error_permanence IS NULL
         AND i.delivery_failure_event_state != 'SENT'
-        AND i.topic_echo_state IN ('PENDING', 'FAILED')
+        AND (i.topic_echo_state IN ('PENDING', 'FAILED') OR i.action = 'reply_keep_open')
       ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`
       )
       .all(staffChatId, limit) as TicketBatchAnswerItemRecord[];
@@ -601,10 +616,18 @@ export class TicketBatchRepository {
     this.db
       .prepare(
         `UPDATE ticket_batch_answer_items
-      SET topic_echo_next_retry_at = ?, last_error = ?, updated_at = ?
+      SET topic_echo_next_retry_at = ?, last_error = CASE WHEN last_error IN (?, ?) THEN last_error ELSE ? END, updated_at = ?
       WHERE answer_package_id = ? AND ticket_id = ?`
       )
-      .run(nextRetryAt, lastError, now(), answerPackageId, ticketId);
+      .run(
+        nextRetryAt,
+        TICKET_BATCH_FOLLOW_UP_CONFLICT,
+        TICKET_BATCH_FOLLOW_UP_PERSISTENCE_FAILURE,
+        lastError,
+        now(),
+        answerPackageId,
+        ticketId
+      );
   }
 
   listPendingTicketBatchReplyAndCloseContinuations(

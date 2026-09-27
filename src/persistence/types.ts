@@ -191,6 +191,76 @@ export interface AddMessageInput {
   fileId?: string | null;
 }
 
+export type TicketInboundRoutingKind = "FRESH_TICKET" | "EXISTING_TICKET";
+export type TicketInboundRoutingStage =
+  | "WAITING_FOR_TOPIC"
+  | "CREATE_TOPIC"
+  | "SEND_SUMMARY"
+  | "SEND_INITIAL_POST"
+  | "SEND_UPDATE"
+  | "COPY_ORIGINAL"
+  | "DONE";
+export type TicketInboundRoutingState =
+  "READY" | "PENDING" | "DELIVERED" | "FAILED" | "UNKNOWN_DELIVERY" | "RETRY_REQUIRED" | "CANCELLED";
+
+export interface TicketInboundRoutingOperationRecord {
+  source_chat_id: number;
+  source_message_id: number;
+  ticket_id: number;
+  staff_chat_id: number;
+  kind: TicketInboundRoutingKind;
+  stage: TicketInboundRoutingStage;
+  state: TicketInboundRoutingState;
+  attempt: number;
+  user_telegram_id: number;
+  from_username: string | null;
+  from_first_name: string | null;
+  from_last_name: string | null;
+  sender_display_name: string;
+  sender_username: string | null;
+  text: string | null;
+  media_type: string | null;
+  filename: string | null;
+  file_id: string | null;
+  should_copy_original: number;
+  copied_message_id: number | null;
+  topic_thread_id: number | null;
+  summary_message_id: number | null;
+  delivery_message_id: number | null;
+  failure_category: DeliveryErrorCategory | null;
+  failure_description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BeginTicketInboundRoutingInput {
+  sourceChatId: number;
+  sourceMessageId: number;
+  staffChatId: number;
+  userTelegramId: number;
+  fromUsername?: string | null;
+  fromFirstName?: string | null;
+  fromLastName?: string | null;
+  senderDisplayName: string;
+  senderUsername?: string | null;
+  text?: string | null;
+  mediaType?: string | null;
+  filename?: string | null;
+  fileId?: string | null;
+  shouldCopyOriginal: boolean;
+}
+
+export interface BeginTicketInboundRoutingResult {
+  created: boolean;
+  ticket: TicketRecord;
+  operation: TicketInboundRoutingOperationRecord;
+}
+
+export interface TicketInboundRoutingClaim {
+  claimed: boolean;
+  operation: TicketInboundRoutingOperationRecord;
+}
+
 export type TicketOutboundDeliveryState = "PENDING" | "DELIVERED" | "FAILED" | "UNKNOWN_DELIVERY";
 
 export interface TicketOutboundDeliveryRecord {
@@ -239,7 +309,8 @@ export interface TicketArchiveDeliveryClaim {
   delivery: TicketArchiveDeliveryRecord;
 }
 
-export type DeliveryReconciliationKind = "INTERACTIVE" | "ARCHIVE_SUMMARY" | "ARCHIVE_DOCUMENT" | "BATCH_REPLY";
+export type DeliveryReconciliationKind =
+  "INTERACTIVE" | "ARCHIVE_SUMMARY" | "ARCHIVE_DOCUMENT" | "BATCH_REPLY" | "INBOUND_ROUTING";
 
 export type DeliveryReconciliationAction = "CONFIRMED_DELIVERED" | "CONFIRMED_FAILED";
 
@@ -254,7 +325,8 @@ export interface DeliveryReconciliationRecord {
   destinationChatId: number | null;
   relatedTelegramMessageId: number | null;
   knownTelegramMessageId: number | null;
-  state: "UNKNOWN_DELIVERY";
+  state: "UNKNOWN_DELIVERY" | "RETRY_REQUIRED" | "READY" | "FAILED";
+  inboundStage?: TicketInboundRoutingStage;
   diagnosticCategory: DeliveryErrorCategory | null;
   diagnosticDescription: string | null;
   createdAt: string;
@@ -280,6 +352,7 @@ export interface DeliveryReconciliationResult {
   batchContinuationRequired?: boolean;
   batchAnswerPackageId?: string;
   ticketSummaryRefreshRequired?: boolean;
+  inboundContinuation?: { sourceChatId: number; sourceMessageId: number; operationIdentity: string };
 }
 
 export interface DeliveryReconciliationAuditRecord {
@@ -290,7 +363,7 @@ export interface DeliveryReconciliationAuditRecord {
   ticket_id: number;
   staff_chat_id: number;
   reconciled_by: number;
-  action: DeliveryReconciliationAction;
+  action: DeliveryReconciliationAction | "RETRY_REQUESTED";
   previous_state: string;
   resulting_state: string;
   telegram_message_id: number | null;
@@ -310,6 +383,32 @@ export interface CloseTicketInput {
   displayName: string;
   username?: string | null;
 }
+
+export type TicketTransitionOutcome = "APPLIED" | "IDEMPOTENT" | "CONFLICT" | "NOT_FOUND";
+
+export interface TicketTransitionResult {
+  outcome: TicketTransitionOutcome;
+  ticket: TicketRecord | undefined;
+}
+
+export interface ApplyTicketBatchFollowUpInput {
+  followUpState: TicketFollowUpState;
+  internalNote: string | null;
+  escalationTarget: TicketEscalationTarget;
+  sourceAnswerPackageId: string;
+  nextStatus: TicketStatus;
+  expectedFollowUp?: Pick<
+    TicketRecord,
+    | "follow_up_state"
+    | "internal_note"
+    | "escalation_target"
+    | "follow_up_updated_at"
+    | "follow_up_source_answer_package_id"
+  >;
+}
+
+export const TICKET_BATCH_FOLLOW_UP_CONFLICT = "FOLLOW_UP_NOT_APPLIED_CONCURRENT_CHANGE";
+export const TICKET_BATCH_FOLLOW_UP_PERSISTENCE_FAILURE = "FOLLOW_UP_NOT_APPLIED_PERSISTENCE_FAILURE";
 
 export interface TicketBatchExportRecord {
   export_id: string;

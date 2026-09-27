@@ -203,7 +203,7 @@ describe("ticket batch runtime ownership", () => {
           calls.push(chatId);
           return [];
         },
-        listClosedTicketBatchReplyAndClosePendingEchoes: (chatId: number) => {
+        listClosedTicketBatchPendingReplyEchoes: (chatId: number) => {
           calls.push(chatId);
           return [];
         },
@@ -311,7 +311,7 @@ describe("ticket batch runtime ownership", () => {
         calls.push(chatId);
         return [];
       },
-      listClosedTicketBatchReplyAndClosePendingEchoes: (chatId: number) => {
+      listClosedTicketBatchPendingReplyEchoes: (chatId: number) => {
         calls.push(chatId);
         return [];
       },
@@ -424,7 +424,7 @@ describe("ticket batch runtime ownership", () => {
         calls.push(chatId);
         return [];
       },
-      listClosedTicketBatchReplyAndClosePendingEchoes: (chatId: number) => {
+      listClosedTicketBatchPendingReplyEchoes: (chatId: number) => {
         calls.push(chatId);
         return [];
       },
@@ -523,7 +523,7 @@ describe("ticket batch runtime ownership", () => {
         calls.push(chatId);
         return [];
       },
-      listClosedTicketBatchReplyAndClosePendingEchoes: (chatId: number) => {
+      listClosedTicketBatchPendingReplyEchoes: (chatId: number) => {
         calls.push(chatId);
         return [];
       },
@@ -609,7 +609,7 @@ describe("ticket batch runtime ownership", () => {
     };
     const database = {
       listInvalidTicketBatchSuccessEchoes: () => [],
-      listClosedTicketBatchReplyAndClosePendingEchoes: () => [],
+      listClosedTicketBatchPendingReplyEchoes: () => [],
       listPendingTicketBatchFailureEvents: () => [],
       listPendingTicketBatchTopicEchoes: () => [],
       listPendingTicketBatchReplyAndCloseContinuations: () => [],

@@ -389,6 +389,8 @@ export function createBot(
     onContinueReconciledBatch: (answerPackageId, staffChatId) =>
       ticketBatchRuntime.recoverPendingStaffOperationsForWorkspace(answerPackageId, staffChatId),
     onRefreshReconciledTicket: (ticketId, staffChatId) => ticketRouting.refreshTicket(ticketId, staffChatId),
+    onContinueReconciledInbound: (sourceChatId, sourceMessageId, staffChatId, operationIdentity) =>
+      ticketRouting.continueReconciledInbound(sourceChatId, sourceMessageId, staffChatId, operationIdentity),
     packageVersion: packageMetadata.version,
     botUsername: () => bot.botInfo?.username,
     botId: () => bot.botInfo?.id,
@@ -647,8 +649,13 @@ export function createBot(
 
       if (target.ticket.status === "OPEN") {
         try {
-          db.updateTicketStatus(target.ticket.id, "IN_PROGRESS");
-          await ticketRouting.refreshTicket(target.ticket.id);
+          const transition = db.transitionTicketStatusIfCurrent(
+            target.ticket.id,
+            requireStaffChatId(),
+            "OPEN",
+            "IN_PROGRESS"
+          );
+          if (transition.outcome === "APPLIED") await ticketRouting.refreshTicket(target.ticket.id);
         } catch (error) {
           logger.warn({ err: error, ticketId: target.ticket.id }, "Could not refresh ticket after Quick Reply");
         }
@@ -1207,6 +1214,18 @@ export function createBot(
             db.markTicketBatchExportDelivered(exportId, requireStaffChatId(), delivered.message_id);
           } catch (error) {
             logger.error({ err: error, exportId }, "Ticket batch export delivery could not be persisted");
+            try {
+              db.markTicketBatchExportUnknownDelivery(
+                exportId,
+                requireStaffChatId(),
+                "Export delivery outcome could not be confirmed."
+              );
+            } catch (persistenceError) {
+              logger.warn(
+                { err: persistenceError, exportId },
+                "Could not persist unknown ticket batch export delivery state"
+              );
+            }
             await ctx.reply("Export delivery could not be confirmed. Do not upload an answer package for it.");
             return undefined;
           }
@@ -1215,7 +1234,7 @@ export function createBot(
           logger.error({ err: error, exportId }, "Could not send ticket batch export");
           if (exportId) {
             try {
-              if (deliveryAttempted && error instanceof HttpError) {
+              if (deliveryAttempted && !(error instanceof GrammyError)) {
                 db.markTicketBatchExportUnknownDelivery(
                   exportId,
                   requireStaffChatId(),
@@ -1559,7 +1578,7 @@ export function createBot(
     }
 
     await ctx.reply(formatTicketDetails(ticket, db.listMessages(ticketId, 8)), {
-      reply_markup: ticket.status === "CLOSED" ? undefined : staffTicketKeyboard(ticket.id),
+      reply_markup: ticket.status === "CLOSED" ? undefined : staffTicketKeyboard(ticket.id, ticket.status),
     });
   });
 
@@ -2458,7 +2477,15 @@ export function createBot(
     }
     const claimed = db.claimTicketBatchAnswerPackage(packageRecord.answer_package_id, requireStaffChatId());
     if (!claimed) {
-      await ctx.answerCallbackQuery({ text: "Answer package not found." });
+      const current = db.getTicketBatchAnswerPackage(packageRecord.answer_package_id, requireStaffChatId());
+      await ctx.answerCallbackQuery({
+        text:
+          current?.status === "APPLYING"
+            ? "Answer package is already being applied."
+            : current?.status === "CANCELLED"
+              ? "This package was cancelled."
+              : "Answer package not found.",
+      });
       return;
     }
     if (claimed.status === "CANCELLED") {
@@ -2748,7 +2775,7 @@ async function handleStaffCallback(
     return;
   }
 
-  const [, action, rawTicketId, rawStatus] = data.split(":");
+  const [, action, rawTicketId, rawStatus, rawExpectedStatus] = data.split(":");
   const ticketId = Number(rawTicketId);
   if (!Number.isInteger(ticketId)) {
     await ctx.answerCallbackQuery({ text: "Invalid ticket." });
@@ -2775,25 +2802,51 @@ async function handleStaffCallback(
     return;
   }
 
-  if (action === "status" && isTicketStatus(rawStatus)) {
+  if (action === "status" && isTicketStatus(rawStatus) && isTicketStatus(rawExpectedStatus)) {
     if (!hasApplicationPermission(ctx, installation, "CLOSE_TICKETS")) {
       await ctx.answerCallbackQuery({ text: "Your application role cannot update tickets.", show_alert: true });
       return;
     }
-    if (ticket.status === "CLOSED") {
-      await ctx.answerCallbackQuery({ text: "Ticket is already closed." });
+    const transition = db.transitionTicketStatusIfCurrent(
+      ticket.id,
+      installation.requireStaffChatId(),
+      rawExpectedStatus,
+      rawStatus
+    );
+    if (transition.outcome === "NOT_FOUND") {
+      await ctx.answerCallbackQuery({ text: "Ticket not found in this staff chat.", show_alert: true });
       return;
     }
+    if (transition.outcome === "CONFLICT") {
+      await ctx.answerCallbackQuery({
+        text: "Ticket changed. Refresh it before applying another status.",
+        show_alert: true,
+      });
+      return;
+    }
+    if (transition.outcome === "APPLIED") {
+      await ticketRouting.refreshTicket(ticket.id, installation.requireStaffChatId());
+      await ticketRouting.sendStaffTopicNotice(
+        ctx.api,
+        installation.requireStaffChatId(),
+        transition.ticket ?? ticket,
+        `Ticket marked ${formatStatus(rawStatus)}.`
+      );
+    }
+    await ctx.answerCallbackQuery({
+      text:
+        transition.outcome === "IDEMPOTENT"
+          ? `Already ${formatStatus(rawStatus)}.`
+          : `Marked ${formatStatus(rawStatus)}.`,
+    });
+    return;
+  }
 
-    db.updateTicketStatus(ticket.id, rawStatus);
-    await ticketRouting.refreshTicket(ticket.id);
-    await ticketRouting.sendStaffTopicNotice(
-      ctx.api,
-      installation.requireStaffChatId(),
-      ticket,
-      `Ticket marked ${formatStatus(rawStatus)}.`
-    );
-    await ctx.answerCallbackQuery({ text: `Marked ${formatStatus(rawStatus)}.` });
+  if (action === "status" && isTicketStatus(rawStatus)) {
+    await ctx.answerCallbackQuery({
+      text: "Ticket action is stale. Refresh it before applying another status.",
+      show_alert: true,
+    });
     return;
   }
 
@@ -2824,13 +2877,13 @@ async function notifyStaff(
     logger.error({ err: error }, "Could not send log message to staff chat");
   }
 }
-function staffTicketKeyboard(ticketId: number): InlineKeyboard {
+function staffTicketKeyboard(ticketId: number, expectedStatus: TicketStatus = "OPEN"): InlineKeyboard {
   return new InlineKeyboard()
     .text("Close ticket", `ticket:close:${ticketId}`)
     .row()
-    .text("Mark waiting user", `ticket:status:${ticketId}:WAITING_USER`)
+    .text("Mark waiting user", `ticket:status:${ticketId}:WAITING_USER:${expectedStatus}`)
     .row()
-    .text("Mark in progress", `ticket:status:${ticketId}:IN_PROGRESS`)
+    .text("Mark in progress", `ticket:status:${ticketId}:IN_PROGRESS:${expectedStatus}`)
     .row()
     .text("Ban user", `ticket:ban:${ticketId}`)
     .row()

@@ -178,6 +178,11 @@ export async function archiveTicketIfPossible(
     return false;
   }
 
+  if (db.hasUnresolvedTicketInboundRoutingOperations(ticket.id)) {
+    logger.warn({ ticketId: ticket.id }, "Ticket archive is blocked by an unresolved inbound routing operation");
+    return false;
+  }
+
   let delivery = db.getTicketArchiveDelivery(ticket.id);
   if (delivery?.state === "UNKNOWN_DELIVERY") {
     reportUnknownArchiveDelivery(options, delivery);
