@@ -8,9 +8,10 @@ import {
   classifyEnglishOnlyMessage,
   extractAdaptiveModerationFeatures,
   parseModerationConfig,
+  type LanguageModerationStore,
   type ModerationCleanupScheduler,
 } from "./languageModeration.js";
-import { SupportDatabase, type LanguageModerationUserState, type LanguageModerationViolation } from "./db.js";
+import type { LanguageModerationUserState, LanguageModerationViolation, SupportDatabase } from "./db.js";
 import { logger } from "./logger.js";
 import { InstallationService, type Permission } from "./installation.js";
 import type { BackgroundTaskTracker } from "./lifecycle.js";
@@ -45,10 +46,38 @@ type ModerationReactionEmoji = "\u{1F440}" | "\u{1F621}";
 const MODERATION_STRIKE_REACTION: ModerationReactionEmoji = "\u{1F440}";
 const MODERATION_SANCTION_REACTION: ModerationReactionEmoji = "\u{1F621}";
 type BotApi = Context["api"];
+type PublicModerationStore = Pick<
+  SupportDatabase,
+  | "addLanguageModerationMessageAuthor"
+  | "addLanguageModerationViolation"
+  | "claimLanguageModerationFirstStrikes"
+  | "clearLanguageModerationCycleViolations"
+  | "completeLanguageModerationSanction"
+  | "getLanguageModerationAdaptiveEvidence"
+  | "getLanguageModerationMessageAuthor"
+  | "getLanguageModerationUserState"
+  | "getLanguageModerationViolation"
+  | "getLanguageModerationWarningState"
+  | "getManagedPublicChat"
+  | "getSetting"
+  | "importManagedPublicChat"
+  | "listLanguageModerationRecoveryJobs"
+  | "recordLanguageModerationObservation"
+  | "recordLanguageModerationOwnerFeedback"
+  | "recordManagedPublicChatPermissionHealth"
+  | "recordManagedPublicChatUnreachable"
+  | "setManagedPublicChatModerationEnabled"
+  | "setSetting"
+  | "updateManagedPublicChatConfig"
+  | "upsertLanguageModerationUserState"
+  | "upsertLanguageModerationWarningState"
+  | "upsertManagedPublicChat"
+> &
+  LanguageModerationStore;
 
 export interface PublicModerationTelegramDependencies {
   bot: Bot<Context>;
-  db: SupportDatabase;
+  db: PublicModerationStore;
   installation: InstallationService;
   now(): Date;
   cleanupScheduler: ModerationCleanupScheduler;
@@ -341,7 +370,7 @@ function moderationSettingKey(name: string): string {
   return `${MODERATION_SETTING_PREFIX}:${name}`;
 }
 
-function moderationConfig(db: SupportDatabase) {
+function moderationConfig(db: PublicModerationStore) {
   const legacy = parseModerationConfig({
     enabled: db.getSetting(moderationSettingKey("enabled")),
     target: db.getSetting(moderationSettingKey("target")),
@@ -366,7 +395,7 @@ function moderationConfig(db: SupportDatabase) {
     : legacy;
 }
 
-function moderationConfigForChat(db: SupportDatabase, chatId: number) {
+function moderationConfigForChat(db: PublicModerationStore, chatId: number) {
   const managed = db.getManagedPublicChat(chatId, true);
   if (managed) {
     return {
@@ -384,7 +413,7 @@ function moderationConfigForChat(db: SupportDatabase, chatId: number) {
 }
 
 async function formatModerationStatus(
-  db: SupportDatabase,
+  db: PublicModerationStore,
   moderation: ReturnType<typeof moderationConfig>,
   api: BotApi,
   botId: number | undefined,
@@ -419,7 +448,7 @@ async function validateModerationRights(
 }
 
 async function handlePublicLanguageModeration(
-  db: SupportDatabase,
+  db: PublicModerationStore,
   ctx: Context,
   installation: InstallationService,
   botId: number | undefined,
@@ -572,7 +601,7 @@ function isPendingCurrentCycleFirstStrike(
 }
 
 async function advanceModerationStrike(input: {
-  db: SupportDatabase;
+  db: PublicModerationStore;
   api: BotApi;
   chatId: number;
   chatTitle: string | null;
@@ -687,7 +716,7 @@ async function advanceModerationStrike(input: {
 
 async function containModerationSanctionFailure(
   input: {
-    db: SupportDatabase;
+    db: PublicModerationStore;
     api: BotApi;
     chatId: number;
     userId: number;
@@ -759,7 +788,7 @@ async function containModerationSanctionFailure(
 
 function disableModerationAfterConfirmedRightsLoss(
   input: {
-    db: SupportDatabase;
+    db: PublicModerationStore;
     chatId: number;
     userId: number;
     state: Pick<LanguageModerationUserState, "sanction_tier">;
@@ -856,7 +885,13 @@ export class PendingWarningScheduler {
     private readonly clearTimer: (timer: PendingWarningTimer) => void = clearTimeout
   ) {}
 
-  schedule(api: BotApi, db: SupportDatabase, chatId: number, messageThreadId: number | null, delayMs: number): void {
+  schedule(
+    api: BotApi,
+    db: PublicModerationStore,
+    chatId: number,
+    messageThreadId: number | null,
+    delayMs: number
+  ): void {
     const key = `${chatId}:${messageThreadId ?? 0}`;
     if (this.timers.has(key)) return;
     const timer = this.createTimer(() => {
@@ -883,7 +918,7 @@ export class PendingWarningScheduler {
 
 export async function processPendingWarning(
   api: BotApi,
-  db: SupportDatabase,
+  db: PublicModerationStore,
   chatId: number,
   messageThreadId: number | null = null
 ): Promise<void> {

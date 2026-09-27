@@ -235,7 +235,7 @@ describe("ticket batch runtime ownership", () => {
       return {
         db: database,
         installation: { requireStaffChatId: workspace } as unknown as InstallationService,
-      } as TicketBatchRuntimeDependencies;
+      } as unknown as TicketBatchRuntimeDependencies;
     };
     const first = new TicketBatchRuntime(recoveryDependencies(() => firstWorkspace, firstCalls));
     const second = new TicketBatchRuntime(recoveryDependencies(() => secondWorkspace, secondCalls));

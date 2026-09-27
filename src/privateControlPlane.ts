@@ -40,8 +40,29 @@ export type PublicChatConfigurationField = "warning" | "allowlist" | "cooldown" 
 
 type PrivateUiTarget = { chatId: number; messageId: number };
 
+type PrivateControlPlaneStore = Pick<
+  SupportDatabase,
+  | "countUnknownDeliveryReconciliations"
+  | "deactivateManagedPublicChat"
+  | "getInstallationOperationalCounts"
+  | "getManagedPublicChat"
+  | "getSetting"
+  | "getUnknownDeliveryReconciliation"
+  | "listManagedPublicChats"
+  | "listUnknownDeliveryReconciliations"
+  | "reconcileUnknownDelivery"
+  | "recordManagedPublicChatPermissionHealth"
+  | "recordManagedPublicChatUnreachable"
+  | "requestInboundRoutingRetry"
+  | "setManagedPublicChatModerationEnabled"
+  | "setSetting"
+  | "updateManagedPublicChatConfig"
+  | "updateManagedPublicChatManualStrikeConfig"
+  | "upsertManagedPublicChat"
+>;
+
 export interface PrivateControlPlaneOperatorDependencies {
-  db: SupportDatabase;
+  db: PrivateControlPlaneStore;
   quickReplies: QuickRepliesManager;
   canConfigure: (ctx: Context) => Promise<boolean>;
   canUsePermission: (ctx: Context, permission: Permission) => Promise<boolean>;

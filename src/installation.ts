@@ -45,6 +45,31 @@ interface InstallationOptions {
   tokenTtlMs?: number;
 }
 
+type InstallationStore = Pick<
+  SupportDatabase,
+  | "confirmOwnerTransfer"
+  | "consumeOwnerTokenAndCreateOwner"
+  | "getActiveWorkspace"
+  | "getInstallationState"
+  | "getManagedPublicChat"
+  | "getOnboardingSession"
+  | "getSetting"
+  | "getTeamMember"
+  | "importManagedPublicChat"
+  | "insertSecureToken"
+  | "invalidateTokenAndAssignMember"
+  | "invalidateUnconsumedTokens"
+  | "listTeamMembers"
+  | "listUnconsumedTokens"
+  | "listWorkspaces"
+  | "revokeTeamMember"
+  | "saveOnboardingSession"
+  | "setInstallationState"
+  | "setOnboardingPrimaryMessage"
+  | "upsertTeamMember"
+  | "upsertWorkspace"
+>;
+
 const ROLE_PERMISSIONS: Readonly<Record<TeamRole, ReadonlySet<Permission>>> = {
   OWNER: new Set([
     "CONFIGURE_INSTALLATION",
@@ -83,7 +108,7 @@ export class InstallationService {
   private activationNonce: string | null = null;
 
   constructor(
-    private readonly db: SupportDatabase,
+    private readonly db: InstallationStore,
     options: InstallationOptions = {}
   ) {
     this.now = options.now ?? (() => new Date());

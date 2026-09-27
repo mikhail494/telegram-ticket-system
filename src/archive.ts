@@ -3,7 +3,7 @@ import type { Context } from "grammy";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { SupportDatabase, type MessageSenderType, type TicketMessageRecord, type TicketWithUser } from "./db.js";
+import type { MessageSenderType, SupportDatabase, TicketMessageRecord, TicketWithUser } from "./db.js";
 import { formatDate, truncate } from "./format.js";
 import { displayTelegramUser } from "./telegram.js";
 import { logger } from "./logger.js";
@@ -15,6 +15,28 @@ const SUPPORT_LOGS_TOPIC_NAME = "📜 Support Logs";
 const SUPPORT_LOGS_THREAD_SETTING_PREFIX = "support_logs_message_thread_id";
 
 type BotApi = Context["api"];
+export type SupportLogsStore = Pick<SupportDatabase, "findTicketByStaffThread" | "getSetting" | "setSetting">;
+
+export type ArchiveStore = Pick<
+  SupportDatabase,
+  | "claimTicketArchiveDocument"
+  | "claimTicketArchiveSummary"
+  | "finalizeTicketArchiveDelivery"
+  | "findTicketByStaffThread"
+  | "getSetting"
+  | "getTicketArchiveDelivery"
+  | "getTicketWithUser"
+  | "hasUnresolvedTicketInboundRoutingOperations"
+  | "hasUnresolvedTicketOutboundDeliveries"
+  | "listClosedTicketsPendingArchive"
+  | "listMessagesChronological"
+  | "markTicketArchiveDocumentDelivered"
+  | "markTicketArchiveFailed"
+  | "markTicketArchiveSummarySent"
+  | "markTicketArchiveUnknown"
+  | "restageTicketArchiveForReplacementTopic"
+  | "setSetting"
+>;
 
 interface ArchiveAttemptOptions {
   onFailure?: (diagnostic: NormalizedDeliveryError) => void;
@@ -69,7 +91,7 @@ export interface SupportLogsTopicInfo {
 
 export async function initializeSupportLogsTopic(
   api: BotApi,
-  db: SupportDatabase,
+  db: SupportLogsStore,
   staffChatId: number
 ): Promise<number> {
   const topic = await getSupportLogsTopicInfo(api, db, staffChatId);
@@ -78,7 +100,7 @@ export async function initializeSupportLogsTopic(
 
 export async function getSupportLogsTopicInfo(
   api: BotApi,
-  db: SupportDatabase,
+  db: SupportLogsStore,
   staffChatId: number
 ): Promise<SupportLogsTopicInfo> {
   const settingKey = supportLogsThreadSettingKey(staffChatId);
@@ -120,11 +142,11 @@ export async function getSupportLogsTopicInfo(
   };
 }
 
-export function setSupportLogsTopicOverride(db: SupportDatabase, staffChatId: number, messageThreadId: number): void {
+export function setSupportLogsTopicOverride(db: SupportLogsStore, staffChatId: number, messageThreadId: number): void {
   db.setSetting(supportLogsThreadSettingKey(staffChatId), String(messageThreadId));
 }
 
-async function recreateSupportLogsTopic(api: BotApi, db: SupportDatabase, staffChatId: number): Promise<number> {
+async function recreateSupportLogsTopic(api: BotApi, db: SupportLogsStore, staffChatId: number): Promise<number> {
   const topic = await api.createForumTopic(staffChatId, SUPPORT_LOGS_TOPIC_NAME);
   db.setSetting(supportLogsThreadSettingKey(staffChatId), String(topic.message_thread_id));
   return topic.message_thread_id;
@@ -132,7 +154,7 @@ async function recreateSupportLogsTopic(api: BotApi, db: SupportDatabase, staffC
 
 export async function archiveClosedTicketsPendingUpload(
   api: BotApi,
-  db: SupportDatabase,
+  db: ArchiveStore,
   staffChatId: number,
   options: ArchiveRecoveryOptions = {}
 ): Promise<ArchiveRecoveryResult> {
@@ -159,7 +181,7 @@ export async function archiveClosedTicketsPendingUpload(
 
 export async function archiveTicketIfPossible(
   api: BotApi,
-  db: SupportDatabase,
+  db: ArchiveStore,
   staffChatId: number,
   ticketId: number,
   options: ArchiveAttemptOptions = {}
@@ -341,7 +363,7 @@ export async function archiveTicketIfPossible(
 
 async function replaceSupportLogsTopicAfterDocumentFailure(
   api: BotApi,
-  db: SupportDatabase,
+  db: ArchiveStore,
   staffChatId: number,
   ticket: TicketWithUser,
   ticketId: number,
@@ -373,7 +395,7 @@ async function replaceSupportLogsTopicAfterDocumentFailure(
 
 async function recordArchiveFailure(
   api: BotApi,
-  db: SupportDatabase,
+  db: ArchiveStore,
   ticket: TicketWithUser,
   error: unknown,
   options: ArchiveAttemptOptions
@@ -423,7 +445,7 @@ function isAmbiguousTelegramOutcome(error: unknown): boolean {
 
 export async function logBanEvent(
   api: BotApi,
-  db: SupportDatabase,
+  db: SupportLogsStore,
   staffChatId: number,
   input: BanLogInput
 ): Promise<void> {
@@ -442,7 +464,7 @@ export async function logBanEvent(
 
 export async function logModerationSanction(
   api: BotApi,
-  db: SupportDatabase,
+  db: SupportLogsStore,
   staffChatId: number,
   input: ModerationLogInput
 ): Promise<void> {

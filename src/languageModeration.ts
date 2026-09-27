@@ -4,6 +4,8 @@ import type { BackgroundTaskTracker } from "./lifecycle.js";
 import { runBoundedRecoveryPass, type StartupRecoveryBudget } from "./startup.js";
 import { francAll } from "franc-min";
 import { createHash } from "node:crypto";
+import type { SupportDatabase } from "./db.js";
+import type { SupportLogsStore } from "./archive.js";
 import {
   ADAPTIVE_LEARNING_HORIZON_MS,
   MAX_ADAPTIVE_FINGERPRINT_TOKENS,
@@ -200,10 +202,23 @@ export interface AdaptiveModerationEvidence {
 
 export type ModerationCleanupScheduler = (
   api: import("grammy").Context["api"],
-  db: import("./db.js").SupportDatabase,
+  db: LanguageModerationStore,
   jobId: number,
   delayMs?: number
 ) => void;
+
+export type LanguageModerationStore = Pick<
+  SupportDatabase,
+  | "clearLanguageModerationCleanupCycleViolations"
+  | "getLanguageModerationCleanupJob"
+  | "getManagedPublicChat"
+  | "listLanguageModerationCleanupCycleViolations"
+  | "listLanguageModerationRecoveryJobs"
+  | "listPendingLanguageModerationCleanupCycleViolations"
+  | "recordLanguageModerationViolationCleanupResult"
+  | "updateLanguageModerationCleanupJob"
+> &
+  SupportLogsStore;
 
 export type ModerationTimerFactory = (callback: () => void, delayMs: number) => { unref?: () => void };
 
@@ -427,7 +442,7 @@ export function createModerationCleanupScheduler(
 
 export async function processModerationRecovery(
   api: import("grammy").Context["api"],
-  db: import("./db.js").SupportDatabase,
+  db: LanguageModerationStore,
   staffChatId: number,
   currentTime = new Date(),
   options: { budget?: StartupRecoveryBudget } = {}
@@ -458,7 +473,7 @@ export async function processModerationRecovery(
 
 export async function processModerationCleanupJob(
   api: import("grammy").Context["api"],
-  db: import("./db.js").SupportDatabase,
+  db: LanguageModerationStore,
   staffChatId: number,
   jobId: number,
   currentTime = new Date()
