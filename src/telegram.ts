@@ -1,5 +1,7 @@
 import type { Message, User } from "grammy/types";
 
+export const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
+
 export interface MessageContent {
   text: string | null;
   mediaType: string | null;
