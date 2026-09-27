@@ -33,6 +33,7 @@ export type PendingSupportSettingsInput = "RESPONSE_TIME" | "ACKNOWLEDGEMENT";
 type PendingDeliveryReconciliationInput = {
   action: "CONFIRMED_DELIVERED" | "CONFIRMED_FAILED";
   caseToken: string;
+  staffChatId: number;
 };
 
 export type PublicChatConfigurationField = "warning" | "allowlist" | "cooldown" | "threshold" | "lookback";
@@ -52,6 +53,12 @@ export interface PrivateControlPlaneOperatorDependencies {
   onContinueReconciledArchive: (ticketId: number, staffChatId: number) => Promise<boolean>;
   onContinueReconciledBatch: (answerPackageId: string, staffChatId: number) => Promise<void>;
   onRefreshReconciledTicket: (ticketId: number, staffChatId: number) => Promise<void>;
+  onContinueReconciledInbound: (
+    sourceChatId: number,
+    sourceMessageId: number,
+    staffChatId: number,
+    operationIdentity: string
+  ) => Promise<void>;
   packageVersion: string;
   botUsername: () => string | undefined;
   botId: () => number | undefined;
@@ -443,16 +450,17 @@ export class PrivateControlPlane {
       await this.showDeliveryReconciliations(ctx, notice ?? "This delivery is no longer unresolved.");
       return;
     }
-    await this.renderScreen(
-      ctx,
-      this.deliveryReconciliationText(record, notice),
-      new InlineKeyboard()
+    const keyboard = new InlineKeyboard();
+    if (record.state === "UNKNOWN_DELIVERY")
+      keyboard
         .text("Mark delivered", `delivery:delivered:${caseToken}`)
         .row()
         .text("Mark not delivered", `delivery:failed:${caseToken}`)
-        .row()
-        .text("Back", "delivery:list")
-    );
+        .row();
+    else if (record.state === "RETRY_REQUIRED") keyboard.text("Start NEW attempt", `delivery:retry:${caseToken}`).row();
+    else keyboard.text("Continue safe routing", `delivery:continue:${caseToken}`).row();
+    keyboard.text("Back", "delivery:list");
+    await this.renderScreen(ctx, this.deliveryReconciliationText(record, notice), keyboard);
   }
 
   async showModerationDashboard(ctx: Context): Promise<void> {
@@ -1105,7 +1113,13 @@ export class PrivateControlPlane {
     caseToken: string | undefined
   ): Promise<boolean> {
     const dependencies = this.operatorDependenciesOrThrow();
+    const boundStaffChatId = this.installation.getStaffChatId();
     if (!(await dependencies.canConfigure(ctx)) || !ctx.from) return true;
+    if (
+      !(await dependencies.hasPrivateWorkspaceMembership(ctx)) ||
+      this.installation.getStaffChatId() !== boundStaffChatId
+    )
+      return true;
     if (action === "list") {
       this.pendingDeliveryReconciliationInputs.delete(ctx.from.id);
       await ctx.answerCallbackQuery();
@@ -1118,11 +1132,40 @@ export class PrivateControlPlane {
       await this.showDeliveryReconciliationDetail(ctx, caseToken);
       return true;
     }
+    if ((action === "retry" || action === "continue") && caseToken) {
+      const staffChatId = this.installation.getStaffChatId();
+      const record =
+        staffChatId === null ? undefined : dependencies.db.getUnknownDeliveryReconciliation(staffChatId, caseToken);
+      if (!record || record.kind !== "INBOUND_ROUTING") {
+        await ctx.answerCallbackQuery({ text: "Routing state changed. Refresh Delivery Review.", show_alert: true });
+        return true;
+      }
+      const result =
+        action === "retry"
+          ? dependencies.db.requestInboundRoutingRetry(record.staffChatId, caseToken, ctx.from.id)
+          : record.state === "READY" || record.state === "FAILED"
+            ? {
+                outcome: "APPLIED",
+                staffChatId: record.staffChatId,
+                inboundContinuation: {
+                  sourceChatId: record.sourceChatId!,
+                  sourceMessageId: record.sourceMessageId!,
+                  operationIdentity: record.operationIdentity,
+                },
+              }
+            : undefined;
+      await ctx.answerCallbackQuery();
+      if (result?.outcome === "APPLIED" && result.inboundContinuation && result.staffChatId !== undefined) {
+        await this.continueInboundReconciliation(result.inboundContinuation, result.staffChatId);
+      }
+      await this.showDeliveryReconciliations(ctx, "Routing state reviewed. Ambiguous attempts are never replayed.");
+      return true;
+    }
     if ((action === "delivered" || action === "failed") && caseToken) {
       const staffChatId = this.installation.getStaffChatId();
       const record =
         staffChatId === null ? undefined : dependencies.db.getUnknownDeliveryReconciliation(staffChatId, caseToken);
-      if (!record) {
+      if (!record || record.state !== "UNKNOWN_DELIVERY") {
         await ctx.answerCallbackQuery({ text: "This delivery is no longer unresolved.", show_alert: true });
         await this.showDeliveryReconciliations(ctx);
         return true;
@@ -1130,12 +1173,15 @@ export class PrivateControlPlane {
       this.pendingDeliveryReconciliationInputs.set(ctx.from.id, {
         action: action === "delivered" ? "CONFIRMED_DELIVERED" : "CONFIRMED_FAILED",
         caseToken,
+        staffChatId: record.staffChatId,
       });
       await ctx.answerCallbackQuery();
       await this.renderScreen(
         ctx,
         action === "delivered"
-          ? "Confirm delivered\n\nVerify the message in Telegram, then send its numeric Telegram message ID. This records proof; it does not resend anything."
+          ? record.inboundStage === "CREATE_TOPIC"
+            ? "Confirm topic created\n\nVerify the topic in the bound staff workspace, then send its numeric message_thread_id. The existing topic will be used; it will not be recreated."
+            : "Confirm delivered\n\nVerify the message in Telegram, then send its numeric Telegram message ID. This records proof; it does not resend anything."
           : "Confirm not delivered\n\nVerify that Telegram did not deliver this operation, then send a concise operator note. This does not retry the operation.",
         new InlineKeyboard().text("Cancel", `delivery:view:${caseToken}`)
       );
@@ -1151,10 +1197,11 @@ export class PrivateControlPlane {
     if (!pending) return false;
     const dependencies = this.operatorDependenciesOrThrow();
     if (!(await dependencies.canConfigure(ctx))) return true;
+    if (!(await dependencies.hasPrivateWorkspaceMembership(ctx))) return true;
     const staffChatId = this.installation.getStaffChatId();
-    if (staffChatId === null) {
+    if (staffChatId === null || staffChatId !== pending.staffChatId) {
       this.pendingDeliveryReconciliationInputs.delete(ctx.from.id);
-      await ctx.reply("The staff workspace is not configured.");
+      await ctx.reply("The staff workspace changed. Refresh Delivery Review.");
       return true;
     }
     const trimmed = text.trim();
@@ -1199,6 +1246,8 @@ export class PrivateControlPlane {
     );
     this.pendingDeliveryReconciliationInputs.delete(ctx.from.id);
     const continuationApplied = result.outcome === "APPLIED" || result.outcome === "IDEMPOTENT";
+    if (continuationApplied && result.inboundContinuation && result.staffChatId !== undefined)
+      await this.continueInboundReconciliation(result.inboundContinuation, result.staffChatId);
     if (
       continuationApplied &&
       result.ticketSummaryRefreshRequired &&
@@ -1260,6 +1309,25 @@ export class PrivateControlPlane {
     await this.retireScreens(ctx);
     await this.showDeliveryReconciliations(ctx, notice);
     return true;
+  }
+
+  private async continueInboundReconciliation(
+    continuation: { sourceChatId: number; sourceMessageId: number; operationIdentity: string },
+    staffChatId: number
+  ): Promise<void> {
+    try {
+      await this.operatorDependenciesOrThrow().onContinueReconciledInbound(
+        continuation.sourceChatId,
+        continuation.sourceMessageId,
+        staffChatId,
+        continuation.operationIdentity
+      );
+    } catch {
+      logger.warn(
+        { staffChatId, operationIdentity: continuation.operationIdentity },
+        "Inbound routing continuation remains pending in Delivery Review"
+      );
+    }
   }
 
   private async handleSupportSettingsCallback(ctx: Context, action: string | undefined): Promise<boolean> {
@@ -1595,6 +1663,12 @@ export class PrivateControlPlane {
       `Ticket: #${record.ticketId}`,
       `Operation: ${record.operationIdentity}`,
       `State: ${record.state}`,
+      ...(record.inboundStage
+        ? [
+            `Stage: ${record.inboundStage}`,
+            `Required Telegram identifier: ${record.inboundStage === "CREATE_TOPIC" ? "message_thread_id" : "message_id"}`,
+          ]
+        : []),
       `Source chat/message: ${record.sourceChatId ?? "not recorded"}/${record.sourceMessageId ?? "not recorded"}`,
       `Destination chat: ${record.destinationChatId ?? "not recorded"}`,
       `Related Telegram message: ${record.relatedTelegramMessageId ?? "none"}`,
@@ -1603,6 +1677,9 @@ export class PrivateControlPlane {
       `Updated: ${record.updatedAt}`,
       "",
       "Verify the outcome directly in Telegram. Reconciliation never resends the operation.",
+      ...(record.state === "RETRY_REQUIRED"
+        ? ["Non-delivery is confirmed. Starting a NEW attempt is a separate, audited operator action."]
+        : []),
     ].join("\n");
   }
 
@@ -1610,6 +1687,7 @@ export class PrivateControlPlane {
     if (kind === "INTERACTIVE") return "Interactive reply";
     if (kind === "ARCHIVE_SUMMARY") return "Archive summary";
     if (kind === "ARCHIVE_DOCUMENT") return "Archive transcript";
+    if (kind === "INBOUND_ROUTING") return "Inbound ticket routing";
     return "Batch reply";
   }
 

@@ -2,9 +2,10 @@ import { GrammyError, HttpError } from "grammy";
 import type { Context, InlineKeyboard } from "grammy";
 import type { Message, User } from "grammy/types";
 import { archiveTicketIfPossible, logBanEvent, type ArchiveActor } from "./archive.js";
-import { type SupportDatabase, type TicketRecord, type TicketWithUser } from "./db.js";
+import { type SupportDatabase, type TicketRecord, type TicketStatus, type TicketWithUser } from "./db.js";
 import { normalizeTelegramDeliveryError, type NormalizedDeliveryError } from "./deliveryDiagnostics.js";
 import { isForumTopicUnavailable } from "./forumTopicErrors.js";
+import { inboundRoutingAttemptIdentity } from "./persistence/ticketsRepository.js";
 import {
   CLOSED_TEXT,
   DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME,
@@ -45,7 +46,7 @@ interface TicketRoutingServiceDependencies {
   db: SupportDatabase;
   api: BotApi;
   installation: InstallationService;
-  staffTicketKeyboard(ticketId: number): InlineKeyboard;
+  staffTicketKeyboard(ticketId: number, status: TicketStatus): InlineKeyboard;
   userTicketKeyboard(ticketId: number): InlineKeyboard;
   bannedText: string;
   supportExpectedResponseTimeSettingKey: string;
@@ -54,6 +55,29 @@ interface TicketRoutingServiceDependencies {
 
 export class TicketRoutingService {
   constructor(private readonly dependencies: TicketRoutingServiceDependencies) {}
+
+  async continueReconciledInbound(
+    sourceChatId: number,
+    sourceMessageId: number,
+    staffChatId: number,
+    operationIdentity: string
+  ): Promise<void> {
+    if (this.dependencies.installation.getStaffChatId() !== staffChatId) return;
+    const operation = this.dependencies.db.getTicketInboundRoutingOperation(sourceChatId, sourceMessageId);
+    if (
+      !operation ||
+      operation.staff_chat_id !== staffChatId ||
+      inboundRoutingAttemptIdentity(operation) !== operationIdentity
+    )
+      return;
+    await this.resumeInboundRoutingOperation(this.dependencies.api, sourceChatId, sourceMessageId);
+    await this.resumeReadyInboundTicketOperations(this.dependencies.api, operation.ticket_id, staffChatId);
+    if (this.dependencies.installation.getStaffChatId() !== staffChatId) return;
+    const ticket = this.dependencies.db.getTicketWithUser(operation.ticket_id);
+    if (ticket?.staff_chat_id !== staffChatId) return;
+    if (ticket.status === "CLOSED") await this.continueClosedTicketArchive(this.dependencies.api, ticket, staffChatId);
+    else await this.refreshTicket(ticket.id, staffChatId);
+  }
 
   async deliverAndRecordStaffTextReply(
     ticket: TicketWithUser,
@@ -93,13 +117,70 @@ export class TicketRoutingService {
     }
 
     this.persistUserFromContext(ctx);
-    const activeTicket = this.dependencies.db.findActiveTicketForUser(ctx.from.id, this.requireStaffChatId());
-    if (activeTicket) {
-      await this.appendToExistingTicket(ctx, activeTicket);
+    const staffChatId = this.requireStaffChatId();
+    const activeTicket = this.dependencies.db.findActiveTicketForUser(ctx.from.id, staffChatId);
+    const acknowledgement = activeTicket ? undefined : this.supportAcknowledgement();
+    if (!activeTicket && !acknowledgement) {
+      logger.error({ userId: ctx.from.id }, "Support acknowledgement settings exceed Telegram's message limit");
+      await ctx.reply("Sorry, support acknowledgement settings need attention. Please try again later.");
+      return;
+    }
+    const content = getMessageContent(ctx.message);
+    const started = this.dependencies.db.beginTicketInboundRouting({
+      sourceChatId: ctx.chat.id,
+      sourceMessageId: ctx.message.message_id,
+      staffChatId,
+      userTelegramId: ctx.from.id,
+      fromUsername: usernameOf(ctx.from),
+      fromFirstName: ctx.from.first_name,
+      fromLastName: ctx.from.last_name ?? null,
+      senderDisplayName: displayTelegramUser(ctx.from),
+      senderUsername: usernameOf(ctx.from),
+      text: content.text,
+      mediaType: content.mediaType,
+      filename: content.filename,
+      fileId: content.fileId,
+      shouldCopyOriginal: content.shouldCopyOriginal,
+    });
+    if (started.operation.staff_chat_id !== staffChatId) {
+      logger.warn(
+        { ticketId: started.operation.ticket_id, sourceChatId: ctx.chat.id, sourceMessageId: ctx.message.message_id },
+        "Skipped inbound ticket routing after workspace changed"
+      );
       return;
     }
 
-    await this.createFreshTicketFromUserMessage(ctx);
+    const outcome = await this.resumeInboundRoutingOperation(ctx.api, ctx.chat.id, ctx.message.message_id);
+    if (outcome !== "COMPLETED")
+      await this.resumeReadyInboundTicketOperations(ctx.api, started.ticket.id, staffChatId, {
+        chatId: ctx.chat.id,
+        messageId: ctx.message.message_id,
+      });
+    if (outcome === "FAILED") {
+      const failedOperation = this.dependencies.db.getTicketInboundRoutingOperation(
+        ctx.chat.id,
+        ctx.message.message_id
+      );
+      if (failedOperation?.kind === "FRESH_TICKET" && failedOperation.stage === "CREATE_TOPIC") {
+        this.dependencies.db.closeTicketRecordIfOpen(failedOperation.ticket_id, staffChatId, systemActor());
+        await ctx.reply("Sorry, we could not create a support topic. Please try again later.");
+      } else {
+        await ctx.reply("Sorry, we could not route your request to support. Please try again later.");
+      }
+      return;
+    }
+    if (outcome !== "COMPLETED") return;
+
+    if (started.created && started.operation.kind === "FRESH_TICKET") {
+      const freshAcknowledgement = acknowledgement ?? this.supportAcknowledgement();
+      if (!freshAcknowledgement) {
+        logger.error({ userId: ctx.from.id }, "Support acknowledgement settings exceed Telegram's message limit");
+        await ctx.reply("Sorry, support acknowledgement settings need attention. Please try again later.");
+        return;
+      }
+      await ctx.reply(freshAcknowledgement, { reply_markup: this.dependencies.userTicketKeyboard(started.ticket.id) });
+    }
+    await this.resumeReadyInboundTicketOperations(ctx.api, started.ticket.id, staffChatId);
   }
 
   async handleStaffGroupMessage(ctx: Context, canReply: () => boolean): Promise<void> {
@@ -163,8 +244,13 @@ export class TicketRoutingService {
       }
 
       if (ticket.status === "OPEN") {
-        this.dependencies.db.updateTicketStatus(ticket.id, "IN_PROGRESS");
-        await this.refreshTicket(ticket.id);
+        const transition = this.dependencies.db.transitionTicketStatusIfCurrent(
+          ticket.id,
+          ticket.staff_chat_id ?? this.requireStaffChatId(),
+          "OPEN",
+          "IN_PROGRESS"
+        );
+        if (transition.outcome === "APPLIED") await this.refreshTicket(ticket.id, ticket.staff_chat_id ?? undefined);
       }
     } catch (error) {
       logger.error({ err: error, ticketId: ticket.id }, "Could not deliver staff reply to user");
@@ -186,7 +272,16 @@ export class TicketRoutingService {
       return `Ticket #${ticketId} was not found in this staff chat.`;
     }
 
-    if (ticket.status === "CLOSED") {
+    const closed = this.dependencies.db.closeTicketRecordIfOpen(
+      ticketId,
+      staffChatId,
+      options.closedBy ?? systemActor()
+    );
+    if (closed.outcome === "NOT_FOUND" || !closed.ticket) {
+      return `Ticket #${ticketId} was not found in this staff chat.`;
+    }
+
+    if (closed.outcome === "IDEMPOTENT") {
       const archived = await archiveTicketIfPossible(
         this.dependencies.api,
         this.dependencies.db,
@@ -201,20 +296,24 @@ export class TicketRoutingService {
         : `Ticket #${ticketId} is already closed. Transcript archive is pending retry.`;
     }
 
-    const closedTicket = this.dependencies.db.closeTicketRecord(ticketId, options.closedBy ?? systemActor());
+    if (closed.outcome === "CONFLICT") {
+      return `Ticket #${ticketId} changed before it could be closed. Refresh the ticket and try again.`;
+    }
+
+    const closedTicket = closed.ticket;
     await this.refreshTicket(ticketId, staffChatId);
 
     if (options.staffNotice) {
-      await this.sendStaffTopicNotice(this.dependencies.api, staffChatId, ticket, options.staffNotice);
+      await this.sendStaffTopicNotice(this.dependencies.api, staffChatId, closedTicket, options.staffNotice);
     }
 
     if (options.notifyUser) {
       await this.notifyUserOrStaff(
         this.dependencies.api,
         staffChatId,
-        ticket.user_telegram_id,
+        closedTicket.user_telegram_id,
         options.userText ?? CLOSED_TEXT,
-        ticket.message_thread_id
+        closedTicket.message_thread_id
       );
     }
 
@@ -249,7 +348,8 @@ export class TicketRoutingService {
         ticket.staff_message_id,
         formatPinnedTicketSummary(ticket),
         {
-          reply_markup: ticket.status === "CLOSED" ? undefined : this.dependencies.staffTicketKeyboard(ticket.id),
+          reply_markup:
+            ticket.status === "CLOSED" ? undefined : this.dependencies.staffTicketKeyboard(ticket.id, ticket.status),
         }
       );
     } catch (error) {
@@ -347,191 +447,284 @@ export class TicketRoutingService {
     return this.dependencies.installation.requireStaffChatId();
   }
 
-  private async createFreshTicketFromUserMessage(ctx: Context): Promise<void> {
-    if (!ctx.from || !ctx.chat || !ctx.message) return;
-
+  private supportAcknowledgement(): string | undefined {
     const acknowledgement = validateRenderedSupportAcknowledgement(
       this.dependencies.db.getSetting(this.dependencies.supportTicketReceivedTemplateSettingKey)?.trim() ||
         DEFAULT_SUPPORT_TICKET_RECEIVED_TEMPLATE,
       this.dependencies.db.getSetting(this.dependencies.supportExpectedResponseTimeSettingKey)?.trim() ||
         DEFAULT_SUPPORT_EXPECTED_RESPONSE_TIME
     );
-    if (acknowledgement.error) {
-      logger.error({ userId: ctx.from.id }, "Support acknowledgement settings exceed Telegram's message limit");
-      await ctx.reply("Sorry, support acknowledgement settings need attention. Please try again later.");
-      return;
+    return acknowledgement.error ? undefined : acknowledgement.rendered;
+  }
+
+  private async resumeInboundRoutingOperation(
+    api: BotApi,
+    sourceChatId: number,
+    sourceMessageId: number
+  ): Promise<"COMPLETED" | "BLOCKED" | "FAILED"> {
+    const outcome = await this.advanceInboundRoutingOperation(api, sourceChatId, sourceMessageId);
+    const operation = this.dependencies.db.getTicketInboundRoutingOperation(sourceChatId, sourceMessageId);
+    if (operation?.state === "DELIVERED" || operation?.state === "CANCELLED") {
+      const ticket = this.dependencies.db.getTicketWithUser(operation.ticket_id);
+      if (ticket?.status === "CLOSED") await this.continueClosedTicketArchive(api, ticket, operation.staff_chat_id);
+    }
+    return outcome;
+  }
+
+  private async advanceInboundRoutingOperation(
+    api: BotApi,
+    sourceChatId: number,
+    sourceMessageId: number
+  ): Promise<"COMPLETED" | "BLOCKED" | "FAILED"> {
+    let topicReplacementAttempts = 0;
+    for (let step = 0; step < 8; step += 1) {
+      const operation = this.dependencies.db.getTicketInboundRoutingOperation(sourceChatId, sourceMessageId);
+      if (!operation || operation.staff_chat_id !== this.dependencies.installation.getStaffChatId()) return "BLOCKED";
+      if (operation.state === "DELIVERED") return "COMPLETED";
+      if (
+        operation.state === "PENDING" ||
+        operation.state === "UNKNOWN_DELIVERY" ||
+        operation.state === "RETRY_REQUIRED" ||
+        operation.state === "CANCELLED" ||
+        operation.stage === "WAITING_FOR_TOPIC"
+      ) {
+        return "BLOCKED";
+      }
+
+      const claim = this.dependencies.db.claimTicketInboundRoutingOperation(
+        sourceChatId,
+        sourceMessageId,
+        operation.staff_chat_id,
+        operation.stage
+      );
+      if (!claim?.claimed) {
+        if (
+          claim?.operation.state === "READY" &&
+          (claim.operation.stage !== operation.stage || claim.operation.attempt !== operation.attempt)
+        )
+          continue;
+        return claim?.operation.state === "DELIVERED" ? "COMPLETED" : "BLOCKED";
+      }
+
+      const ticket = this.dependencies.db.getTicketWithUser(claim.operation.ticket_id);
+      // The synchronous transactional claim checked current ticket/workspace eligibility.
+      if (!ticket) throw new Error("Claimed inbound routing ticket disappeared.");
+
+      try {
+        if (claim.operation.stage === "CREATE_TOPIC") {
+          const topic = await api.createForumTopic(
+            claim.operation.staff_chat_id,
+            topicName(ticket.id, {
+              id: claim.operation.user_telegram_id,
+              username: claim.operation.from_username ?? undefined,
+            })
+          );
+          if (
+            !this.dependencies.db.markTicketInboundRoutingTopicCreated(
+              sourceChatId,
+              sourceMessageId,
+              claim.operation.staff_chat_id,
+              topic.message_thread_id
+            )
+          )
+            throw new Error("Inbound ticket topic creation could not be finalized.");
+          continue;
+        }
+
+        if (claim.operation.stage === "SEND_SUMMARY") {
+          if (ticket.message_thread_id === null) return "BLOCKED";
+          const summary = await api.sendMessage(claim.operation.staff_chat_id, formatPinnedTicketSummary(ticket), {
+            message_thread_id: ticket.message_thread_id,
+            reply_markup: this.dependencies.staffTicketKeyboard(ticket.id, ticket.status),
+          });
+          if (
+            !this.dependencies.db.markTicketInboundRoutingSummaryDelivered(
+              sourceChatId,
+              sourceMessageId,
+              claim.operation.staff_chat_id,
+              summary.message_id
+            )
+          )
+            throw new Error("Inbound ticket summary could not be finalized.");
+          if (this.dependencies.installation.getStaffChatId() === claim.operation.staff_chat_id)
+            await this.pinMessageSafely(api, summary.chat.id, summary.message_id, ticket.id);
+          continue;
+        }
+
+        if (claim.operation.stage === "SEND_INITIAL_POST") {
+          if (ticket.message_thread_id === null) return "BLOCKED";
+          const post = await api.sendMessage(
+            claim.operation.staff_chat_id,
+            formatTicketPost(ticket, claim.operation.text),
+            { message_thread_id: ticket.message_thread_id }
+          );
+          if (
+            !this.dependencies.db.markTicketInboundRoutingInitialPostDelivered(
+              sourceChatId,
+              sourceMessageId,
+              claim.operation.staff_chat_id,
+              post.message_id
+            )
+          )
+            throw new Error("Inbound ticket initial post could not be finalized.");
+          continue;
+        }
+
+        if (claim.operation.stage === "SEND_UPDATE") {
+          if (ticket.message_thread_id === null) return "BLOCKED";
+          const update = await api.sendMessage(
+            claim.operation.staff_chat_id,
+            formatTicketUpdate(
+              {
+                username: claim.operation.from_username,
+                first_name: claim.operation.from_first_name,
+                last_name: claim.operation.from_last_name,
+              },
+              claim.operation.text,
+              claim.operation.media_type,
+              claim.operation.filename
+            ),
+            { message_thread_id: ticket.message_thread_id }
+          );
+          if (
+            !this.dependencies.db.markTicketInboundRoutingUpdateDelivered(
+              sourceChatId,
+              sourceMessageId,
+              claim.operation.staff_chat_id,
+              update.message_id
+            )
+          )
+            throw new Error("Inbound ticket update could not be finalized.");
+          const completedTicket = this.dependencies.db.getTicketWithUser(ticket.id);
+          if (
+            completedTicket &&
+            completedTicket.status !== "CLOSED" &&
+            this.dependencies.installation.getStaffChatId() === claim.operation.staff_chat_id
+          ) {
+            await this.refreshTicket(ticket.id, claim.operation.staff_chat_id);
+          }
+          continue;
+        }
+
+        if (claim.operation.stage === "COPY_ORIGINAL") {
+          const copied = await api.copyMessage(claim.operation.staff_chat_id, sourceChatId, sourceMessageId, {
+            message_thread_id: claim.operation.topic_thread_id!,
+          });
+          if (
+            !this.dependencies.db.markTicketInboundRoutingCopyDelivered(
+              sourceChatId,
+              sourceMessageId,
+              claim.operation.staff_chat_id,
+              copied.message_id
+            )
+          )
+            throw new Error("Inbound original copy could not be finalized.");
+          continue;
+        }
+
+        return "BLOCKED";
+      } catch (error) {
+        const restarted =
+          error instanceof GrammyError &&
+          isForumTopicUnavailable(error) &&
+          topicReplacementAttempts < 1 &&
+          this.dependencies.db.restartTicketInboundRoutingAfterUnavailableTopic(
+            sourceChatId,
+            sourceMessageId,
+            claim.operation.staff_chat_id
+          );
+        if (restarted) {
+          topicReplacementAttempts += 1;
+          logger.warn(
+            { ticketId: claim.operation.ticket_id, stage: claim.operation.stage },
+            "Restarting inbound ticket routing after confirmed unavailable forum topic"
+          );
+          if (restarted.state === "CANCELLED") {
+            return "BLOCKED";
+          }
+          continue;
+        }
+
+        const diagnostic = normalizeTelegramDeliveryError(error);
+        if (error instanceof GrammyError) {
+          this.dependencies.db.markTicketInboundRoutingFailed(
+            sourceChatId,
+            sourceMessageId,
+            claim.operation.staff_chat_id,
+            diagnostic.category,
+            diagnostic.description
+          );
+          logger.warn(
+            { ticketId: claim.operation.ticket_id, stage: claim.operation.stage, category: diagnostic.category },
+            "Inbound ticket routing failed before Telegram delivery"
+          );
+          return "FAILED";
+        }
+        this.dependencies.db.markTicketInboundRoutingUnknown(
+          sourceChatId,
+          sourceMessageId,
+          claim.operation.staff_chat_id,
+          "Telegram delivery outcome could not be confirmed."
+        );
+        logger.warn(
+          { ticketId: claim.operation.ticket_id, stage: claim.operation.stage, category: diagnostic.category },
+          "Inbound ticket routing has an unknown Telegram delivery outcome"
+        );
+        return "BLOCKED";
+      }
     }
 
-    let ticket: TicketRecord;
-    try {
-      ticket = this.dependencies.db.createTicket(ctx.from.id, this.requireStaffChatId());
-    } catch (error) {
-      if (isSqliteConstraint(error)) {
-        const activeTicket = this.dependencies.db.findActiveTicketForUser(ctx.from.id, this.requireStaffChatId());
-        if (activeTicket) {
-          await this.appendToExistingTicket(ctx, activeTicket);
+    return "BLOCKED";
+  }
+
+  private async resumeReadyInboundTicketOperations(
+    api: BotApi,
+    ticketId: number,
+    staffChatId: number,
+    blockedSource?: { chatId: number; messageId: number }
+  ): Promise<void> {
+    while (this.dependencies.installation.getStaffChatId() === staffChatId) {
+      const operations = this.dependencies.db
+        .listReadyTicketInboundRoutingOperationsForTicket(ticketId, staffChatId)
+        .filter(
+          (operation) =>
+            operation.source_chat_id !== blockedSource?.chatId ||
+            operation.source_message_id !== blockedSource?.messageId
+        );
+      if (operations.length === 0) return;
+      for (const operation of operations) {
+        if (this.dependencies.installation.getStaffChatId() !== staffChatId) return;
+        await this.resumeInboundRoutingOperation(api, operation.source_chat_id, operation.source_message_id);
+        const current = this.dependencies.db.getTicketInboundRoutingOperation(
+          operation.source_chat_id,
+          operation.source_message_id
+        );
+        if (
+          current?.state === operation.state &&
+          current.stage === operation.stage &&
+          current.attempt === operation.attempt
+        ) {
+          logger.warn(
+            { ticketId, stage: current.stage, attempt: current.attempt },
+            "Stopped ready inbound routing drain without durable progress"
+          );
           return;
         }
       }
-      throw error;
-    }
-
-    const content = getMessageContent(ctx.message);
-    this.dependencies.db.addMessage({
-      ticketId: ticket.id,
-      direction: "USER_TO_STAFF",
-      sourceChatId: ctx.chat.id,
-      sourceMessageId: ctx.message.message_id,
-      fromTelegramId: ctx.from.id,
-      fromUsername: usernameOf(ctx.from),
-      senderType: "USER",
-      senderDisplayName: displayTelegramUser(ctx.from),
-      senderUsername: usernameOf(ctx.from),
-      text: content.text,
-      mediaType: content.mediaType,
-      filename: content.filename,
-      fileId: content.fileId,
-    });
-
-    let messageThreadId: number;
-    try {
-      const topic = await ctx.api.createForumTopic(this.requireStaffChatId(), topicName(ticket.id, ctx.from));
-      messageThreadId = topic.message_thread_id;
-      this.dependencies.db.updateTicketForumTopic(ticket.id, this.requireStaffChatId(), messageThreadId);
-    } catch (error) {
-      logger.error({ err: error, ticketId: ticket.id }, "Could not create staff forum topic");
-      this.dependencies.db.updateTicketStatus(ticket.id, "CLOSED");
-      this.dependencies.db.deleteMessagesForTicket(ticket.id);
-      await ctx.reply("Sorry, we could not create a support topic. Please try again later.");
-      return;
-    }
-
-    const ticketWithTopic = this.dependencies.db.getTicketWithUser(ticket.id);
-    if (!ticketWithTopic?.message_thread_id) {
-      this.dependencies.db.updateTicketStatus(ticket.id, "CLOSED");
-      this.dependencies.db.deleteMessagesForTicket(ticket.id);
-      await ctx.reply("Sorry, we could not route your request to support. Please try again later.");
-      return;
-    }
-
-    try {
-      const summary = await ctx.api.sendMessage(this.requireStaffChatId(), formatPinnedTicketSummary(ticketWithTopic), {
-        message_thread_id: messageThreadId,
-        reply_markup: this.dependencies.staffTicketKeyboard(ticket.id),
-      });
-      this.dependencies.db.updateTicketStaffMessage(ticket.id, summary.chat.id, summary.message_id);
-      await this.pinMessageSafely(ctx.api, summary.chat.id, summary.message_id, ticket.id);
-      await ctx.api.sendMessage(this.requireStaffChatId(), formatTicketPost(ticketWithTopic, content.text), {
-        message_thread_id: messageThreadId,
-      });
-    } catch (error) {
-      logger.error({ err: error, ticketId: ticket.id }, "Could not send ticket intro to staff topic");
-      this.dependencies.db.updateTicketStatus(ticket.id, "CLOSED");
-      this.dependencies.db.deleteMessagesForTicket(ticket.id);
-      await this.closeForumTopicSafely(ctx.api, ticketWithTopic);
-      await ctx.reply("Sorry, we could not route your request to support. Please try again later.");
-      return;
-    }
-
-    this.dependencies.db.closeOtherActiveTicketsForUserInStaffChat(ctx.from.id, this.requireStaffChatId(), ticket.id);
-    await this.maybeCopyOriginalMessageToStaff(ctx, ticketWithTopic, content.shouldCopyOriginal);
-    await ctx.reply(acknowledgement.rendered, { reply_markup: this.dependencies.userTicketKeyboard(ticket.id) });
-  }
-
-  private async appendToExistingTicket(ctx: Context, activeTicket: TicketRecord): Promise<void> {
-    if (!ctx.from || !ctx.chat || !ctx.message) return;
-
-    if (activeTicket.staff_chat_id !== this.requireStaffChatId() || activeTicket.message_thread_id === null) {
-      const readyTicket = await this.waitForTicketTopic(activeTicket.id);
-      if (readyTicket && readyTicket.status !== "CLOSED") {
-        await this.appendToExistingTicket(ctx, readyTicket);
-        return;
-      }
-
-      logger.warn({ ticketId: activeTicket.id }, "Active ticket topic was not created in time");
-      if (readyTicket?.status !== "CLOSED") {
-        this.dependencies.db.closeTicketRecord(activeTicket.id, systemActor());
-        await archiveTicketIfPossible(ctx.api, this.dependencies.db, this.requireStaffChatId(), activeTicket.id);
-      }
-      await this.createFreshTicketFromUserMessage(ctx);
-      return;
-    }
-
-    const content = getMessageContent(ctx.message);
-    try {
-      await ctx.api.sendMessage(
-        this.requireStaffChatId(),
-        formatTicketUpdate(ctx.from, content.text, content.mediaType, content.filename),
-        { message_thread_id: activeTicket.message_thread_id }
-      );
-      this.dependencies.db.addMessage({
-        ticketId: activeTicket.id,
-        direction: "USER_TO_STAFF",
-        sourceChatId: ctx.chat.id,
-        sourceMessageId: ctx.message.message_id,
-        fromTelegramId: ctx.from.id,
-        fromUsername: usernameOf(ctx.from),
-        senderType: "USER",
-        senderDisplayName: displayTelegramUser(ctx.from),
-        senderUsername: usernameOf(ctx.from),
-        text: content.text,
-        mediaType: content.mediaType,
-        filename: content.filename,
-        fileId: content.fileId,
-      });
-
-      if (activeTicket.status === "WAITING_USER") {
-        this.dependencies.db.clearWaitingUserFollowUp(activeTicket.id);
-        this.dependencies.db.updateTicketStatus(activeTicket.id, "IN_PROGRESS");
-      }
-
-      const ticketWithUser = this.dependencies.db.getTicketWithUser(activeTicket.id);
-      if (ticketWithUser) {
-        await this.maybeCopyOriginalMessageToStaff(ctx, ticketWithUser, content.shouldCopyOriginal);
-        await this.refreshTicket(activeTicket.id);
-      }
-
-      this.dependencies.db.closeOtherActiveTicketsForUserInStaffChat(
-        ctx.from.id,
-        this.requireStaffChatId(),
-        activeTicket.id
-      );
-    } catch (error) {
-      if (isForumTopicUnavailable(error)) {
-        logger.warn(
-          { err: error, ticketId: activeTicket.id, messageThreadId: activeTicket.message_thread_id },
-          "Staff forum topic is unavailable; creating a fresh ticket"
-        );
-        this.dependencies.db.closeTicketRecord(activeTicket.id, systemActor());
-        await archiveTicketIfPossible(ctx.api, this.dependencies.db, this.requireStaffChatId(), activeTicket.id);
-        await this.createFreshTicketFromUserMessage(ctx);
-        return;
-      }
-
-      logger.error({ err: error, ticketId: activeTicket.id }, "Could not notify staff about user update");
-      await ctx.reply("Sorry, we could not route your update to support. Please try again later.");
     }
   }
 
-  private async maybeCopyOriginalMessageToStaff(
-    ctx: Context,
-    ticket: TicketWithUser,
-    shouldCopyOriginal: boolean
-  ): Promise<void> {
-    if (!shouldCopyOriginal || !ctx.chat || !ctx.message || !ticket.message_thread_id) return;
-
+  private async continueClosedTicketArchive(api: BotApi, ticket: TicketWithUser, staffChatId: number): Promise<void> {
+    if (
+      this.dependencies.installation.getStaffChatId() !== staffChatId ||
+      ticket.staff_chat_id !== staffChatId ||
+      this.dependencies.db.hasUnresolvedTicketInboundRoutingOperations(ticket.id)
+    )
+      return;
     try {
-      await ctx.api.copyMessage(this.requireStaffChatId(), ctx.chat.id, ctx.message.message_id, {
-        message_thread_id: ticket.message_thread_id,
-      });
+      await archiveTicketIfPossible(api, this.dependencies.db, staffChatId, ticket.id);
     } catch (error) {
-      logger.error({ err: error, ticketId: ticket.id }, "Could not copy original user message to staff topic");
-      await this.sendStaffTopicNotice(
-        ctx.api,
-        this.requireStaffChatId(),
-        ticket,
-        `Ticket #${ticket.id} was created, but the attachment could not be copied: ${describeError(error)}`
-      );
+      logger.error({ err: error, ticketId: ticket.id }, "Could not continue archive after inbound routing delivery");
     }
   }
 
@@ -604,15 +797,6 @@ export class TicketRoutingService {
     }
   }
 
-  private async waitForTicketTopic(ticketId: number, attempts = 10): Promise<TicketRecord | undefined> {
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const ticket = this.dependencies.db.getTicket(ticketId);
-      if (!ticket || ticket.status === "CLOSED" || ticket.message_thread_id !== null) return ticket;
-      await sleep(250);
-    }
-    return this.dependencies.db.getTicket(ticketId);
-  }
-
   private async notifyStaff(
     api: BotApi,
     staffChatId: number,
@@ -643,15 +827,6 @@ export class TicketRoutingService {
         `Could not message user ${userTelegramId}: ${describeError(error)}`,
         messageThreadId
       );
-    }
-  }
-
-  private async closeForumTopicSafely(api: BotApi, ticket: TicketRecord): Promise<void> {
-    if (!ticket.staff_chat_id || !ticket.message_thread_id) return;
-    try {
-      await api.closeForumTopic(ticket.staff_chat_id, ticket.message_thread_id);
-    } catch (error) {
-      logger.warn({ err: error, ticketId: ticket.id }, "Could not close forum topic");
     }
   }
 
@@ -686,23 +861,4 @@ function describeError(error: unknown): string {
   if (error instanceof HttpError) return `HTTP error: ${error.message}`;
   if (error instanceof Error) return error.message;
   return String(error);
-}
-
-interface ErrorWithCode extends Error {
-  code?: string;
-}
-
-function isSqliteConstraint(error: unknown): error is ErrorWithCode {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    typeof (error as ErrorWithCode).code === "string" &&
-    (error as ErrorWithCode).code === "SQLITE_CONSTRAINT_UNIQUE"
-  );
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
 }

@@ -16,10 +16,12 @@ import { logger } from "./logger.js";
 import type { StaffChatOperationOptions } from "./staffChatDelivery.js";
 import { getTicketSnapshotToken } from "./ticketBatch.js";
 import type { InteractiveStaffReplySource } from "./ticketRouting.js";
+import { TICKET_BATCH_FOLLOW_UP_CONFLICT, TICKET_BATCH_FOLLOW_UP_PERSISTENCE_FAILURE } from "./persistence/types.js";
 
 const STAFF_OPERATION_NO_RETRY_AT = "9999-12-31T23:59:59.999Z";
 
 class TicketBatchRecoveryWorkspaceChangedError extends Error {}
+class TicketBatchFollowUpConflictError extends Error {}
 
 export class TicketBatchStaffOperationError extends Error {
   constructor(
@@ -188,7 +190,7 @@ export class TicketBatchRuntime {
         continue;
       }
       const ticket = this.db.getTicketWithUser(item.ticket_id);
-      if (item.state === "STAFF_SYNC_PENDING") {
+      if (item.state === "STAFF_SYNC_PENDING" || (item.state === "REPLY_SENT" && item.action === "reply_keep_open")) {
         if (!ticket || ticket.staff_chat_id !== this.requireStaffChatId()) {
           this.db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "INACTIVE", { applied: true });
           totals.inactive += 1;
@@ -382,10 +384,35 @@ export class TicketBatchRuntime {
         else if (continuation === "INACTIVE") totals.inactive += 1;
         else totals.replySent += 1;
       } catch (error) {
+        if (error instanceof TicketBatchFollowUpConflictError) {
+          this.db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", {
+            deliveryMessageId,
+            lastError: TICKET_BATCH_FOLLOW_UP_CONFLICT,
+          });
+          logger.warn(
+            { answerPackageId, ticketId: item.ticket_id, stage: "FOLLOW_UP_PERSISTENCE" },
+            "Batch reply delivered; follow-up not applied after concurrent ticket change"
+          );
+          totals.replySent += 1;
+          continue;
+        }
         const diagnostic = normalizeTelegramDeliveryError(error);
+        const followUpNotApplied =
+          postDeliveryStage === "FOLLOW_UP_PERSISTENCE" &&
+          !this.db
+            .listTicketFollowUpHistory(ticket.id)
+            .some(
+              (entry) =>
+                entry.source_answer_package_id === answerPackageId &&
+                entry.follow_up_state === item.follow_up_state &&
+                entry.internal_note === item.internal_note &&
+                entry.escalation_target === item.escalation_target
+            );
         this.db.updateTicketBatchAnswerItem(answerPackageId, item.ticket_id, "REPLY_SENT", {
           deliveryMessageId,
-          lastError: "Reply sent; follow-up, staff sync, or close/archive pending.",
+          lastError: followUpNotApplied
+            ? TICKET_BATCH_FOLLOW_UP_PERSISTENCE_FAILURE
+            : "Reply sent; follow-up, staff sync, or close/archive pending.",
         });
         logger.warn(
           {
@@ -655,17 +682,23 @@ export class TicketBatchRuntime {
   }
 
   private persistFollowUp(ticket: TicketWithUser, item: TicketBatchItem): void {
-    this.db.setTicketFollowUpContext(ticket.id, {
+    const nextStatus =
+      item.follow_up_state === "WAITING_USER"
+        ? "WAITING_USER"
+        : item.follow_up_state !== "NONE" || (item.action !== "no_action" && ticket.status === "OPEN")
+          ? "IN_PROGRESS"
+          : ticket.status;
+    const result = this.db.applyTicketBatchFollowUpIfCurrent(ticket.id, this.requireStaffChatId(), ticket.status, {
       followUpState: item.follow_up_state,
       internalNote: item.internal_note,
       escalationTarget: item.escalation_target,
       sourceAnswerPackageId: item.answer_package_id,
+      nextStatus,
+      expectedFollowUp: ticket,
     });
-    if (item.follow_up_state === "WAITING_USER") this.db.updateTicketStatus(ticket.id, "WAITING_USER");
-    else if (item.follow_up_state !== "NONE" && ticket.status !== "CLOSED")
-      this.db.updateTicketStatus(ticket.id, "IN_PROGRESS");
-    else if (item.action !== "no_action" && ticket.status === "OPEN")
-      this.db.updateTicketStatus(ticket.id, "IN_PROGRESS");
+    if (result.outcome === "CONFLICT" || result.outcome === "NOT_FOUND") {
+      throw new TicketBatchFollowUpConflictError("Ticket changed before Batch follow-up persistence.");
+    }
   }
 
   private hasFollowUpContext(item: TicketBatchItem): boolean {
@@ -720,9 +753,16 @@ export class TicketBatchRuntime {
       item.action === "no_action" ? "ℹ️ Batch follow-up updated — no user message sent" : "✅ Batch reply sent to user",
     ];
     if (item.action !== "no_action" && item.reply_text) lines.push("", item.reply_text);
-    if (item.follow_up_state !== "NONE") lines.push("", `Follow-up: ${formatFollowUpState(item.follow_up_state)}`);
-    if (item.escalation_target !== "NONE") lines.push(`Escalation: ${formatEscalationTarget(item.escalation_target)}`);
-    if (item.internal_note) lines.push(`Internal note: ${item.internal_note}`);
+    if (persistedItem.last_error === TICKET_BATCH_FOLLOW_UP_CONFLICT) {
+      lines.push("", "Follow-up, internal note, and escalation were not applied due to a concurrent ticket change.");
+    } else if (persistedItem.last_error === TICKET_BATCH_FOLLOW_UP_PERSISTENCE_FAILURE) {
+      lines.push("", "Follow-up, internal note, and escalation were not applied due to a local persistence failure.");
+    } else {
+      if (item.follow_up_state !== "NONE") lines.push("", `Follow-up: ${formatFollowUpState(item.follow_up_state)}`);
+      if (item.escalation_target !== "NONE")
+        lines.push(`Escalation: ${formatEscalationTarget(item.escalation_target)}`);
+      if (item.internal_note) lines.push(`Internal note: ${item.internal_note}`);
+    }
     const threadId = ticket.message_thread_id;
     const echoed = await this.awaitRecoveryOperation(recoveryStaffChatId, () =>
       this.dependencies.runStaffChatOperation(
@@ -807,6 +847,10 @@ export class TicketBatchRuntime {
   private buildSummary(answerPackageId: string): string {
     const items = this.db.listTicketBatchAnswerItems(answerPackageId);
     const delivered = items.filter((item) => item.delivery_message_id !== null).length;
+    const followUpConflicts = items.filter((item) => item.last_error === TICKET_BATCH_FOLLOW_UP_CONFLICT).length;
+    const followUpPersistenceFailures = items.filter(
+      (item) => item.last_error === TICKET_BATCH_FOLLOW_UP_PERSISTENCE_FAILURE
+    ).length;
     const noAction = items.filter((item) => item.action === "no_action").length;
     const silentCloseItems = items.filter(
       (item) => item.action === "silent_close" && (item.state === "APPLYING" || item.state === "COMPLETED")
@@ -842,6 +886,8 @@ export class TicketBatchRuntime {
     const topicClosuresUnconfirmed = archivesCompleted;
     const hasIssues =
       permanent.length ||
+      followUpConflicts ||
+      followUpPersistenceFailures ||
       temporary.length ||
       unknown ||
       staffPending ||
@@ -852,6 +898,10 @@ export class TicketBatchRuntime {
       hasIssues ? "Ticket batch applied with issues." : "Answer package applied.",
       "",
       `Delivered replies: ${delivered}`,
+      ...(followUpConflicts ? [`Follow-up not applied after concurrent change: ${followUpConflicts}`] : []),
+      ...(followUpPersistenceFailures
+        ? [`Follow-up not applied after persistence failure: ${followUpPersistenceFailures}`]
+        : []),
       `No action: ${noAction}`,
       `Silent closed: ${silentClosed}`,
       `Permanent user-delivery failures: ${permanent.length}`,
@@ -943,13 +993,16 @@ export class TicketBatchRuntime {
         "Skipped invalid ticket batch success-echo recovery candidate"
       );
     }
-    for (const item of this.db
-      .listClosedTicketBatchReplyAndClosePendingEchoes(staffChatId, 20)
-      .filter(matchesPackage)) {
+    const closedReplyEchoes = this.db.listClosedTicketBatchPendingReplyEchoes(staffChatId, 20);
+    for (const item of closedReplyEchoes.filter(matchesPackage)) {
       this.ensureRecoveryWorkspace(staffChatId);
       this.db.recordTicketBatchTopicEcho(item.answer_package_id, item.ticket_id, "NOT_REQUIRED", {
         lastError: "Staff topic echo is no longer available after ticket closure.",
       });
+      if (item.action === "reply_keep_open") {
+        this.db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "INACTIVE", { applied: true });
+        packagesToRefresh.add(item.answer_package_id);
+      }
       packagesToFinalize.add(item.answer_package_id);
     }
     for (const item of this.db.listPendingTicketBatchFailureEvents(staffChatId, at, 20).filter(matchesPackage)) {
@@ -979,7 +1032,8 @@ export class TicketBatchRuntime {
         this.scheduleRecovery(this.batchStaffFailure(error).retryAt);
       }
     }
-    for (const item of this.db.listPendingTicketBatchTopicEchoes(staffChatId, at, 20).filter(matchesPackage)) {
+    const topicEchoes = this.db.listPendingTicketBatchTopicEchoes(staffChatId, at, 20);
+    for (const item of topicEchoes.filter(matchesPackage)) {
       this.ensureRecoveryWorkspace(staffChatId);
       const ticket = this.db.getTicketWithUser(item.ticket_id);
       if (!ticket || ticket.staff_chat_id !== staffChatId || ticket.status === "CLOSED") continue;
@@ -987,7 +1041,7 @@ export class TicketBatchRuntime {
         await this.awaitRecoveryOperation(staffChatId, () => this.sendTopicEcho(ticket, item, staffChatId));
         if (item.action === "no_action")
           this.db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "NO_ACTION", { applied: true });
-        else if (item.state === "STAFF_SYNC_PENDING" && item.action === "reply_keep_open") {
+        else if (["STAFF_SYNC_PENDING", "REPLY_SENT"].includes(item.state) && item.action === "reply_keep_open") {
           this.db.updateTicketBatchAnswerItem(item.answer_package_id, item.ticket_id, "COMPLETED", { applied: true });
         }
         packagesToFinalize.add(item.answer_package_id);
@@ -1024,7 +1078,12 @@ export class TicketBatchRuntime {
     for (const packageId of packagesToRefresh) {
       this.db.queueTicketBatchFinalSummaryRefresh(packageId, staffChatId, this.buildSummary(packageId));
     }
-    if (continuations.length === 20 || silentClosures.length === 20) {
+    if (
+      continuations.length === 20 ||
+      silentClosures.length === 20 ||
+      closedReplyEchoes.length === 20 ||
+      topicEchoes.length === 20
+    ) {
       this.scheduleRecovery(new Date(this.now().getTime() + 250).toISOString());
     }
     await this.awaitRecoveryOperation(staffChatId, () => this.recoverFinalSummaries(answerPackageId, staffChatId));

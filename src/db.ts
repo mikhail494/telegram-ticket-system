@@ -11,6 +11,9 @@ import { now } from "./persistence/helpers.js";
 import type { NormalizedDeliveryError } from "./deliveryDiagnostics.js";
 import type {
   AddMessageInput,
+  ApplyTicketBatchFollowUpInput,
+  BeginTicketInboundRoutingInput,
+  BeginTicketInboundRoutingResult,
   CreateTicketOutboundDeliveryIntentInput,
   DeliveryReconciliationAuditRecord,
   DeliveryReconciliationRecord,
@@ -56,9 +59,13 @@ import type {
   TicketMessageRecord,
   TicketArchiveDeliveryRecord,
   TicketArchiveDeliveryClaim,
+  TicketInboundRoutingClaim,
+  TicketInboundRoutingOperationRecord,
+  TicketInboundRoutingStage,
   TicketOutboundDeliveryRecord,
   TicketRecord,
   TicketStatus,
+  TicketTransitionResult,
   TicketWithUser,
   UserInput,
   UserRecord,
@@ -138,7 +145,7 @@ export class SupportDatabase {
     this.batch = new TicketBatchRepository(this.db);
     this.moderation = new ModerationRepository(this.db);
     this.quickReplies = new QuickRepliesRepository(this.db);
-    this.deliveryReconciliation = new DeliveryReconciliationRepository(this.db);
+    this.deliveryReconciliation = new DeliveryReconciliationRepository(this.db, this.tickets);
     secureDatabaseArtifacts(databasePath);
   }
   close(): void {
@@ -161,6 +168,136 @@ export class SupportDatabase {
 
   createTicket(userTelegramId: number, staffChatId: number): TicketRecord {
     return this.tickets.createTicket(userTelegramId, staffChatId);
+  }
+
+  beginTicketInboundRouting(input: BeginTicketInboundRoutingInput): BeginTicketInboundRoutingResult {
+    return this.tickets.beginTicketInboundRouting(input);
+  }
+
+  getTicketInboundRoutingOperation(
+    sourceChatId: number,
+    sourceMessageId: number
+  ): TicketInboundRoutingOperationRecord | undefined {
+    return this.tickets.getTicketInboundRoutingOperation(sourceChatId, sourceMessageId);
+  }
+
+  claimTicketInboundRoutingOperation(
+    sourceChatId: number,
+    sourceMessageId: number,
+    staffChatId: number,
+    stage: TicketInboundRoutingStage
+  ): TicketInboundRoutingClaim | undefined {
+    return this.tickets.claimTicketInboundRoutingOperation(sourceChatId, sourceMessageId, staffChatId, stage);
+  }
+
+  markTicketInboundRoutingTopicCreated(
+    sourceChatId: number,
+    sourceMessageId: number,
+    staffChatId: number,
+    messageThreadId: number
+  ): boolean {
+    return this.tickets.markTicketInboundRoutingTopicCreated(
+      sourceChatId,
+      sourceMessageId,
+      staffChatId,
+      messageThreadId
+    );
+  }
+
+  markTicketInboundRoutingSummaryDelivered(
+    sourceChatId: number,
+    sourceMessageId: number,
+    staffChatId: number,
+    summaryMessageId: number
+  ): boolean {
+    return this.tickets.markTicketInboundRoutingSummaryDelivered(
+      sourceChatId,
+      sourceMessageId,
+      staffChatId,
+      summaryMessageId
+    );
+  }
+
+  markTicketInboundRoutingInitialPostDelivered(
+    sourceChatId: number,
+    sourceMessageId: number,
+    staffChatId: number,
+    deliveryMessageId: number
+  ): boolean {
+    return this.tickets.markTicketInboundRoutingInitialPostDelivered(
+      sourceChatId,
+      sourceMessageId,
+      staffChatId,
+      deliveryMessageId
+    );
+  }
+
+  markTicketInboundRoutingUpdateDelivered(
+    sourceChatId: number,
+    sourceMessageId: number,
+    staffChatId: number,
+    deliveryMessageId: number
+  ): boolean {
+    return this.tickets.markTicketInboundRoutingUpdateDelivered(
+      sourceChatId,
+      sourceMessageId,
+      staffChatId,
+      deliveryMessageId
+    );
+  }
+
+  markTicketInboundRoutingFailed(
+    sourceChatId: number,
+    sourceMessageId: number,
+    staffChatId: number,
+    failureCategory: TicketInboundRoutingOperationRecord["failure_category"],
+    failureDescription: string | null
+  ): boolean {
+    return this.tickets.markTicketInboundRoutingFailed(
+      sourceChatId,
+      sourceMessageId,
+      staffChatId,
+      failureCategory,
+      failureDescription
+    );
+  }
+
+  markTicketInboundRoutingCopyDelivered(
+    sourceChatId: number,
+    sourceMessageId: number,
+    staffChatId: number,
+    messageId: number
+  ): boolean {
+    return this.tickets.markTicketInboundRoutingCopyDelivered(sourceChatId, sourceMessageId, staffChatId, messageId);
+  }
+
+  markTicketInboundRoutingUnknown(
+    sourceChatId: number,
+    sourceMessageId: number,
+    staffChatId: number,
+    failureDescription: string
+  ): boolean {
+    return this.tickets.markTicketInboundRoutingUnknown(sourceChatId, sourceMessageId, staffChatId, failureDescription);
+  }
+
+  markPendingTicketInboundRoutingOperationsUnknown(): number {
+    return this.tickets.markPendingTicketInboundRoutingOperationsUnknown();
+  }
+
+  restartTicketInboundRoutingAfterUnavailableTopic(
+    sourceChatId: number,
+    sourceMessageId: number,
+    staffChatId: number
+  ): TicketInboundRoutingOperationRecord | undefined {
+    return this.tickets.restartTicketInboundRoutingAfterUnavailableTopic(sourceChatId, sourceMessageId, staffChatId);
+  }
+
+  listReadyTicketInboundRoutingOperationsForTicket(
+    ticketId: number,
+    staffChatId: number,
+    limit = 20
+  ): TicketInboundRoutingOperationRecord[] {
+    return this.tickets.listReadyTicketInboundRoutingOperationsForTicket(ticketId, staffChatId, limit);
   }
 
   getTicket(ticketId: number): TicketRecord | undefined {
@@ -203,12 +340,25 @@ export class SupportDatabase {
     return this.tickets.updateTicketStatus(ticketId, status);
   }
 
+  transitionTicketStatusIfCurrent(
+    ticketId: number,
+    staffChatId: number,
+    expectedStatus: TicketStatus,
+    nextStatus: TicketStatus
+  ): TicketTransitionResult {
+    return this.tickets.transitionTicketStatusIfCurrent(ticketId, staffChatId, expectedStatus, nextStatus);
+  }
+
   listActiveTicketsForStaffChat(staffChatId: number): TicketWithUser[] {
     return this.tickets.listActiveTicketsForStaffChat(staffChatId);
   }
 
   closeTicketRecord(ticketId: number, input: CloseTicketInput): TicketRecord | undefined {
     return this.tickets.closeTicketRecord(ticketId, input);
+  }
+
+  closeTicketRecordIfOpen(ticketId: number, staffChatId: number, input: CloseTicketInput): TicketTransitionResult {
+    return this.tickets.closeTicketRecordIfOpen(ticketId, staffChatId, input);
   }
 
   markTicketArchivedAndDeleteMessages(ticketId: number, logsMessageId: number, transcriptMessageId: number): void {
@@ -274,6 +424,10 @@ export class SupportDatabase {
     return this.tickets.hasUnresolvedTicketOutboundDeliveries(ticketId);
   }
 
+  hasUnresolvedTicketInboundRoutingOperations(ticketId: number): boolean {
+    return this.tickets.hasUnresolvedTicketInboundRoutingOperations(ticketId);
+  }
+
   listUnknownDeliveryReconciliations(staffChatId: number, limit = 50): DeliveryReconciliationRecord[] {
     return this.deliveryReconciliation.listUnknown(staffChatId, limit);
   }
@@ -288,6 +442,14 @@ export class SupportDatabase {
 
   reconcileUnknownDelivery(input: ReconcileUnknownDeliveryInput): DeliveryReconciliationResult {
     return this.deliveryReconciliation.reconcile(input);
+  }
+
+  requestInboundRoutingRetry(
+    staffChatId: number,
+    caseToken: string,
+    reconciledBy: number
+  ): DeliveryReconciliationResult {
+    return this.deliveryReconciliation.requestInboundRetry(staffChatId, caseToken, reconciledBy);
   }
 
   listDeliveryReconciliationAudit(staffChatId: number, limit = 100): DeliveryReconciliationAuditRecord[] {
@@ -356,6 +518,10 @@ export class SupportDatabase {
 
   markTicketBatchExportUnknownDelivery(exportId: string, staffChatId: number, error: string): void {
     return this.batch.markTicketBatchExportUnknownDelivery(exportId, staffChatId, error);
+  }
+
+  markPendingTicketBatchExportsUnknown(): number {
+    return this.batch.markPendingTicketBatchExportsUnknown();
   }
 
   getTicketBatchAnswerPackage(
@@ -525,8 +691,8 @@ export class SupportDatabase {
     return this.batch.listPendingTicketBatchTopicEchoes(staffChatId, at, limit);
   }
 
-  listClosedTicketBatchReplyAndClosePendingEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {
-    return this.batch.listClosedTicketBatchReplyAndClosePendingEchoes(staffChatId, limit);
+  listClosedTicketBatchPendingReplyEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {
+    return this.batch.listClosedTicketBatchPendingReplyEchoes(staffChatId, limit);
   }
 
   setTicketBatchPostDeliveryRetry(
@@ -576,6 +742,15 @@ export class SupportDatabase {
     }
   ): TicketRecord | undefined {
     return this.tickets.setTicketFollowUpContext(ticketId, input);
+  }
+
+  applyTicketBatchFollowUpIfCurrent(
+    ticketId: number,
+    staffChatId: number,
+    expectedStatus: TicketStatus,
+    input: ApplyTicketBatchFollowUpInput
+  ): TicketTransitionResult {
+    return this.tickets.applyTicketBatchFollowUpIfCurrent(ticketId, staffChatId, expectedStatus, input);
   }
 
   clearWaitingUserFollowUp(ticketId: number): TicketRecord | undefined {
@@ -2090,6 +2265,75 @@ export class SupportDatabase {
             BEGIN
               SELECT RAISE(ABORT, 'delivery reconciliation audit is append-only');
             END;
+          `);
+        },
+      },
+      {
+        id: 27,
+        name: "add_ticket_inbound_routing_durability",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS ticket_inbound_routing_operations (
+              source_chat_id INTEGER NOT NULL,
+              source_message_id INTEGER NOT NULL,
+              ticket_id INTEGER NOT NULL,
+              staff_chat_id INTEGER NOT NULL,
+              kind TEXT NOT NULL CHECK(kind IN ('FRESH_TICKET', 'EXISTING_TICKET')),
+              stage TEXT NOT NULL CHECK(stage IN (
+                'WAITING_FOR_TOPIC', 'CREATE_TOPIC', 'SEND_SUMMARY', 'SEND_INITIAL_POST', 'SEND_UPDATE', 'COPY_ORIGINAL', 'DONE'
+              )),
+              state TEXT NOT NULL CHECK(state IN ('READY', 'PENDING', 'DELIVERED', 'FAILED', 'UNKNOWN_DELIVERY', 'RETRY_REQUIRED', 'CANCELLED')),
+              attempt INTEGER NOT NULL DEFAULT 1 CHECK(attempt > 0),
+              user_telegram_id INTEGER NOT NULL,
+              from_username TEXT,
+              from_first_name TEXT,
+              from_last_name TEXT,
+              sender_display_name TEXT NOT NULL,
+              sender_username TEXT,
+              text TEXT,
+              media_type TEXT,
+              filename TEXT,
+              file_id TEXT,
+              should_copy_original INTEGER NOT NULL CHECK(should_copy_original IN (0, 1)),
+              copied_message_id INTEGER,
+              topic_thread_id INTEGER,
+              summary_message_id INTEGER,
+              delivery_message_id INTEGER,
+              failure_category TEXT,
+              failure_description TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(source_chat_id, source_message_id),
+              FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_ticket_inbound_routing_ticket_state
+              ON ticket_inbound_routing_operations(ticket_id, staff_chat_id, state, stage, created_at);
+            CREATE TABLE IF NOT EXISTS ticket_inbound_reconciliation_audit (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              case_token TEXT NOT NULL,
+              delivery_kind TEXT NOT NULL CHECK(delivery_kind = 'INBOUND_ROUTING'),
+              delivery_key TEXT NOT NULL,
+              ticket_id INTEGER NOT NULL REFERENCES tickets(id),
+              staff_chat_id INTEGER NOT NULL,
+              reconciled_by INTEGER NOT NULL,
+              action TEXT NOT NULL CHECK(action IN ('CONFIRMED_DELIVERED','CONFIRMED_FAILED','RETRY_REQUESTED')),
+              previous_state TEXT NOT NULL,
+              resulting_state TEXT NOT NULL,
+              telegram_message_id INTEGER,
+              note TEXT,
+              reconciled_at TEXT NOT NULL,
+              UNIQUE(case_token, action)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_reconciliation_decision
+              ON ticket_inbound_reconciliation_audit(case_token) WHERE action != 'RETRY_REQUESTED';
+            CREATE INDEX IF NOT EXISTS idx_inbound_reconciliation_workspace
+              ON ticket_inbound_reconciliation_audit(staff_chat_id, reconciled_at, id);
+            CREATE TRIGGER IF NOT EXISTS prevent_inbound_reconciliation_audit_update
+            BEFORE UPDATE ON ticket_inbound_reconciliation_audit
+            BEGIN SELECT RAISE(ABORT, 'inbound reconciliation audit is append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS prevent_inbound_reconciliation_audit_delete
+            BEFORE DELETE ON ticket_inbound_reconciliation_audit
+            BEGIN SELECT RAISE(ABORT, 'inbound reconciliation audit is append-only'); END;
           `);
         },
       },

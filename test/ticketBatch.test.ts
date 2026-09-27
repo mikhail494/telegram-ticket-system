@@ -785,7 +785,7 @@ describe("persistent answer package state machine", () => {
     assert.equal(harness.db.cancelTicketBatchAnswerPackage(pending.answer_package_id, -100900), true);
     assert.equal(harness.db.getTicketBatchAnswerPackage(pending.answer_package_id, -100900)?.status, "CANCELLED");
     assert.equal(harness.db.listTicketBatchAnswerItems(pending.answer_package_id).length, 1);
-    assert.equal(harness.db.claimTicketBatchAnswerPackage(pending.answer_package_id, -100900)?.status, "CANCELLED");
+    assert.equal(harness.db.claimTicketBatchAnswerPackage(pending.answer_package_id, -100900), undefined);
   });
 
   it("allows exactly one deterministic package claim and blocks applying/completed cancellation", () => {
@@ -795,10 +795,7 @@ describe("persistent answer package state machine", () => {
       harness.db.claimTicketBatchAnswerPackage(packageRecord.answer_package_id, -100900)?.status,
       "APPLYING"
     );
-    assert.equal(
-      harness.db.claimTicketBatchAnswerPackage(packageRecord.answer_package_id, -100900)?.status,
-      "APPLYING"
-    );
+    assert.equal(harness.db.claimTicketBatchAnswerPackage(packageRecord.answer_package_id, -100900), undefined);
     assert.equal(harness.db.cancelTicketBatchAnswerPackage(packageRecord.answer_package_id, -100900), false);
     const item = harness.db.listTicketBatchAnswerItems(packageRecord.answer_package_id)[0]!;
     harness.db.updateTicketBatchAnswerItem(packageRecord.answer_package_id, item.ticket_id, "COMPLETED", {
@@ -826,5 +823,22 @@ describe("persistent answer package state machine", () => {
       harness.db.finalizeTicketBatchAnswerPackage(packageRecord.answer_package_id, -100900)?.status,
       "COMPLETED"
     );
+  });
+
+  it("conservatively exposes interrupted Batch export delivery without replay", () => {
+    const harness = createHarness();
+    harness.db.createTicketBatchExport({
+      exportId: "export_interrupted",
+      staffChatId: -100900,
+      createdAt: "2026-09-26T00:00:00.000Z",
+      selectionMode: "all_active",
+      ticketCount: 0,
+      items: [],
+      deliveryState: "PREPARING",
+    });
+
+    assert.equal(harness.db.markPendingTicketBatchExportsUnknown(), 1);
+    assert.equal(harness.db.getTicketBatchExport("export_interrupted", -100900)?.delivery_state, "UNKNOWN_DELIVERY");
+    assert.equal(harness.db.markPendingTicketBatchExportsUnknown(), 0);
   });
 });

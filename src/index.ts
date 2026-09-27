@@ -160,18 +160,27 @@ async function startApplication(): Promise<void> {
   if (!lifecycle.isRunning()) return;
   bot.botInfo = botInfo;
   const orphanInteractiveDeliveries = db.markPendingTicketOutboundDeliveriesUnknown();
+  const orphanInboundRoutingOperations = db.markPendingTicketInboundRoutingOperationsUnknown();
   const orphanBatchReplyDeliveries = db.markOrphanedTicketBatchReplyDeliveriesUnknown();
+  const orphanBatchExports = db.markPendingTicketBatchExportsUnknown();
   const orphanArchiveDeliveries = db.markPendingTicketArchiveDeliveriesUnknown();
   if (orphanInteractiveDeliveries > 0)
     logger.warn(
       { count: orphanInteractiveDeliveries },
       "Converted orphan interactive delivery intents to UNKNOWN_DELIVERY"
     );
+  if (orphanInboundRoutingOperations > 0)
+    logger.warn(
+      { count: orphanInboundRoutingOperations },
+      "Converted orphan inbound ticket routing operations to UNKNOWN_DELIVERY"
+    );
   if (orphanBatchReplyDeliveries > 0)
     logger.warn(
       { count: orphanBatchReplyDeliveries },
       "Converted orphan Ticket Batch reply deliveries to UNKNOWN_DELIVERY"
     );
+  if (orphanBatchExports > 0)
+    logger.warn({ count: orphanBatchExports }, "Converted orphan Ticket Batch export deliveries to UNKNOWN_DELIVERY");
   if (orphanArchiveDeliveries > 0)
     logger.warn({ count: orphanArchiveDeliveries }, "Converted orphan archive delivery intents to UNKNOWN_DELIVERY");
   const startupRecoveryBudget = new StartupRecoveryBudget({ shouldContinue: () => lifecycle.isRunning() });

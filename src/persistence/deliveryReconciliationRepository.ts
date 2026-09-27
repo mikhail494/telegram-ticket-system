@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { now } from "./helpers.js";
+import { inboundRoutingAttemptIdentity, type TicketRepository } from "./ticketsRepository.js";
 import type {
   DeliveryReconciliationAuditRecord,
   DeliveryReconciliationKind,
@@ -23,6 +24,8 @@ interface ReconciliationRow {
   diagnostic_description: string | null;
   created_at: string;
   updated_at: string;
+  state: DeliveryReconciliationRecord["state"];
+  inbound_stage: DeliveryReconciliationRecord["inboundStage"];
 }
 
 interface InteractiveDeliveryRow {
@@ -70,7 +73,7 @@ const UNKNOWN_DELIVERY_ROWS_SQL = `
          d.delivery_chat_id AS destination_chat_id, NULL AS related_telegram_message_id,
          d.delivery_message_id AS known_telegram_message_id,
          d.failure_category AS diagnostic_category, d.failure_description AS diagnostic_description,
-         d.created_at, d.updated_at
+         d.created_at, d.updated_at, 'UNKNOWN_DELIVERY' AS state, NULL AS inbound_stage
   FROM ticket_outbound_deliveries d
   JOIN tickets t ON t.id = d.ticket_id
   WHERE t.staff_chat_id = ? AND d.state = 'UNKNOWN_DELIVERY'
@@ -81,7 +84,7 @@ const UNKNOWN_DELIVERY_ROWS_SQL = `
            CASE WHEN a.summary_message_id IS NULL THEN 'summary' ELSE 'document' END,
          a.ticket_id, t.staff_chat_id, NULL, NULL, t.staff_chat_id,
          a.summary_message_id, a.document_message_id,
-         a.failure_category, a.failure_description, a.created_at, a.updated_at
+         a.failure_category, a.failure_description, a.created_at, a.updated_at, 'UNKNOWN_DELIVERY', NULL
   FROM ticket_archive_deliveries a
   JOIN tickets t ON t.id = a.ticket_id
   WHERE t.staff_chat_id = ? AND a.state = 'UNKNOWN_DELIVERY'
@@ -89,13 +92,23 @@ const UNKNOWN_DELIVERY_ROWS_SQL = `
   SELECT 'BATCH_REPLY', 'ticket-batch:' || i.answer_package_id || ':' || i.ticket_id,
          i.ticket_id, p.staff_chat_id, p.source_chat_id, p.source_message_id,
          t.user_telegram_id, NULL, COALESCE(d.delivery_message_id, i.delivery_message_id),
-         i.delivery_error_category, i.delivery_error_description, p.imported_at, i.updated_at
+         i.delivery_error_category, i.delivery_error_description, p.imported_at, i.updated_at, 'UNKNOWN_DELIVERY', NULL
   FROM ticket_batch_answer_items i
   JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
   JOIN tickets t ON t.id = i.ticket_id
   LEFT JOIN ticket_outbound_deliveries d
     ON d.operation_key = 'ticket-batch:' || i.answer_package_id || ':' || i.ticket_id
   WHERE p.staff_chat_id = ? AND t.staff_chat_id = p.staff_chat_id AND i.state = 'UNKNOWN_DELIVERY'
+  UNION ALL
+  SELECT 'INBOUND_ROUTING', 'inbound:' || r.source_chat_id || ':' || r.source_message_id || ':' || r.stage || ':' || r.attempt,
+         r.ticket_id, r.staff_chat_id, r.source_chat_id, r.source_message_id, r.staff_chat_id,
+         r.topic_thread_id, CASE r.stage WHEN 'CREATE_TOPIC' THEN r.topic_thread_id
+           WHEN 'SEND_SUMMARY' THEN r.summary_message_id WHEN 'COPY_ORIGINAL' THEN r.copied_message_id ELSE r.delivery_message_id END,
+         r.failure_category, r.failure_description, r.created_at, r.updated_at, r.state, r.stage
+  FROM ticket_inbound_routing_operations r JOIN tickets t ON t.id = r.ticket_id
+  WHERE r.staff_chat_id = ? AND t.staff_chat_id = r.staff_chat_id
+    AND r.state IN ('UNKNOWN_DELIVERY', 'RETRY_REQUIRED', 'READY', 'FAILED')
+    AND r.stage NOT IN ('WAITING_FOR_TOPIC', 'DONE')
 `;
 
 function caseToken(kind: DeliveryReconciliationKind, deliveryKey: string): string {
@@ -114,7 +127,8 @@ function toRecord(row: ReconciliationRow): DeliveryReconciliationRecord {
     destinationChatId: row.destination_chat_id,
     relatedTelegramMessageId: row.related_telegram_message_id,
     knownTelegramMessageId: row.known_telegram_message_id,
-    state: "UNKNOWN_DELIVERY",
+    state: row.state,
+    inboundStage: row.inbound_stage ?? undefined,
     diagnosticCategory: row.diagnostic_category,
     diagnosticDescription: row.diagnostic_description,
     createdAt: row.created_at,
@@ -123,7 +137,10 @@ function toRecord(row: ReconciliationRow): DeliveryReconciliationRecord {
 }
 
 export class DeliveryReconciliationRepository {
-  constructor(private readonly db: Database.Database) {}
+  constructor(
+    private readonly db: Database.Database,
+    private readonly tickets: TicketRepository
+  ) {}
 
   listUnknown(staffChatId: number, limit = 50): DeliveryReconciliationRecord[] {
     return this.listUnknownRows(staffChatId, limit).map(toRecord);
@@ -141,7 +158,7 @@ export class DeliveryReconciliationRepository {
                AND audit.delivery_key = unresolved.delivery_key
            )`
         )
-        .get(staffChatId, staffChatId, staffChatId) as { count: number }
+        .get(staffChatId, staffChatId, staffChatId, staffChatId) as { count: number }
     ).count;
   }
 
@@ -161,6 +178,7 @@ export class DeliveryReconciliationRepository {
 
       const record = this.getUnknown(normalizedInput.staffChatId, normalizedInput.caseToken);
       if (!record) return { outcome: "NOT_FOUND" };
+      if (record.state !== "UNKNOWN_DELIVERY") return { outcome: "CONFLICT" };
       if (normalizedInput.action === "CONFIRMED_DELIVERED" && !isPositiveInteger(normalizedInput.telegramMessageId)) {
         return { outcome: "CONFLICT", kind: record.kind, ticketId: record.ticketId, staffChatId: record.staffChatId };
       }
@@ -189,8 +207,8 @@ export class DeliveryReconciliationRepository {
   listAudit(staffChatId: number, limit = 100): DeliveryReconciliationAuditRecord[] {
     return this.db
       .prepare(
-        `SELECT * FROM delivery_reconciliation_audit
-         WHERE staff_chat_id = ? ORDER BY id DESC LIMIT ?`
+        `SELECT * FROM (SELECT * FROM delivery_reconciliation_audit UNION ALL SELECT * FROM ticket_inbound_reconciliation_audit)
+         WHERE staff_chat_id = ? ORDER BY reconciled_at DESC, id DESC LIMIT ?`
       )
       .all(staffChatId, limit) as DeliveryReconciliationAuditRecord[];
   }
@@ -209,13 +227,24 @@ export class DeliveryReconciliationRepository {
          ORDER BY updated_at ASC, ticket_id ASC
          LIMIT ?`
       )
-      .all(staffChatId, staffChatId, staffChatId, boundedLimit) as ReconciliationRow[];
+      .all(staffChatId, staffChatId, staffChatId, staffChatId, boundedLimit) as ReconciliationRow[];
   }
 
   private applyReconciliation(
     record: DeliveryReconciliationRecord,
     input: ReconcileUnknownDeliveryInput
   ): string | undefined {
+    if (record.kind === "INBOUND_ROUTING") {
+      const operation = this.tickets.getTicketInboundRoutingOperation(record.sourceChatId!, record.sourceMessageId!);
+      if (
+        !operation ||
+        inboundRoutingAttemptIdentity(operation) !== record.operationIdentity ||
+        !this.tickets.reconcileInboundRouting(operation, input)
+      )
+        return undefined;
+      return this.tickets.getTicketInboundRoutingOperation(operation.source_chat_id, operation.source_message_id)
+        ?.state;
+    }
     if (record.kind === "INTERACTIVE") return this.reconcileInteractive(record, input);
     if (record.kind === "ARCHIVE_SUMMARY" || record.kind === "ARCHIVE_DOCUMENT")
       return this.reconcileArchive(record, input);
@@ -513,7 +542,7 @@ export class DeliveryReconciliationRepository {
   ): void {
     this.db
       .prepare(
-        `INSERT INTO delivery_reconciliation_audit (
+        `INSERT INTO ${record.kind === "INBOUND_ROUTING" ? "ticket_inbound_reconciliation_audit" : "delivery_reconciliation_audit"} (
            case_token, delivery_kind, delivery_key, ticket_id, staff_chat_id, reconciled_by,
            action, previous_state, resulting_state, telegram_message_id, note, reconciled_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'UNKNOWN_DELIVERY', ?, ?, ?, ?)`
@@ -539,7 +568,8 @@ export class DeliveryReconciliationRepository {
   ): DeliveryReconciliationAuditRecord | undefined {
     return this.db
       .prepare(
-        `SELECT audit.* FROM delivery_reconciliation_audit audit
+        `SELECT audit.* FROM (SELECT * FROM delivery_reconciliation_audit UNION ALL
+           SELECT * FROM ticket_inbound_reconciliation_audit WHERE action != 'RETRY_REQUESTED') audit
          JOIN tickets ticket ON ticket.id = audit.ticket_id
          WHERE audit.staff_chat_id = ? AND audit.case_token = ?
            AND ticket.staff_chat_id = audit.staff_chat_id`
@@ -576,6 +606,10 @@ export class DeliveryReconciliationRepository {
       .prepare("SELECT status FROM tickets WHERE id = ? AND staff_chat_id = ?")
       .get(ticketId, staffChatId) as { status: string } | undefined;
     const closedTicket = ticket?.status === "CLOSED";
+    const source = kind === "INBOUND_ROUTING" ? operationIdentity.split(":") : undefined;
+    const inbound = source
+      ? this.tickets.getTicketInboundRoutingOperation(Number(source[1]), Number(source[2]))
+      : undefined;
     return {
       outcome,
       kind,
@@ -585,13 +619,62 @@ export class DeliveryReconciliationRepository {
       archiveContinuationRequired:
         (kind === "ARCHIVE_SUMMARY" && resultingState === "SUMMARY_SENT") ||
         (kind === "ARCHIVE_DOCUMENT" && resultingState === "DELIVERED") ||
-        (closedTicket && (kind === "INTERACTIVE" || kind === "BATCH_REPLY")),
+        (closedTicket && (kind === "INTERACTIVE" || kind === "BATCH_REPLY" || kind === "INBOUND_ROUTING")),
       batchContinuationRequired:
         kind === "BATCH_REPLY" &&
         (resultingState === "STAFF_SYNC_PENDING" || resultingState === "FAILED" || resultingState === "INACTIVE"),
       batchAnswerPackageId,
       ticketSummaryRefreshRequired: kind === "INTERACTIVE" && resultingState === "DELIVERED" && !closedTicket,
+      inboundContinuation:
+        outcome === "APPLIED" && inbound?.state === "READY"
+          ? {
+              sourceChatId: inbound.source_chat_id,
+              sourceMessageId: inbound.source_message_id,
+              operationIdentity: inboundRoutingAttemptIdentity(inbound),
+            }
+          : undefined,
     };
+  }
+
+  requestInboundRetry(
+    staffChatId: number,
+    requestedCaseToken: string,
+    reconciledBy: number
+  ): DeliveryReconciliationResult {
+    return this.db.transaction((): DeliveryReconciliationResult => {
+      const record = this.getUnknown(staffChatId, requestedCaseToken);
+      if (!record || record.kind !== "INBOUND_ROUTING") return { outcome: "NOT_FOUND" };
+      const operation = this.tickets.getTicketInboundRoutingOperation(record.sourceChatId!, record.sourceMessageId!);
+      if (!operation || inboundRoutingAttemptIdentity(operation) !== record.operationIdentity)
+        return { outcome: "CONFLICT" };
+      if (record.state !== "RETRY_REQUIRED") return { outcome: "CONFLICT" };
+      const next = this.tickets.requestInboundRoutingRetry(operation);
+      if (!next) return { outcome: "CONFLICT" };
+      this.db
+        .prepare(
+          `INSERT INTO ticket_inbound_reconciliation_audit (
+        case_token, delivery_kind, delivery_key, ticket_id, staff_chat_id, reconciled_by, action,
+        previous_state, resulting_state, note, reconciled_at
+      ) VALUES (?, 'INBOUND_ROUTING', ?, ?, ?, ?, 'RETRY_REQUESTED', 'RETRY_REQUIRED', 'READY', ?, ?)`
+        )
+        .run(
+          record.caseToken,
+          record.operationIdentity,
+          record.ticketId,
+          staffChatId,
+          reconciledBy,
+          `New logical attempt: ${inboundRoutingAttemptIdentity(next)}`,
+          now()
+        );
+      return this.reconciliationOutcome(
+        "APPLIED",
+        record.kind,
+        record.ticketId,
+        staffChatId,
+        record.operationIdentity,
+        "READY"
+      );
+    })();
   }
 }
 

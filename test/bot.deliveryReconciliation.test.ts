@@ -3,6 +3,7 @@ import test, { afterEach } from "node:test";
 import { HttpError } from "grammy";
 import type { Update } from "grammy/types";
 import { InstallationService } from "../src/installation.js";
+import type { TicketInboundRoutingStage } from "../src/db.js";
 import { createBotHarness, TEST_STAFF_CHAT_ID, type BotHarness } from "./helpers/botHarness.js";
 
 const harnesses: BotHarness[] = [];
@@ -84,6 +85,140 @@ function seedUnknownInteractive(harness: BotHarness, sourceMessageId = 7001) {
   return { ticket, operationKey, record: harness.db.listUnknownDeliveryReconciliations(TEST_STAFF_CHAT_ID)[0]! };
 }
 
+function seedUnknownInbound(harness: BotHarness, stage: TicketInboundRoutingStage = "SEND_UPDATE") {
+  const ticket = stage === "SEND_UPDATE" ? harness.seedTicket() : undefined;
+  harness.db.upsertUser({ telegramId: 123 });
+  const started = harness.db.beginTicketInboundRouting({
+    sourceChatId: 123,
+    sourceMessageId: 8801,
+    staffChatId: TEST_STAFF_CHAT_ID,
+    userTelegramId: 123,
+    senderDisplayName: "Customer",
+    text: "Original content",
+    shouldCopyOriginal: stage === "COPY_ORIGINAL",
+    mediaType: stage === "COPY_ORIGINAL" ? "photo" : null,
+    fileId: stage === "COPY_ORIGINAL" ? "original-photo" : null,
+  });
+  const claim = (current: TicketInboundRoutingStage) =>
+    assert.equal(harness.db.claimTicketInboundRoutingOperation(123, 8801, TEST_STAFF_CHAT_ID, current)?.claimed, true);
+  if (stage !== "SEND_UPDATE" && stage !== "CREATE_TOPIC") {
+    claim("CREATE_TOPIC");
+    harness.db.markTicketInboundRoutingTopicCreated(123, 8801, TEST_STAFF_CHAT_ID, 501);
+    if (stage !== "SEND_SUMMARY") {
+      claim("SEND_SUMMARY");
+      harness.db.markTicketInboundRoutingSummaryDelivered(123, 8801, TEST_STAFF_CHAT_ID, 502);
+      if (stage === "COPY_ORIGINAL") {
+        claim("SEND_INITIAL_POST");
+        harness.db.markTicketInboundRoutingInitialPostDelivered(123, 8801, TEST_STAFF_CHAT_ID, 503);
+      }
+    }
+  }
+  claim(stage);
+  harness.db.markTicketInboundRoutingUnknown(123, 8801, TEST_STAFF_CHAT_ID, "Interrupted operation");
+  return {
+    ticket: ticket ?? started.ticket,
+    record: harness.db.listUnknownDeliveryReconciliations(TEST_STAFF_CHAT_ID)[0]!,
+  };
+}
+
+for (const stage of ["SEND_SUMMARY", "SEND_INITIAL_POST", "SEND_UPDATE", "COPY_ORIGINAL"] as const) {
+  test(`ADMIN confirms ${stage} through Delivery Review without repeating the reconciled side effect`, async () => {
+    const { harness } = createReadyHarness({ admin: true, rbac: true });
+    const { ticket, record } = seedUnknownInbound(harness, stage);
+    await harness.bot.handleUpdate(privateCallback(2, `delivery:view:${record.caseToken}`));
+    await harness.bot.handleUpdate(privateCallback(2, `delivery:delivered:${record.caseToken}`));
+    await harness.bot.handleUpdate(privateMessage(2, "9501"));
+    assert.equal(harness.db.getTicketInboundRoutingOperation(123, 8801)?.state, "DELIVERED");
+    assert.equal(harness.db.listMessagesChronological(ticket.id).length, 1);
+    assert.equal(
+      harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID).length,
+      stage === "SEND_SUMMARY" ? 1 : 0
+    );
+    assert.equal(harness.countApiCalls("copyMessage"), 0);
+    assert.equal(harness.countApiCalls("createForumTopic"), 0);
+  });
+}
+
+for (const stage of ["CREATE_TOPIC", "SEND_SUMMARY", "SEND_INITIAL_POST", "SEND_UPDATE", "COPY_ORIGINAL"] as const) {
+  test(`${stage}: non-delivery confirmation never sends until a NEW attempt is explicitly requested`, async () => {
+    const { harness } = createReadyHarness({ rbac: true });
+    const { record } = seedUnknownInbound(harness, stage);
+    await harness.bot.handleUpdate(privateCallback(1, `delivery:failed:${record.caseToken}`));
+    await harness.bot.handleUpdate(privateMessage(1, "Verified this operation was not accepted"));
+    assert.equal(harness.db.getTicketInboundRoutingOperation(123, 8801)?.state, "RETRY_REQUIRED");
+    assert.equal(harness.countApiCalls("createForumTopic"), 0);
+    assert.equal(harness.countApiCalls("copyMessage"), 0);
+    assert.equal(
+      harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID).length,
+      0
+    );
+    const screenId = harness
+      .findApiCalls("sendMessage")
+      .filter((call) => call.payload.chat_id === 1)
+      .at(-1)!.responseMessageId!;
+    await harness.bot.handleUpdate(privateCallback(1, `delivery:view:${record.caseToken}`, screenId));
+    const method =
+      stage === "CREATE_TOPIC" ? "createForumTopic" : stage === "COPY_ORIGINAL" ? "copyMessage" : "sendMessage";
+    harness.setApiResponseOverride(method, (call, response) => {
+      if (call.payload.chat_id === TEST_STAFF_CHAT_ID) {
+        assert.equal(harness.db.getTicketInboundRoutingOperation(123, 8801)?.attempt, 2);
+        assert.equal(harness.db.getTicketInboundRoutingOperation(123, 8801)?.state, "PENDING");
+      }
+      return response;
+    });
+    await harness.bot.handleUpdate(privateCallback(1, `delivery:retry:${record.caseToken}`, screenId));
+    assert.equal(harness.db.getTicketInboundRoutingOperation(123, 8801)?.state, "DELIVERED");
+    assert.equal(harness.db.listDeliveryReconciliationAudit(TEST_STAFF_CHAT_ID).length, 2);
+    assert.equal(
+      harness.db.listDeliveryReconciliationAudit(TEST_STAFF_CHAT_ID).filter((a) => a.action === "RETRY_REQUESTED")
+        .length,
+      1
+    );
+    const calls = harness.countApiCalls(method);
+    await harness.bot.handleUpdate(privateCallback(1, `delivery:retry:${record.caseToken}`, screenId));
+    assert.equal(harness.countApiCalls(method), calls);
+  });
+}
+
+for (const role of ["SENIOR_AGENT", "AGENT"] as const) {
+  test(`${role} cannot reconcile or retry inbound delivery`, async () => {
+    const { harness, installation } = createReadyHarness({ rbac: true });
+    installation.assignRole(1, 3, role);
+    const { record } = seedUnknownInbound(harness);
+    for (const action of ["view", "delivered", "failed", "retry", "continue"])
+      await harness.bot.handleUpdate(privateCallback(3, `delivery:${action}:${record.caseToken}`));
+    assert.equal(harness.db.getTicketInboundRoutingOperation(123, 8801)?.state, "UNKNOWN_DELIVERY");
+    assert.equal(harness.db.listDeliveryReconciliationAudit(TEST_STAFF_CHAT_ID).length, 0);
+  });
+}
+
+test("inbound stale ADMIN input is denied after demotion or workspace removal", async () => {
+  for (const demotion of [true, false]) {
+    const { harness, installation } = createReadyHarness({ admin: true, rbac: true });
+    const { record } = seedUnknownInbound(harness);
+    await harness.bot.handleUpdate(privateCallback(2, `delivery:delivered:${record.caseToken}`));
+    if (demotion) installation.assignRole(1, 2, "AGENT");
+    else harness.setStaffMembership(2, "left");
+    await harness.bot.handleUpdate(privateMessage(2, "9502"));
+    assert.equal(harness.db.getTicketInboundRoutingOperation(123, 8801)?.state, "UNKNOWN_DELIVERY");
+    assert.equal(harness.db.listDeliveryReconciliationAudit(TEST_STAFF_CHAT_ID).length, 0);
+  }
+});
+
+test("moved-workspace inbound reconciliation cannot mutate the ticket or send into the new workspace", async () => {
+  const { harness } = createReadyHarness({ rbac: true });
+  const { ticket, record } = seedUnknownInbound(harness);
+  await harness.bot.handleUpdate(privateCallback(1, `delivery:delivered:${record.caseToken}`));
+  harness.db.updateTicketForumTopic(ticket.id, TEST_STAFF_CHAT_ID - 1, 9901);
+  await harness.bot.handleUpdate(privateMessage(1, "9503"));
+  assert.equal(harness.db.getTicketInboundRoutingOperation(123, 8801)?.state, "UNKNOWN_DELIVERY");
+  assert.equal(harness.db.listDeliveryReconciliationAudit(TEST_STAFF_CHAT_ID).length, 0);
+  assert.equal(
+    harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === TEST_STAFF_CHAT_ID - 1).length,
+    0
+  );
+});
+
 function seedUnknownBatchReply(
   harness: BotHarness,
   ticket: ReturnType<BotHarness["seedTicket"]>,
@@ -153,6 +288,24 @@ test("OWNER reconciles an UNKNOWN interactive delivery without resending it", as
     harness.findApiCalls("sendMessage").filter((call) => call.payload.chat_id === ticket.user_telegram_id).length,
     0
   );
+});
+
+test("OWNER confirms an inbound topic and continues routing without recreating it", async () => {
+  const { harness } = createReadyHarness({ rbac: true });
+  harness.setApiResponseOverride("createForumTopic", () => {
+    throw new HttpError("socket closed", new Error("ECONNRESET"));
+  });
+  await harness.bot.handleUpdate(privateMessage(123, "Customer request", 8001));
+  const record = harness.db.listUnknownDeliveryReconciliations(TEST_STAFF_CHAT_ID)[0];
+  assert.equal(record?.kind, "INBOUND_ROUTING");
+  assert.match(record!.operationIdentity, /CREATE_TOPIC:1$/);
+  await harness.bot.handleUpdate(privateCallback(1, `delivery:delivered:${record!.caseToken}`));
+  await harness.bot.handleUpdate(privateMessage(1, "9101"));
+  assert.equal(harness.countApiCalls("createForumTopic"), 1);
+  assert.equal(harness.db.getTicket(record!.ticketId)?.message_thread_id, 9101);
+  assert.equal(harness.db.getTicketInboundRoutingOperation(123, 8001)?.state, "DELIVERED");
+  assert.equal(harness.db.listMessagesChronological(record!.ticketId).length, 1);
+  assert.equal(harness.db.listDeliveryReconciliationAudit(TEST_STAFF_CHAT_ID).length, 1);
 });
 
 test("reconciling a delivered OPEN interactive reply restores local progress and refreshes its staff summary", async () => {
