@@ -1,7 +1,7 @@
 import { GrammyError, HttpError } from "grammy";
 import type { Context, InlineKeyboard } from "grammy";
 import type { Message, User } from "grammy/types";
-import { archiveTicketIfPossible, logBanEvent, type ArchiveActor } from "./archive.js";
+import { archiveTicketIfPossible, logBanEvent, type ArchiveActor, type ArchiveStore } from "./archive.js";
 import { type SupportDatabase, type TicketRecord, type TicketStatus, type TicketWithUser } from "./db.js";
 import { normalizeTelegramDeliveryError, type NormalizedDeliveryError } from "./deliveryDiagnostics.js";
 import { isForumTopicUnavailable } from "./forumTopicErrors.js";
@@ -43,7 +43,7 @@ export class InteractiveReplyNotResentError extends Error {
 }
 
 interface TicketRoutingServiceDependencies {
-  db: SupportDatabase;
+  db: TicketRoutingStore;
   api: BotApi;
   installation: InstallationService;
   staffTicketKeyboard(ticketId: number, status: TicketStatus): InlineKeyboard;
@@ -52,6 +52,35 @@ interface TicketRoutingServiceDependencies {
   supportExpectedResponseTimeSettingKey: string;
   supportTicketReceivedTemplateSettingKey: string;
 }
+
+type TicketRoutingStore = Pick<
+  SupportDatabase,
+  | "banUser"
+  | "beginTicketInboundRouting"
+  | "claimTicketInboundRoutingOperation"
+  | "closeOtherActiveTicketsForUserInStaffChat"
+  | "closeTicketRecordIfOpen"
+  | "createTicketOutboundDeliveryIntent"
+  | "findActiveTicketForUser"
+  | "getSetting"
+  | "getTicketInboundRoutingOperation"
+  | "getUser"
+  | "listReadyTicketInboundRoutingOperationsForTicket"
+  | "markTicketInboundRoutingCopyDelivered"
+  | "markTicketInboundRoutingFailed"
+  | "markTicketInboundRoutingInitialPostDelivered"
+  | "markTicketInboundRoutingSummaryDelivered"
+  | "markTicketInboundRoutingTopicCreated"
+  | "markTicketInboundRoutingUnknown"
+  | "markTicketInboundRoutingUpdateDelivered"
+  | "markTicketOutboundDeliveryDelivered"
+  | "markTicketOutboundDeliveryFailed"
+  | "markTicketOutboundDeliveryUnknown"
+  | "restartTicketInboundRoutingAfterUnavailableTopic"
+  | "transitionTicketStatusIfCurrent"
+  | "upsertUser"
+> &
+  ArchiveStore;
 
 export class TicketRoutingService {
   constructor(private readonly dependencies: TicketRoutingServiceDependencies) {}

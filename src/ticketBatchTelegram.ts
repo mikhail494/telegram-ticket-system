@@ -25,9 +25,39 @@ import { TELEGRAM_CALLBACK_DATA_MAX_BYTES } from "./telegram.js";
 import { TicketBatchExportInProgressError, type TicketBatchRuntime } from "./ticketBatchRuntime.js";
 import type { StaffChatOperationOptions } from "./staffChatDelivery.js";
 
+type TicketBatchTelegramStore = Pick<
+  SupportDatabase,
+  | "cancelTicketBatchAnswerPackage"
+  | "claimTicketBatchAnswerPackage"
+  | "clearTicketBatchAnswerPackagePreview"
+  | "createTicketBatchAnswerPackage"
+  | "createTicketBatchExport"
+  | "getInstallationOperationalCounts"
+  | "getLatestTicketBatchDeliveryFailure"
+  | "getLatestTicketBatchStaffSyncContext"
+  | "getSetting"
+  | "getTicketBatchAnswerPackage"
+  | "getTicketBatchAnswerPackageByHash"
+  | "getTicketBatchAnswerPackageByPreviewToken"
+  | "getTicketBatchExport"
+  | "getTicketWithUser"
+  | "listActiveTicketsForStaffChat"
+  | "listMessagesChronological"
+  | "listTicketBatchAnswerItems"
+  | "listTicketBatchExportItems"
+  | "listTicketFollowUpHistory"
+  | "markTicketBatchExportDelivered"
+  | "markTicketBatchExportFailed"
+  | "markTicketBatchExportUnknownDelivery"
+  | "queueTicketBatchFinalSummary"
+  | "setSetting"
+  | "setTicketBatchAnswerPackagePreview"
+  | "updateTicketBatchAnswerPackagePreviewPage"
+>;
+
 export interface TicketBatchTelegramDependencies {
   bot: Bot<Context>;
-  db: SupportDatabase;
+  db: TicketBatchTelegramStore;
   installation: InstallationService;
   ticketBatchRuntime: TicketBatchRuntime;
   fetchImpl: typeof fetch;
@@ -609,7 +639,7 @@ export function createTicketBatchTelegramSurface(dependencies: TicketBatchTelegr
   }
 
   function buildStoredTicketBatchPreviewPages(
-    packageRecord: ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>
+    packageRecord: ReturnType<TicketBatchTelegramStore["getTicketBatchAnswerPackage"]>
   ): string[] {
     if (!packageRecord) {
       throw new TicketBatchValidationError("Ticket answer package not found.");
@@ -638,7 +668,7 @@ export function createTicketBatchTelegramSurface(dependencies: TicketBatchTelegr
 
   function buildTicketBatchPreviewPagesForAnswerPackage(
     answerPackage: TicketAnswerPackage,
-    exportItems: ReturnType<SupportDatabase["listTicketBatchExportItems"]>
+    exportItems: ReturnType<TicketBatchTelegramStore["listTicketBatchExportItems"]>
   ): string[] {
     const preview = buildAnswerPackagePreview(answerPackage, exportItems, (ticketId) => {
       const ticket = db.getTicketWithUser(ticketId);
@@ -652,7 +682,7 @@ export function createTicketBatchTelegramSurface(dependencies: TicketBatchTelegr
   }
 
   async function cleanupTicketBatchPreview(
-    packageRecord: NonNullable<ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>>,
+    packageRecord: NonNullable<ReturnType<TicketBatchTelegramStore["getTicketBatchAnswerPackage"]>>,
     fallbackText: string
   ): Promise<boolean> {
     if (packageRecord.preview_chat_id === null || packageRecord.preview_message_id === null) {
@@ -683,7 +713,7 @@ export function createTicketBatchTelegramSurface(dependencies: TicketBatchTelegr
   }
 
   async function neutralizeTicketBatchPreview(
-    packageRecord: NonNullable<ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>>,
+    packageRecord: NonNullable<ReturnType<TicketBatchTelegramStore["getTicketBatchAnswerPackage"]>>,
     text: string
   ): Promise<void> {
     if (packageRecord.preview_chat_id === null || packageRecord.preview_message_id === null) return;

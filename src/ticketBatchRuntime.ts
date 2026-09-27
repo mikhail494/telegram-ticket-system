@@ -38,7 +38,39 @@ export class TicketBatchExportInProgressError extends Error {
   }
 }
 
-type TicketBatchItem = ReturnType<SupportDatabase["listTicketBatchAnswerItems"]>[number];
+type TicketBatchRuntimeStore = Pick<
+  SupportDatabase,
+  | "applyTicketBatchFollowUpIfCurrent"
+  | "claimTicketBatchAnswerItem"
+  | "finalizeTicketBatchAnswerPackage"
+  | "getNextTicketBatchStaffRetryAt"
+  | "getTicket"
+  | "getTicketBatchAnswerPackage"
+  | "getTicketWithUser"
+  | "listClosedTicketBatchPendingReplyEchoes"
+  | "listInvalidTicketBatchSuccessEchoes"
+  | "listMessagesChronological"
+  | "listPendingTicketBatchFailureEvents"
+  | "listPendingTicketBatchFinalSummaries"
+  | "listPendingTicketBatchReplyAndCloseContinuations"
+  | "listPendingTicketBatchSilentCloseContinuations"
+  | "listPendingTicketBatchTopicEchoes"
+  | "listTicketFollowUpHistory"
+  | "listTicketBatchAnswerItems"
+  | "listTicketBatchExportItems"
+  | "queueTicketBatchFinalSummary"
+  | "queueTicketBatchFinalSummaryRefresh"
+  | "recordTicketBatchDeliveryFailure"
+  | "recordTicketBatchFailureEvent"
+  | "recordTicketBatchFinalSummaryAttempt"
+  | "recordTicketBatchFinalSummaryFailure"
+  | "recordTicketBatchFinalSummarySent"
+  | "recordTicketBatchTopicEcho"
+  | "setTicketBatchPostDeliveryRetry"
+  | "updateTicketBatchAnswerItem"
+>;
+
+type TicketBatchItem = ReturnType<TicketBatchRuntimeStore["listTicketBatchAnswerItems"]>[number];
 
 interface TicketBatchCloseOptions {
   notifyUser: boolean;
@@ -48,7 +80,7 @@ interface TicketBatchCloseOptions {
 }
 
 export interface TicketBatchRuntimeDependencies {
-  db: SupportDatabase;
+  db: TicketBatchRuntimeStore;
   api: Context["api"];
   installation: InstallationService;
   backgroundTasks: BackgroundTaskTracker;
@@ -80,7 +112,7 @@ export class TicketBatchRuntime {
 
   constructor(private readonly dependencies: TicketBatchRuntimeDependencies) {}
 
-  private get db(): SupportDatabase {
+  private get db(): TicketBatchRuntimeStore {
     return this.dependencies.db;
   }
 

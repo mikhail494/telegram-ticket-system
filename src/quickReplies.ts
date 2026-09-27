@@ -5,6 +5,17 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { SupportDatabase } from "./db.js";
 
+type QuickRepliesStore = Pick<
+  SupportDatabase,
+  | "createQuickReplyTemplate"
+  | "deleteQuickReplyTemplate"
+  | "getQuickReplyTemplate"
+  | "listQuickReplyCategories"
+  | "listQuickReplyTemplates"
+  | "seedQuickReplies"
+  | "updateQuickReplyTemplate"
+>;
+
 const SLUG_PATTERN = /^[a-z0-9_]+$/;
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 
@@ -141,7 +152,7 @@ export function loadQuickRepliesRegistry(configPath: string = QUICK_REPLIES_CONF
 }
 
 export function createPersistentQuickRepliesRegistry(
-  db: SupportDatabase,
+  db: QuickRepliesStore,
   defaults: QuickRepliesRegistry
 ): QuickRepliesRegistry & QuickRepliesManager {
   const manager = createQuickRepliesManager(db, defaults);
@@ -157,7 +168,7 @@ export function createPersistentQuickRepliesRegistry(
   });
 }
 
-export function createQuickRepliesManager(db: SupportDatabase, defaults: QuickRepliesRegistry): QuickRepliesManager {
+export function createQuickRepliesManager(db: QuickRepliesStore, defaults: QuickRepliesRegistry): QuickRepliesManager {
   db.seedQuickReplies(defaults.listCategories());
 
   const listCategories = (): readonly QuickReplyCategory[] =>

@@ -1,6 +1,14 @@
 import { GrammyError, type Context } from "grammy";
 import type { SupportDatabase } from "./db.js";
 
+type EntityNotificationStore = Pick<
+  SupportDatabase,
+  | "claimEntityNotificationPublication"
+  | "recordEntityNotificationFailure"
+  | "recordEntityNotificationPublished"
+  | "recordEntityNotificationUnknown"
+>;
+
 const MAX_PROVIDER_LENGTH = 64;
 const MAX_ENTITY_TYPE_LENGTH = 64;
 const MAX_ENTITY_ID_LENGTH = 256;
@@ -174,7 +182,7 @@ export function renderEntityNotification(event: ValidatedEntityNotificationEvent
 
 export async function processEntityNotificationEvent(
   api: Context["api"],
-  db: SupportDatabase,
+  db: EntityNotificationStore,
   input: unknown,
   settings: EntityNotificationSettings
 ): Promise<EntityNotificationResult> {
