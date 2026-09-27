@@ -456,7 +456,7 @@ async function handlePublicLanguageModeration(
   cleanupScheduler: ModerationCleanupScheduler,
   pendingWarnings: PendingWarningScheduler
 ): Promise<void> {
-  if (!ctx.chat || !ctx.from || !ctx.message || ctx.from.is_bot) return;
+  if (!ctx.chat || !ctx.from || !ctx.message || !isOrdinaryUserModerationTarget(ctx.message, ctx.from)) return;
   const moderation = moderationConfigForChat(db, ctx.chat.id);
   if (
     !moderation.enabled ||

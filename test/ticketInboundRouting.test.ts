@@ -58,6 +58,61 @@ function barrier(): { promise: Promise<void>; resolve: () => void } {
 }
 
 describe("ticket inbound routing durability", () => {
+  it("ignores private messages without a Telegram user actor", async () => {
+    const harness = createBotHarness();
+    try {
+      const update = {
+        update_id: 919,
+        message: {
+          message_id: 919,
+          date: 1,
+          chat: { id: TEST_USER_ID, type: "private" as const, first_name: "Test Customer" },
+          text: "Please help without an actor",
+        },
+      } as Update;
+
+      await harness.bot.handleUpdate(update);
+
+      assert.equal(harness.db.getUser(TEST_USER_ID), undefined);
+      assert.equal(harness.db.findActiveTicketForUser(TEST_USER_ID, TEST_STAFF_CHAT_ID), undefined);
+      assert.equal(harness.db.getTicketInboundRoutingOperation(TEST_USER_ID, 919), undefined);
+      assert.equal(staffTopicMessages(harness).length, 0);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("does not route senderless or sender_chat staff-topic messages to a customer", async () => {
+    const harness = createBotHarness();
+    try {
+      const ticket = harness.seedTicket({ messageThreadId: 5000 });
+      const baseMessage = {
+        message_id: 920,
+        date: 1,
+        chat: { id: TEST_STAFF_CHAT_ID, type: "supergroup" as const, title: "Test Staff Chat" },
+        message_thread_id: ticket.message_thread_id!,
+        text: "Anonymous staff reply",
+      };
+      await harness.bot.handleUpdate({ update_id: 920, message: baseMessage } as Update);
+      await harness.bot.handleUpdate({
+        update_id: 921,
+        message: {
+          ...baseMessage,
+          message_id: 921,
+          from: { id: 42, is_bot: false, first_name: "Test Staff" },
+          sender_chat: { id: TEST_STAFF_CHAT_ID, type: "supergroup", title: "Test Staff Chat" },
+        },
+      } as Update);
+
+      assert.equal(harness.countApiCalls("sendMessage"), 0);
+      assert.equal(harness.countApiCalls("sendPhoto"), 0);
+      assert.equal(harness.countApiCalls("copyMessage"), 0);
+      assert.equal(harness.db.listMessagesChronological(ticket.id).length, 0);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
   it("archives only after the last concurrent inbound attempt reaches terminal truth", async () => {
     const harness = createBotHarness();
     const bothEntered = barrier();

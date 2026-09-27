@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { strFromU8, unzipSync } from "fflate";
 import {
   TicketBatchValidationError,
+  TicketBatchExportSizeLimitError,
   buildAnswerPackagePreview,
   buildAnswerPackageInstructions,
   getAnswerPackageJsonSchema,
@@ -14,6 +18,17 @@ import {
   getTicketSnapshotToken,
   parseAndValidateAnswerPackage,
 } from "../src/ticketBatch.js";
+import {
+  ANSWER_PACKAGE_MAX_BYTES,
+  HOSTED_TELEGRAM_DOWNLOAD_MAX_BYTES,
+  TICKET_BATCH_EXPORT_MAX_BYTES,
+} from "../src/ticketBatchResourceLimits.js";
+import { streamTicketBatchAttachment } from "../src/ticketBatchTransfer.js";
+import {
+  readResponseBytesBounded,
+  ResponseBodyLimitExceededError,
+  streamResponseToFileBounded,
+} from "../src/boundedTelegramResponse.js";
 import { TEST_STAFF_CHAT_ID, createBotHarness, type BotHarness } from "./helpers/botHarness.js";
 
 const harnesses: BotHarness[] = [];
@@ -29,6 +44,31 @@ function createHarness(): BotHarness {
   const harness = createBotHarness();
   harnesses.push(harness);
   return harness;
+}
+
+async function writeStagedAttachment(
+  destinationPath: string,
+  bytes: Uint8Array,
+  metadata: { mimeType?: string; telegramFilePath?: string } = {}
+) {
+  await writeFile(destinationPath, bytes, { mode: 0o600 });
+  return {
+    byteLength: bytes.byteLength,
+    sha256: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+    ...metadata,
+  };
+}
+
+function responseWithChunks(chunks: Uint8Array[], headers?: HeadersInit): Response {
+  let index = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const chunk = chunks[index++];
+      if (chunk) controller.enqueue(chunk);
+      else controller.close();
+    },
+  });
+  return new Response(body, { headers });
 }
 
 describe("ticket batch export contract", () => {
@@ -290,10 +330,11 @@ describe("ticket batch export contract", () => {
       tickets: [{ ticket: hydratedTicket, messages: harness.db.listMessagesChronological(ticket.id) }],
     });
 
-    const zip = await createTicketBatchZip(snapshot, async (source) => ({
-      bytes: contents.get(source.fileId ?? "") ?? new Uint8Array(),
-      telegramFilePath: `files/${source.mediaType}`,
-    }));
+    const zip = await createTicketBatchZip(snapshot, async (source, destinationPath) =>
+      writeStagedAttachment(destinationPath, contents.get(source.fileId ?? "") ?? new Uint8Array(), {
+        telegramFilePath: `files/${source.mediaType}`,
+      })
+    );
     try {
       const entries = unzipSync(await readFile(zip.filePath));
       const manifest = JSON.parse(strFromU8(entries["manifest.json"]!));
@@ -366,14 +407,16 @@ describe("ticket batch export contract", () => {
       ],
     });
 
-    const zip = await createTicketBatchZip(snapshot, async (source) =>
+    const zip = await createTicketBatchZip(snapshot, async (source, destinationPath) =>
       source.fileId === "large"
         ? {
             unavailable: true,
             failureCategory: "TELEGRAM_FILE_TOO_LARGE",
             failureReason: "Attachment exceeds the hosted Telegram Bot API download limit.",
           }
-        : { bytes: new Uint8Array([1, 2, 3]), telegramFilePath: "files/small.pdf" }
+        : writeStagedAttachment(destinationPath, new Uint8Array([1, 2, 3]), {
+            telegramFilePath: "files/small.pdf",
+          })
     );
     try {
       const entries = unzipSync(await readFile(zip.filePath));
@@ -451,14 +494,16 @@ describe("ticket batch export contract", () => {
     const failureReason =
       "Telegram could not retrieve this historical attachment with the current bot account. The stored file_id may belong to a previous bot identity or the file may no longer be available from Telegram.";
 
-    const zip = await createTicketBatchZip(snapshot, async (source) =>
+    const zip = await createTicketBatchZip(snapshot, async (source, destinationPath) =>
       source.fileId === "historical"
         ? {
             unavailable: true,
             failureCategory: "TELEGRAM_FILE_UNAVAILABLE",
             failureReason,
           }
-        : { bytes: new Uint8Array([1, 2, 3]), telegramFilePath: "files/available.pdf" }
+        : writeStagedAttachment(destinationPath, new Uint8Array([1, 2, 3]), {
+            telegramFilePath: "files/available.pdf",
+          })
     );
     try {
       const entries = unzipSync(await readFile(zip.filePath));
@@ -534,11 +579,282 @@ describe("ticket batch export contract", () => {
     });
 
     await assert.rejects(() =>
-      createTicketBatchZip(snapshot, async () => ({
-        bytes: new Uint8Array(),
-        telegramFilePath: "files/empty.pdf",
-      }))
+      createTicketBatchZip(snapshot, async (_source, destinationPath) =>
+        writeStagedAttachment(destinationPath, new Uint8Array(), { telegramFilePath: "files/empty.pdf" })
+      )
     );
+  });
+
+  it("keeps the hosted Telegram resource ceilings explicit", () => {
+    assert.equal(ANSWER_PACKAGE_MAX_BYTES, 5 * 1024 * 1024);
+    assert.equal(HOSTED_TELEGRAM_DOWNLOAD_MAX_BYTES, 20 * 1024 * 1024);
+    assert.equal(TICKET_BATCH_EXPORT_MAX_BYTES, 50 * 1024 * 1024);
+  });
+
+  it("bounds answer-package reads by actual streamed bytes and cancels overflow", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    await assert.rejects(readResponseBytesBounded(new Response(body), 6), ResponseBodyLimitExceededError);
+    assert.equal(cancelled, true);
+  });
+
+  it("rejects a dishonest smaller Content-Length and accepts an exact bounded response", async () => {
+    await assert.rejects(
+      readResponseBytesBounded(
+        responseWithChunks([new Uint8Array([1, 2, 3, 4]), new Uint8Array([5, 6])], {
+          "content-length": "1",
+        }),
+        5
+      ),
+      ResponseBodyLimitExceededError
+    );
+    assert.deepEqual(
+      await readResponseBytesBounded(responseWithChunks([new Uint8Array([1, 2]), new Uint8Array([3, 4])]), 4),
+      new Uint8Array([1, 2, 3, 4])
+    );
+  });
+
+  it("rejects an honest oversized Content-Length before reading response bytes", async () => {
+    let cancelled = false;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      { headers: { "content-length": "9" } }
+    );
+    await assert.rejects(readResponseBytesBounded(response, 8), ResponseBodyLimitExceededError);
+    assert.equal(cancelled, true);
+  });
+
+  it("streams attachment bytes to disk with incremental size and SHA-256 metadata", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "telegram-transfer-test-"));
+    const filePath = path.join(directory, "attachment.bin");
+    const bytes = new Uint8Array([2, 4, 6, 8, 10]);
+    try {
+      const result = await streamResponseToFileBounded(
+        responseWithChunks([bytes.slice(0, 2), bytes.slice(2)]),
+        filePath,
+        bytes.byteLength
+      );
+      assert.deepEqual(new Uint8Array(await readFile(filePath)), bytes);
+      assert.equal(result.byteLength, bytes.byteLength);
+      assert.equal(result.sha256, `sha256:${createHash("sha256").update(bytes).digest("hex")}`);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects hosted attachment metadata and actual bytes without leaving a partial file", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "telegram-transfer-test-"));
+    const filePath = path.join(directory, "attachment.bin");
+    try {
+      const declaredTooLarge = await streamTicketBatchAttachment(
+        responseWithChunks([], { "content-length": "11" }),
+        filePath,
+        11,
+        { maxAttachmentBytes: 10, remainingExportBytes: 20 }
+      );
+      assert.deepEqual(declaredTooLarge, {
+        unavailable: true,
+        failureCategory: "TELEGRAM_FILE_TOO_LARGE",
+        failureReason: "Attachment exceeds the hosted Telegram Bot API download limit.",
+      });
+      assert.equal(
+        await access(filePath).then(
+          () => true,
+          () => false
+        ),
+        false
+      );
+
+      const actualTooLarge = await streamTicketBatchAttachment(
+        responseWithChunks([new Uint8Array([1, 2, 3, 4, 5, 6])]),
+        filePath,
+        undefined,
+        { maxAttachmentBytes: 5, remainingExportBytes: 10 }
+      );
+      assert.equal("unavailable" in actualTooLarge && actualTooLarge.failureCategory, "TELEGRAM_FILE_TOO_LARGE");
+      assert.equal(
+        await access(filePath).then(
+          () => true,
+          () => false
+        ),
+        false
+      );
+
+      const actualPerFileOverflowWithSmallerAggregateBudget = await streamTicketBatchAttachment(
+        responseWithChunks([new Uint8Array(11)], { "content-length": "8" }),
+        filePath,
+        undefined,
+        { maxAttachmentBytes: 10, remainingExportBytes: 5 }
+      );
+      assert.equal(
+        "unavailable" in actualPerFileOverflowWithSmallerAggregateBudget &&
+          actualPerFileOverflowWithSmallerAggregateBudget.failureCategory,
+        "TELEGRAM_FILE_TOO_LARGE"
+      );
+      assert.equal(
+        await access(filePath).then(
+          () => true,
+          () => false
+        ),
+        false
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails an aggregate attachment overrun and removes its partial staged file", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "telegram-transfer-test-"));
+    const filePath = path.join(directory, "attachment.bin");
+    try {
+      await assert.rejects(
+        streamTicketBatchAttachment(responseWithChunks([new Uint8Array([1, 2, 3])]), filePath, undefined, {
+          maxAttachmentBytes: 10,
+          remainingExportBytes: 2,
+        }),
+        TicketBatchExportSizeLimitError
+      );
+      assert.equal(
+        await access(filePath).then(
+          () => true,
+          () => false
+        ),
+        false
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("removes partial attachment files after an unexpected stream failure", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "telegram-transfer-test-"));
+    const filePath = path.join(directory, "attachment.bin");
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2]));
+        controller.error(new Error("stream interrupted"));
+      },
+    });
+    try {
+      await assert.rejects(streamResponseToFileBounded(new Response(body), filePath, 10), /stream interrupted/);
+      assert.equal(
+        await access(filePath).then(
+          () => true,
+          () => false
+        ),
+        false
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans temporary export directories after aggregate, ZIP-size, and validation failures", async () => {
+    const harness = createHarness();
+    const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "ticket-batch-cleanup-test-"));
+    const ticket = harness.seedTicket();
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "USER_TO_STAFF",
+      sourceChatId: ticket.user_telegram_id,
+      sourceMessageId: 100,
+      mediaType: "document",
+      fileId: "first",
+    });
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "USER_TO_STAFF",
+      sourceChatId: ticket.user_telegram_id,
+      sourceMessageId: 101,
+      mediaType: "document",
+      fileId: "second",
+    });
+    const snapshot = buildTicketBatchExportSnapshot({
+      exportId: "export_cleanup_limits",
+      createdAt: "2026-08-14T00:00:00.000Z",
+      staffChatId: TEST_STAFF_CHAT_ID,
+      tickets: [
+        { ticket: harness.db.getTicketWithUser(ticket.id)!, messages: harness.db.listMessagesChronological(ticket.id) },
+      ],
+    });
+    try {
+      const noAttachmentSnapshot = buildTicketBatchExportSnapshot({
+        exportId: "export_zip_limit",
+        createdAt: "2026-08-14T00:00:00.000Z",
+        staffChatId: TEST_STAFF_CHAT_ID,
+        tickets: [{ ticket: harness.db.getTicketWithUser(ticket.id)!, messages: [] }],
+      });
+      const assertTemporaryRootEmpty = async () => assert.deepEqual(await readdir(temporaryRoot), []);
+
+      await assert.rejects(
+        createTicketBatchZip(
+          snapshot,
+          async (_source, destinationPath, limits) => {
+            const bytes = new Uint8Array([1, 2, 3]);
+            if (bytes.byteLength > limits.remainingExportBytes) throw new TicketBatchExportSizeLimitError();
+            return writeStagedAttachment(destinationPath, bytes);
+          },
+          { maxExportBytes: 5, temporaryRoot }
+        ),
+        TicketBatchExportSizeLimitError
+      );
+      await assertTemporaryRootEmpty();
+
+      await assert.rejects(
+        createTicketBatchZip(noAttachmentSnapshot, undefined, { maxZipBytes: 1, temporaryRoot }),
+        TicketBatchExportSizeLimitError
+      );
+      await assertTemporaryRootEmpty();
+
+      await assert.rejects(
+        createTicketBatchZip(noAttachmentSnapshot, undefined, { maxExportBytes: 1, temporaryRoot }),
+        TicketBatchExportSizeLimitError
+      );
+      await assertTemporaryRootEmpty();
+
+      await assert.rejects(
+        createTicketBatchZip(
+          snapshot,
+          async (_source, destinationPath) => {
+            const staged = await writeStagedAttachment(destinationPath, new Uint8Array([7, 8]));
+            return { ...staged, sha256: `sha256:${"0".repeat(64)}` };
+          },
+          { temporaryRoot }
+        ),
+        TicketBatchValidationError
+      );
+      await assertTemporaryRootEmpty();
+
+      const interruptedBody = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2]));
+          controller.error(new Error("interrupted attachment"));
+        },
+      });
+      await assert.rejects(
+        createTicketBatchZip(
+          snapshot,
+          async (_source, destinationPath) =>
+            streamResponseToFileBounded(new Response(interruptedBody), destinationPath, 10),
+          { temporaryRoot }
+        ),
+        /interrupted attachment/
+      );
+      await assertTemporaryRootEmpty();
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
   });
 
   it("instructs assistants to request only material unavailable-attachment review", () => {

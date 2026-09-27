@@ -52,6 +52,7 @@ import {
 import { PrivateControlPlane } from "./privateControlPlane.js";
 import type { RuntimeHealthRegistry, UpdateErrorCategory } from "./runtimeObservability.js";
 import { TicketBatchRuntime, TicketBatchStaffOperationError } from "./ticketBatchRuntime.js";
+import type { TicketBatchResourceLimits } from "./ticketBatchResourceLimits.js";
 import { TicketRoutingService } from "./ticketRouting.js";
 
 export { PendingWarningScheduler, processPendingWarning };
@@ -149,6 +150,7 @@ interface BanCommand {
 
 interface BotRuntimeDependencies {
   fetch?: typeof fetch;
+  ticketBatchResourceLimits?: Partial<TicketBatchResourceLimits>;
   now?: () => Date;
   scheduleModerationCleanup?: ModerationCleanupScheduler;
   entityNotificationProviders?: EntityNotificationProviderRegistry;
@@ -187,7 +189,10 @@ export function createBot(
     }
   });
   bot.use(async (ctx, next) => {
+    const messageUpdate = "message" in ctx.update ? ctx.update.message : undefined;
+    const senderChatMessage = Boolean(messageUpdate && "sender_chat" in messageUpdate && messageUpdate.sender_chat);
     if (
+      !senderChatMessage &&
       ctx.from &&
       !ctx.from.is_bot &&
       installation.getState().setupState === "READY" &&
@@ -219,10 +224,14 @@ export function createBot(
   const isConfiguredStaffWorkspace = (ctx: Context): boolean => ctx.chat?.id === installation.getStaffChatId();
   const isStaffChat = (ctx: Context): boolean => {
     const staffChatId = installation.getStaffChatId();
+    const messageUpdate = "message" in ctx.update ? ctx.update.message : undefined;
+    const senderChatMessage = Boolean(messageUpdate && "sender_chat" in messageUpdate && messageUpdate.sender_chat);
     return Boolean(
+      !senderChatMessage &&
       staffChatId !== null &&
       ctx.chat?.id === staffChatId &&
       ctx.from &&
+      !ctx.from.is_bot &&
       installation.isStaffAuthorized(ctx.from.id, staffChatId)
     );
   };
@@ -291,7 +300,7 @@ export function createBot(
   };
 
   const requirePrivatePermission = async (ctx: Context, permission: Permission): Promise<boolean> => {
-    if (!isPrivateChat(ctx) || !ctx.from || !installation.can(ctx.from.id, permission)) {
+    if (!isPrivateChat(ctx) || !ctx.from || ctx.from.is_bot || !installation.can(ctx.from.id, permission)) {
       if (isPrivateChat(ctx)) await ctx.reply("Your application role does not allow this action.");
       return false;
     }
@@ -360,6 +369,7 @@ export function createBot(
     installation,
     ticketBatchRuntime,
     fetchImpl,
+    resourceLimits: runtime.ticketBatchResourceLimits,
     runStaffChatOperation,
     requireStaffChatId,
     isStaffChat,
@@ -1293,7 +1303,8 @@ export function createBot(
 
   bot.on("message", async (ctx) => {
     if (isConfiguredStaffWorkspace(ctx)) {
-      enrollBaselineStaffMember(ctx.from);
+      const senderChatMessage = "sender_chat" in ctx.message && Boolean(ctx.message.sender_chat);
+      if (!senderChatMessage) enrollBaselineStaffMember(ctx.from);
       if (!isStaffChat(ctx)) return;
       if (ticketBatchSurface.isTicketAnswerPackageDocument(ctx.message)) {
         if (typeof ctx.message.message_thread_id === "number") {
@@ -1885,7 +1896,7 @@ function isStaffChat(ctx: Context, installation: InstallationService): boolean {
   if (!isConfiguredStaffWorkspace(ctx, installation)) return false;
   const staffChatId = installation.getStaffChatId();
   if (staffChatId === null) return false;
-  if (!ctx.from) return false;
+  if (!ctx.from || ctx.from.is_bot) return false;
   return installation.isStaffAuthorized(ctx.from.id, staffChatId);
 }
 
@@ -1895,7 +1906,7 @@ function isConfiguredStaffWorkspace(ctx: Context, installation: InstallationServ
 }
 
 function hasApplicationPermission(ctx: Context, installation: InstallationService, permission: Permission): boolean {
-  if (!ctx.from) return false;
+  if (!ctx.from || ctx.from.is_bot) return false;
   return (
     installation.getState().authorizationMode === "LEGACY_TRUSTED_GROUP" || installation.can(ctx.from.id, permission)
   );

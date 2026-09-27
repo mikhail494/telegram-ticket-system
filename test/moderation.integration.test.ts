@@ -195,6 +195,54 @@ function administrator(canDelete = true, canRestrict = true): ApiMockSuccess {
 }
 
 describe("public language moderation sanctions", () => {
+  it("ignores senderless, sender_chat, and service-style public messages", async () => {
+    const harness = createHarness();
+    enable(harness);
+    manage(harness, PUBLIC_CHAT_ID);
+    try {
+      await harness.bot.handleUpdate({
+        update_id: 8110,
+        message: {
+          message_id: 8110,
+          date: Math.floor(FIXED_NOW.getTime() / 1000),
+          chat: { id: PUBLIC_CHAT_ID, type: "supergroup", title: "Public Community" },
+          text: CYRILLIC,
+        },
+      } as Update);
+      await harness.bot.handleUpdate({
+        update_id: 8111,
+        message: {
+          message_id: 8111,
+          date: Math.floor(FIXED_NOW.getTime() / 1000),
+          from: { id: 811, is_bot: false, first_name: "Anonymous User" },
+          sender_chat: { id: PUBLIC_CHAT_ID, type: "supergroup", title: "Public Community" },
+          chat: { id: PUBLIC_CHAT_ID, type: "supergroup", title: "Public Community" },
+          text: CYRILLIC,
+        },
+      } as Update);
+      await harness.bot.handleUpdate({
+        update_id: 8112,
+        message: {
+          message_id: 8112,
+          date: Math.floor(FIXED_NOW.getTime() / 1000),
+          from: { id: 812, is_bot: false, first_name: "Service Actor" },
+          chat: { id: PUBLIC_CHAT_ID, type: "supergroup", title: "Public Community" },
+          new_chat_members: [{ id: 813, is_bot: false, first_name: "Joined User" }],
+        },
+      } as Update);
+
+      assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 811), undefined);
+      assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 812), undefined);
+      assert.equal(harness.db.getLanguageModerationUserState(PUBLIC_CHAT_ID, 813), undefined);
+      assert.equal(harness.db.getLanguageModerationMessageAuthor(PUBLIC_CHAT_ID, 8110), undefined);
+      assert.equal(harness.db.getLanguageModerationMessageAuthor(PUBLIC_CHAT_ID, 8111), undefined);
+      assert.equal(harness.db.getLanguageModerationMessageAuthor(PUBLIC_CHAT_ID, 8112), undefined);
+      assert.equal(harness.db.listLanguageModerationViolations(PUBLIC_CHAT_ID, "1970-01-01T00:00:00.000Z").length, 0);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
   it("applies a 24-hour mute before scheduling the exact cleanup job", async () => {
     const harness = createHarness();
     enable(harness);
