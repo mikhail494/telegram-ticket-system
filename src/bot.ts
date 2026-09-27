@@ -1,7 +1,6 @@
-import { Bot, GrammyError, HttpError, InlineKeyboard, InputFile, Keyboard } from "grammy";
-import { randomUUID } from "node:crypto";
+import { Bot, GrammyError, HttpError, InlineKeyboard, Keyboard } from "grammy";
 import type { CommandContext, Context } from "grammy";
-import type { Message, ReactionType, ReactionTypeEmoji, User } from "grammy/types";
+import type { User } from "grammy/types";
 import packageMetadata from "../package.json" with { type: "json" };
 import {
   getSupportLogsTopicInfo,
@@ -12,13 +11,7 @@ import {
   type ArchiveActor,
 } from "./archive.js";
 import { config, hostConfig } from "./config.js";
-import {
-  SupportDatabase,
-  type TicketStatus,
-  type TicketWithUser,
-  type LanguageModerationUserState,
-  type LanguageModerationViolation,
-} from "./db.js";
+import { SupportDatabase, type TicketStatus } from "./db.js";
 import {
   CLOSED_TEXT,
   START_TEXT,
@@ -30,31 +23,17 @@ import {
 } from "./format.js";
 import { logger } from "./logger.js";
 import { createQuickRepliesManager, type QuickRepliesRegistry } from "./quickReplies.js";
+import { createTicketBatchTelegramSurface } from "./ticketBatchTelegram.js";
 import {
-  TicketBatchValidationError,
-  buildAnswerPackagePreview,
-  buildTicketBatchPreviewPages,
-  buildTicketBatchExportSnapshot,
-  cleanupTicketBatchZip,
-  createTicketBatchZip,
-  getAnswerPackageHash,
-  getTicketSnapshotToken,
-  parseAndValidateAnswerPackage,
-  type TicketAnswerPackage,
-  type TicketBatchAttachmentDownloadResult,
-} from "./ticketBatch.js";
-import { displayTelegramUser, getMessageContent, isCommandText, usernameOf } from "./telegram.js";
-import {
-  ADAPTIVE_LEARNING_HORIZON_MS,
-  ADAPTIVE_MESSAGE_FEATURE_TTL_MS,
-  classifyEnglishOnlyMessage,
-  extractAdaptiveModerationFeatures,
-  parseModerationConfig,
-  createModerationCleanupScheduler,
-  type ModerationCleanupScheduler,
-} from "./languageModeration.js";
+  createPublicModerationTelegramSurface,
+  PendingWarningScheduler,
+  processPendingWarning,
+} from "./publicModerationTelegram.js";
+import { displayTelegramUser, isCommandText, usernameOf } from "./telegram.js";
+import { createQuickRepliesTelegramSurface, quickRepliesOpenCallbackData } from "./quickRepliesTelegram.js";
+import { createModerationCleanupScheduler, type ModerationCleanupScheduler } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
-import { normalizeTelegramDeliveryError, runReplaySafeTelegramEdit } from "./deliveryDiagnostics.js";
+import { normalizeTelegramDeliveryError } from "./deliveryDiagnostics.js";
 import {
   StaffChatDeliveryCoordinator,
   type StaffChatDeliveryOptions,
@@ -70,15 +49,12 @@ import {
   validateStaffWorkspace,
   type WorkspaceValidationResult,
 } from "./workspaceValidation.js";
-import { validatePublicModerationChat } from "./publicChatModeration.js";
 import { PrivateControlPlane } from "./privateControlPlane.js";
 import type { RuntimeHealthRegistry, UpdateErrorCategory } from "./runtimeObservability.js";
-import {
-  TicketBatchExportInProgressError,
-  TicketBatchRuntime,
-  TicketBatchStaffOperationError,
-} from "./ticketBatchRuntime.js";
-import { InteractiveReplyNotResentError, TicketRoutingService } from "./ticketRouting.js";
+import { TicketBatchRuntime, TicketBatchStaffOperationError } from "./ticketBatchRuntime.js";
+import { TicketRoutingService } from "./ticketRouting.js";
+
+export { PendingWarningScheduler, processPendingWarning };
 
 const STAFF_ONLY_TEXT = "This command is only available for staff.";
 const BANNED_TEXT = "You are currently restricted from opening support tickets.";
@@ -86,39 +62,12 @@ const SUPPORT_INGRESS_THROTTLED_TEXT =
   "You're sending messages too quickly.\n\nSome recent messages were not added to your ticket. Please wait a few seconds, then resend anything that did not go through.";
 const DEFAULT_BAN_REASON = "No reason provided.";
 const STAFF_HELP_SENT_SETTING_PREFIX = "staff_help_sent";
-const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
-const MODERATION_SETTING_PREFIX = "language_moderation";
 const ENTITY_NOTIFICATION_SETTING_PREFIX = "entity_notifications";
 const SUPPORT_EXPECTED_RESPONSE_TIME_SETTING_KEY = "support_expected_response_time";
 const SUPPORT_TICKET_RECEIVED_TEMPLATE_SETTING_KEY = "support_ticket_received_template";
 const STAFF_TEST_TICKET_MODE_SETTING_PREFIX = "staff_test_ticket_mode:";
 const STAFF_TEST_TICKET_ID_SETTING_PREFIX = "staff_test_ticket_id:";
 export const TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query", "chat_member", "message_reaction"] as const;
-const ORDINARY_MODERATION_MESSAGE_FIELDS = [
-  "text",
-  "rich_message",
-  "animation",
-  "audio",
-  "document",
-  "live_photo",
-  "paid_media",
-  "photo",
-  "sticker",
-  "story",
-  "video",
-  "video_note",
-  "voice",
-  "contact",
-  "dice",
-  "game",
-  "poll",
-  "venue",
-  "location",
-  "checklist",
-] as const satisfies readonly (keyof Message)[];
-type ModerationReactionEmoji = "\u{1F440}" | "\u{1F621}";
-const MODERATION_STRIKE_REACTION: ModerationReactionEmoji = "\u{1F440}";
-const MODERATION_SANCTION_REACTION: ModerationReactionEmoji = "\u{1F621}";
 const USER_HELP_TEXT = [
   "Support help",
   "",
@@ -196,13 +145,6 @@ type BotApi = Context["api"];
 interface BanCommand {
   userId: number;
   reason: string;
-}
-
-interface QuickRepliesCallbackTarget {
-  ticket: TicketWithUser;
-  messageChatId: number;
-  messageId: number;
-  messageThreadId: number;
 }
 
 interface BotRuntimeDependencies {
@@ -360,40 +302,18 @@ export function createBot(
     return true;
   };
 
-  privateControlPlane.configureOperatorUi({
+  const moderationSurface = createPublicModerationTelegramSurface({
+    bot,
     db,
-    quickReplies: quickRepliesManager,
-    canConfigure: (ctx) => requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION"),
-    canUsePermission: requirePrivatePermission,
-    hasPrivateWorkspaceMembership: hasRequiredPrivateWorkspaceMembership,
-    getPendingBatchExport: getPendingPrivateBatchExport,
-    onStartTestTicket: async (ctx) => {
-      if (!ctx.from) return;
-      setStaffTestTicketId(ctx.from.id, undefined);
-      db.setSetting(`${STAFF_TEST_TICKET_MODE_SETTING_PREFIX}${ctx.from.id}`, "true");
-      await privateControlPlane.refreshScreen(
-        ctx,
-        "Test-ticket mode enabled for your next message. Send harmless test content now.",
-        new InlineKeyboard().text("Cancel", "dashboard:home")
-      );
-    },
-    onShowWorkspace: (ctx) => showStaffWorkspaceSettings(ctx),
-    onShowBatch: async (ctx) => {
-      if (!ctx.from) return;
-      const exportId = getPendingPrivateBatchExport(ctx.from.id);
-      if (exportId) await showPrivateBatchWaiting(ctx, exportId);
-      else await privateControlPlane.showDashboard(ctx);
-    },
-    onContinueReconciledArchive: (ticketId, staffChatId) =>
-      ticketRouting.finalizeReconciledArchive(ticketId, staffChatId),
-    onContinueReconciledBatch: (answerPackageId, staffChatId) =>
-      ticketBatchRuntime.recoverPendingStaffOperationsForWorkspace(answerPackageId, staffChatId),
-    onRefreshReconciledTicket: (ticketId, staffChatId) => ticketRouting.refreshTicket(ticketId, staffChatId),
-    onContinueReconciledInbound: (sourceChatId, sourceMessageId, staffChatId, operationIdentity) =>
-      ticketRouting.continueReconciledInbound(sourceChatId, sourceMessageId, staffChatId, operationIdentity),
-    packageVersion: packageMetadata.version,
-    botUsername: () => bot.botInfo?.username,
-    botId: () => bot.botInfo?.id,
+    installation,
+    now: moderationNow,
+    cleanupScheduler: moderationCleanupScheduler,
+    pendingWarnings,
+    requireStaffChatId,
+    isStaffChat,
+    isPrivateChat,
+    requirePermission,
+    staffOnlyText: STAFF_ONLY_TEXT,
   });
 
   async function runStaffChatOperation<T>(
@@ -434,284 +354,69 @@ export function createBot(
     refreshTicket: (ticketId, staffChatId) => ticketRouting.refreshTicket(ticketId, staffChatId),
   });
 
-  function quickRepliesCategoryKeyboard(ticketId: number): InlineKeyboard {
-    const keyboard = new InlineKeyboard();
-
-    for (const category of quickRepliesRegistry.listCategories()) {
-      keyboard.text(category.title, quickRepliesCategoryCallbackData(ticketId, category.id)).row();
-    }
-
-    return keyboard.text("Cancel", quickRepliesCancelCallbackData(ticketId));
-  }
-
-  function quickRepliesTemplateKeyboard(ticketId: number, categoryId: string, page: number): InlineKeyboard {
-    const templates = quickRepliesRegistry.listTemplates(categoryId);
-    const start = page * 6;
-    const pageTemplates = templates.slice(start, start + 6);
-    const keyboard = new InlineKeyboard();
-
-    for (const template of pageTemplates) {
-      keyboard.text(template.title, quickRepliesTemplateCallbackData(ticketId, template.id)).row();
-    }
-
-    if (page > 0) {
-      keyboard.text("Previous", quickRepliesPageCallbackData(ticketId, categoryId, page - 1));
-    }
-
-    if (start + pageTemplates.length < templates.length) {
-      keyboard.text("Next", quickRepliesPageCallbackData(ticketId, categoryId, page + 1));
-    }
-
-    if (page > 0 || start + pageTemplates.length < templates.length) {
-      keyboard.row();
-    }
-
-    return keyboard
-      .text("Back", quickRepliesBackCallbackData(ticketId))
-      .text("Cancel", quickRepliesCancelCallbackData(ticketId));
-  }
-
-  async function resolveQuickRepliesCallbackTarget(
-    ctx: Context,
-    rawTicketId: string | undefined
-  ): Promise<QuickRepliesCallbackTarget | null> {
-    if (!isStaffChat(ctx)) {
-      await ctx.answerCallbackQuery({
-        text: "Quick Replies are available to staff only.",
-        show_alert: true,
-      });
-      return null;
-    }
-    if (!hasApplicationPermission(ctx, "REPLY_TO_TICKETS")) {
-      await ctx.answerCallbackQuery({ text: "Your application role does not allow ticket replies.", show_alert: true });
-      return null;
-    }
-
-    const ticketId = parseUserId(rawTicketId ?? "");
-    if (!ticketId) {
-      await ctx.answerCallbackQuery({ text: "Invalid ticket." });
-      return null;
-    }
-
-    const ticket = db.getTicketWithUser(ticketId);
-    if (!ticket || ticket.staff_chat_id !== requireStaffChatId()) {
-      await ctx.answerCallbackQuery({ text: "Ticket not found in this staff chat." });
-      return null;
-    }
-
-    if (ticket.status === "CLOSED") {
-      await ctx.answerCallbackQuery({ text: "Ticket is already closed." });
-      return null;
-    }
-
-    const callbackMessage = ctx.callbackQuery?.message;
-    const ticketMessageThreadId = ticket.message_thread_id;
-    const callbackMessageThreadId =
-      callbackMessage && "message_thread_id" in callbackMessage ? callbackMessage.message_thread_id : undefined;
-
-    if (
-      !callbackMessage ||
-      typeof ticketMessageThreadId !== "number" ||
-      typeof callbackMessageThreadId !== "number" ||
-      callbackMessageThreadId !== ticketMessageThreadId
-    ) {
-      await ctx.answerCallbackQuery({ text: "Use Quick Replies inside this ticket topic." });
-      return null;
-    }
-
-    return {
-      ticket,
-      messageChatId: callbackMessage.chat.id,
-      messageId: callbackMessage.message_id,
-      messageThreadId: ticketMessageThreadId,
-    };
-  }
-
-  async function answerQuickRepliesCallbackOnce(
-    ctx: Context,
-    response: Parameters<Context["answerCallbackQuery"]>[0],
-    logMessage: string
-  ): Promise<void> {
-    try {
-      await ctx.answerCallbackQuery(response);
-    } catch (error) {
-      logger.warn({ err: error }, logMessage);
-    }
-  }
-
-  async function runQuickRepliesCallbackOperation(
-    ctx: Context,
-    successText: string,
-    operation: () => Promise<unknown>
-  ): Promise<void> {
-    try {
-      await operation();
-    } catch (error) {
-      await answerQuickRepliesCallbackOnce(
+  const ticketBatchSurface = createTicketBatchTelegramSurface({
+    bot,
+    db,
+    installation,
+    ticketBatchRuntime,
+    fetchImpl,
+    runStaffChatOperation,
+    requireStaffChatId,
+    isStaffChat,
+    isPrivateChat,
+    requirePermission,
+    requirePrivatePermission,
+    staffOnlyText: STAFF_ONLY_TEXT,
+    privateControlPlane,
+  });
+  privateControlPlane.configureOperatorUi({
+    db,
+    quickReplies: quickRepliesManager,
+    canConfigure: (ctx) => requirePrivatePermission(ctx, "CONFIGURE_INSTALLATION"),
+    canUsePermission: requirePrivatePermission,
+    hasPrivateWorkspaceMembership: hasRequiredPrivateWorkspaceMembership,
+    getPendingBatchExport: ticketBatchSurface.getPendingPrivateBatchExport,
+    onStartTestTicket: async (ctx) => {
+      if (!ctx.from) return;
+      setStaffTestTicketId(ctx.from.id, undefined);
+      db.setSetting(`${STAFF_TEST_TICKET_MODE_SETTING_PREFIX}${ctx.from.id}`, "true");
+      await privateControlPlane.refreshScreen(
         ctx,
-        {
-          text: "Could not update Quick Replies.",
-          show_alert: true,
-        },
-        "Could not answer failed Quick Replies callback"
+        "Test-ticket mode enabled for your next message. Send harmless test content now.",
+        new InlineKeyboard().text("Cancel", "dashboard:home")
       );
-      throw error;
-    }
+    },
+    onShowWorkspace: (ctx) => showStaffWorkspaceSettings(ctx),
+    onShowBatch: async (ctx) => {
+      if (!ctx.from) return;
+      const exportId = ticketBatchSurface.getPendingPrivateBatchExport(ctx.from.id);
+      if (exportId) await ticketBatchSurface.showPrivateBatchWaiting(ctx, exportId);
+      else await privateControlPlane.showDashboard(ctx);
+    },
+    onContinueReconciledArchive: (ticketId, staffChatId) =>
+      ticketRouting.finalizeReconciledArchive(ticketId, staffChatId),
+    onContinueReconciledBatch: (answerPackageId, staffChatId) =>
+      ticketBatchRuntime.recoverPendingStaffOperationsForWorkspace(answerPackageId, staffChatId),
+    onRefreshReconciledTicket: (ticketId, staffChatId) => ticketRouting.refreshTicket(ticketId, staffChatId),
+    onContinueReconciledInbound: (sourceChatId, sourceMessageId, staffChatId, operationIdentity) =>
+      ticketRouting.continueReconciledInbound(sourceChatId, sourceMessageId, staffChatId, operationIdentity),
+    packageVersion: packageMetadata.version,
+    botUsername: () => bot.botInfo?.username,
+    botId: () => bot.botInfo?.id,
+  });
 
-    await answerQuickRepliesCallbackOnce(
-      ctx,
-      { text: successText },
-      "Could not answer successful Quick Replies callback"
-    );
-  }
-
-  async function handleQuickRepliesCallback(ctx: Context, data: string): Promise<void> {
-    const callbackId = ctx.callbackQuery?.id;
-    if (!callbackId) return;
-    const [, action, rawTicketId, rawResourceId, rawPage] = data.split(":");
-    if (
-      action !== "open" &&
-      action !== "category" &&
-      action !== "page" &&
-      action !== "back" &&
-      action !== "cancel" &&
-      action !== "template"
-    ) {
-      await ctx.answerCallbackQuery({ text: "Quick Replies action is not available." });
-      return;
-    }
-
-    const target = await resolveQuickRepliesCallbackTarget(ctx, rawTicketId);
-    if (!target) {
-      return;
-    }
-
-    if (action === "open") {
-      await runQuickRepliesCallbackOperation(ctx, "Quick replies opened.", async () => {
-        await ctx.api.sendMessage(requireStaffChatId(), "Quick replies\nChoose a category:", {
-          message_thread_id: target.messageThreadId,
-          reply_markup: quickRepliesCategoryKeyboard(target.ticket.id),
-        });
-      });
-      return;
-    }
-
-    if (action === "cancel") {
-      await runQuickRepliesCallbackOperation(ctx, "Quick replies closed.", async () => {
-        await ctx.api.editMessageReplyMarkup(target.messageChatId, target.messageId, {
-          reply_markup: undefined,
-        });
-      });
-      return;
-    }
-
-    if (action === "back") {
-      await runQuickRepliesCallbackOperation(ctx, "Quick replies opened.", async () => {
-        await ctx.api.editMessageText(target.messageChatId, target.messageId, "Quick replies\nChoose a category:", {
-          reply_markup: quickRepliesCategoryKeyboard(target.ticket.id),
-        });
-      });
-      return;
-    }
-
-    if (action === "template") {
-      const template = quickRepliesRegistry.findTemplate(rawResourceId ?? "");
-      if (!template) {
-        await ctx.answerCallbackQuery({ text: "Quick Replies template not found." });
-        return;
-      }
-
-      try {
-        await ticketRouting.deliverAndRecordStaffTextReply(target.ticket, template.text, ctx.from, {
-          chatId: target.messageChatId,
-          messageId: target.messageId,
-          operationKey: `quick-reply:${callbackId}`,
-        });
-      } catch (error) {
-        logger.error({ err: error, ticketId: target.ticket.id }, "Could not deliver Quick Reply to user");
-        const outcomeUnknown = error instanceof InteractiveReplyNotResentError;
-        await ticketRouting.sendStaffTopicNotice(
-          ctx.api,
-          requireStaffChatId(),
-          target.ticket,
-          outcomeUnknown
-            ? "Delivery outcome is unknown; the reply was not resent automatically."
-            : `Could not send quick reply for ticket #${target.ticket.id} to user ${target.ticket.user_telegram_id}: ${describeError(error)}`
-        );
-        await ctx.answerCallbackQuery({
-          text: outcomeUnknown
-            ? "Delivery outcome is unknown; the reply was not resent automatically."
-            : "Could not send quick reply.",
-          show_alert: true,
-        });
-        return;
-      }
-
-      if (target.ticket.status === "OPEN") {
-        try {
-          const transition = db.transitionTicketStatusIfCurrent(
-            target.ticket.id,
-            requireStaffChatId(),
-            "OPEN",
-            "IN_PROGRESS"
-          );
-          if (transition.outcome === "APPLIED") await ticketRouting.refreshTicket(target.ticket.id);
-        } catch (error) {
-          logger.warn({ err: error, ticketId: target.ticket.id }, "Could not refresh ticket after Quick Reply");
-        }
-      }
-
-      try {
-        await ctx.api.editMessageText(target.messageChatId, target.messageId, `Quick reply sent\n${template.title}`, {
-          reply_markup: undefined,
-        });
-      } catch (error) {
-        logger.warn({ err: error, ticketId: target.ticket.id }, "Could not clean up Quick Replies menu");
-      }
-
-      await ctx.answerCallbackQuery({ text: "Quick reply sent." });
-      return;
-    }
-
-    const category = quickRepliesRegistry.findCategory(rawResourceId ?? "");
-    if (!category) {
-      await ctx.answerCallbackQuery({ text: "Quick Replies category not found." });
-      return;
-    }
-
-    let page = 0;
-    if (action === "page") {
-      const parsedPage = parseQuickRepliesPage(rawPage);
-      if (parsedPage === null) {
-        await ctx.answerCallbackQuery({ text: "Invalid Quick Replies page." });
-        return;
-      }
-
-      page = parsedPage;
-    }
-
-    const totalPages = Math.ceil(category.templates.length / 6);
-    if (page >= totalPages) {
-      await ctx.answerCallbackQuery({ text: "Quick Replies page is out of range." });
-      return;
-    }
-
-    await runQuickRepliesCallbackOperation(ctx, "Quick Replies category opened.", async () => {
-      await ctx.api.editMessageText(
-        target.messageChatId,
-        target.messageId,
-        `Quick replies\n${category.title}\nChoose a reply:`,
-        {
-          reply_markup: quickRepliesTemplateKeyboard(target.ticket.id, category.id, page),
-        }
-      );
-    });
-  }
-
+  const quickRepliesSurface = createQuickRepliesTelegramSurface({
+    db,
+    registry: quickRepliesRegistry,
+    ticketRouting,
+    requireStaffChatId,
+    isStaffChat,
+    hasApplicationPermission,
+    parseTicketId: parseUserId,
+    describeError,
+  });
   const renderPrivateScreen = privateControlPlane.renderScreen.bind(privateControlPlane);
-  const sendFreshPrivateScreen = privateControlPlane.sendFreshScreen.bind(privateControlPlane);
   const refreshPrivateScreen = privateControlPlane.refreshScreen.bind(privateControlPlane);
-  const retirePrivateScreens = privateControlPlane.retireScreens.bind(privateControlPlane);
   const retireTrackedPrivateScreens = privateControlPlane.retireTrackedScreens.bind(privateControlPlane);
 
   function clearStaffTestTicketMode(userId: number | undefined): void {
@@ -731,67 +436,6 @@ export function createBot(
   }
 
   const clearPublicChatPicker = privateControlPlane.clearPublicChatPicker.bind(privateControlPlane);
-
-  function privateBatchWorkflowSettingKey(userId: number): string {
-    return `private_batch_export:${userId}`;
-  }
-
-  function getPendingPrivateBatchExport(userId: number): string | undefined {
-    const exportId = db.getSetting(privateBatchWorkflowSettingKey(userId))?.trim();
-    if (!exportId) return undefined;
-    return db.getTicketBatchExport(exportId, requireStaffChatId())?.delivery_state === "DELIVERED"
-      ? exportId
-      : undefined;
-  }
-
-  function setPendingPrivateBatchExport(userId: number, exportId: string | undefined): void {
-    db.setSetting(privateBatchWorkflowSettingKey(userId), exportId ?? "");
-    installation.saveOnboardingStage(userId, exportId ? "BATCH_APPLY" : "WELCOME", exportId ? "ACTIVE" : "COMPLETED");
-  }
-
-  function privateBatchWaitingKeyboard(): InlineKeyboard {
-    return new InlineKeyboard()
-      .text("How to prepare answers", "batch-ui:help")
-      .row()
-      .text("Abort batch", "batch-ui:abort")
-      .row()
-      .text("Back", "dashboard:home");
-  }
-
-  function privateBatchWaitingText(exportId: string, notice?: string): string {
-    return [
-      "Waiting for answers",
-      "",
-      "Your ticket export is ready.",
-      `Send the completed ticket-answers_${exportId}.json file here. Only a valid answer package for this export will continue.`,
-      ...(notice ? ["", notice] : []),
-    ].join("\n");
-  }
-
-  async function showPrivateBatchWaiting(
-    ctx: Context,
-    exportId: string,
-    refresh = false,
-    notice?: string
-  ): Promise<void> {
-    const render = refresh ? refreshPrivateScreen : renderPrivateScreen;
-    await render(ctx, privateBatchWaitingText(exportId, notice), privateBatchWaitingKeyboard());
-  }
-
-  async function showPrivateBatchHelp(ctx: Context): Promise<void> {
-    await renderPrivateScreen(
-      ctx,
-      [
-        "Preparing batch answers",
-        "",
-        "1. Give your chosen AI assistant the product documentation, support policies, FAQ, tone guidance, and any other authoritative context it needs.",
-        "2. Upload this ticket export ZIP to that assistant.",
-        "3. Ask it to follow the instructions included in the archive and prepare the completed import file.",
-        "4. Send the returned answer file here for preview and explicit approval.",
-      ].join("\n"),
-      new InlineKeyboard().text("Back", "batch-ui:continue")
-    );
-  }
 
   const showDashboard = privateControlPlane.showDashboard.bind(privateControlPlane);
   const showDashboardAfterStaffTestTicketClose =
@@ -949,15 +593,7 @@ export function createBot(
 
   bot.command("start", async (ctx) => {
     if (!isPrivateChat(ctx)) {
-      await handlePublicLanguageModeration(
-        db,
-        ctx,
-        installation,
-        bot.botInfo?.id,
-        moderationNow,
-        moderationCleanupScheduler,
-        pendingWarnings
-      );
+      await moderationSurface.handlePublicMessage(ctx);
       return;
     }
 
@@ -1123,300 +759,9 @@ export function createBot(
     });
   });
 
-  async function exportActiveTickets(ctx: Context, destinationChatId: number): Promise<string | undefined> {
-    const staffChatId = requireStaffChatId();
-    try {
-      return await ticketBatchRuntime.runExport(staffChatId, async () => {
-        let zip: Awaited<ReturnType<typeof createTicketBatchZip>> | undefined;
-        let exportId: string | undefined;
-        let deliveryAttempted = false;
-        try {
-          const tickets = db.listActiveTicketsForStaffChat(requireStaffChatId()).map((ticket) => ({
-            ticket,
-            messages: db.listMessagesChronological(ticket.id),
-            followUpHistory: db.listTicketFollowUpHistory(ticket.id),
-            deliveryFailure: db.getLatestTicketBatchDeliveryFailure(ticket.id, requireStaffChatId()),
-            staffSync: db.getLatestTicketBatchStaffSyncContext(ticket.id, requireStaffChatId()),
-          }));
-          if (!tickets.length) {
-            await ctx.reply("There are no active tickets to export.");
-            return undefined;
-          }
+  ticketBatchSurface.registerExportCommand();
 
-          exportId = `export_${randomUUID().replace(/-/g, "")}`;
-          const createdAt = new Date().toISOString();
-          const snapshot = buildTicketBatchExportSnapshot({
-            exportId,
-            createdAt,
-            staffChatId: requireStaffChatId(),
-            tickets,
-          });
-          zip = await createTicketBatchZip(
-            snapshot,
-            async (attachment): Promise<TicketBatchAttachmentDownloadResult> => {
-              if (!attachment.fileId) {
-                throw new TicketBatchValidationError(
-                  `Ticket #${attachment.ticketId} message ${attachment.messageId} has no downloadable media reference.`
-                );
-              }
-              let file;
-              try {
-                file = await ctx.api.getFile(attachment.fileId);
-              } catch (error) {
-                if (isHostedTelegramFileTooLargeError(error)) {
-                  return {
-                    unavailable: true,
-                    failureCategory: "TELEGRAM_FILE_TOO_LARGE",
-                    failureReason: "Attachment exceeds the hosted Telegram Bot API download limit.",
-                  };
-                }
-                if (isUnavailableTelegramFileError(error)) {
-                  return {
-                    unavailable: true,
-                    failureCategory: "TELEGRAM_FILE_UNAVAILABLE",
-                    failureReason:
-                      "Telegram could not retrieve this historical attachment with the current bot account. The stored file_id may belong to a previous bot identity or the file may no longer be available from Telegram.",
-                  };
-                }
-                throw error;
-              }
-              if (!file.file_path) {
-                throw new TicketBatchValidationError(
-                  `Ticket #${attachment.ticketId} message ${attachment.messageId} attachment could not be retrieved.`
-                );
-              }
-              const response = await fetchImpl(`https://api.telegram.org/file/bot${config.botToken}/${file.file_path}`);
-              if (!response.ok) {
-                throw new TicketBatchValidationError(
-                  `Ticket #${attachment.ticketId} message ${attachment.messageId} attachment could not be downloaded.`
-                );
-              }
-              return { bytes: new Uint8Array(await response.arrayBuffer()), telegramFilePath: file.file_path };
-            }
-          );
-          db.createTicketBatchExport({
-            exportId,
-            staffChatId: requireStaffChatId(),
-            createdAt,
-            selectionMode: "all_active",
-            ticketCount: snapshot.records.length,
-            items: snapshot.records.map((record) => ({
-              ticketId: record.ticket.id,
-              snapshotToken: record.snapshot_token,
-            })),
-            deliveryState: "PREPARING",
-          });
-          deliveryAttempted = true;
-          const delivered = await ctx.api.sendDocument(destinationChatId, new InputFile(zip.filePath, zip.filename), {
-            caption: formatTicketBatchExportCaption(exportId, zip),
-          });
-          try {
-            db.markTicketBatchExportDelivered(exportId, requireStaffChatId(), delivered.message_id);
-          } catch (error) {
-            logger.error({ err: error, exportId }, "Ticket batch export delivery could not be persisted");
-            try {
-              db.markTicketBatchExportUnknownDelivery(
-                exportId,
-                requireStaffChatId(),
-                "Export delivery outcome could not be confirmed."
-              );
-            } catch (persistenceError) {
-              logger.warn(
-                { err: persistenceError, exportId },
-                "Could not persist unknown ticket batch export delivery state"
-              );
-            }
-            await ctx.reply("Export delivery could not be confirmed. Do not upload an answer package for it.");
-            return undefined;
-          }
-          return exportId;
-        } catch (error) {
-          logger.error({ err: error, exportId }, "Could not send ticket batch export");
-          if (exportId) {
-            try {
-              if (deliveryAttempted && !(error instanceof GrammyError)) {
-                db.markTicketBatchExportUnknownDelivery(
-                  exportId,
-                  requireStaffChatId(),
-                  "Export delivery outcome could not be confirmed."
-                );
-              } else {
-                db.markTicketBatchExportFailed(
-                  exportId,
-                  requireStaffChatId(),
-                  "Export failed before confirmed delivery."
-                );
-              }
-            } catch (persistenceError) {
-              logger.warn({ err: persistenceError, exportId }, "Could not persist failed ticket batch export state");
-            }
-          }
-          await ctx.reply("Export failed before delivery. Nothing was sent.");
-          return undefined;
-        } finally {
-          if (zip) {
-            try {
-              await cleanupTicketBatchZip(zip);
-            } catch (error) {
-              logger.warn({ err: error, exportId }, "Could not clean up ticket batch export files");
-            }
-          }
-        }
-      });
-    } catch (error) {
-      if (!(error instanceof TicketBatchExportInProgressError)) throw error;
-      await ctx.reply("An export is already running for this staff chat.");
-      return undefined;
-    }
-  }
-
-  bot.command("exporttickets", async (ctx) => {
-    if (!isStaffChat(ctx)) {
-      if (isPrivateChat(ctx)) {
-        await ctx.reply(STAFF_ONLY_TEXT);
-      }
-      return;
-    }
-
-    if (installation.getState().authorizationMode === "RBAC_ACTIVE") {
-      await ctx.reply("Batch operations are available to OWNER and ADMIN in the bot's private chat.");
-      return;
-    }
-    if (!(await requirePermission(ctx, "BATCH_OPERATIONS"))) return;
-    if (typeof ctx.message?.message_thread_id === "number") {
-      await ctx.reply("Please run /exporttickets outside ticket topics.");
-      return;
-    }
-    await exportActiveTickets(ctx, requireStaffChatId());
-  });
-
-  bot.command("moderation", async (ctx) => {
-    if (!isStaffChat(ctx)) {
-      if (isPrivateChat(ctx)) await ctx.reply(STAFF_ONLY_TEXT);
-      return;
-    }
-    if (!(await requirePermission(ctx, "MODERATION_SETTINGS"))) return;
-    const [, action = "status", ...args] = (ctx.message?.text ?? "").trim().split(/\s+/);
-    const current = moderationConfig(db);
-    if (action === "status") {
-      await ctx.reply(await formatModerationStatus(db, current, ctx.api, bot.botInfo?.id, requireStaffChatId()));
-      return;
-    }
-    if (action === "target") {
-      const chatId = Number(args[0]);
-      if (!Number.isSafeInteger(chatId)) {
-        await ctx.reply("Usage: /moderation target <chat_id>");
-        return;
-      }
-      try {
-        const chat = await ctx.api.getChat(chatId);
-        const workspace = installation.getActiveWorkspace();
-        db.setSetting(moderationSettingKey("target"), String(chatId));
-        if (workspace) db.importManagedPublicChat(chatId, workspace.id);
-        db.upsertManagedPublicChat({
-          chatId,
-          workspaceId: workspace?.id ?? null,
-          title: "title" in chat ? (chat.title ?? null) : null,
-          username: "username" in chat ? (chat.username ?? null) : null,
-          isForum: chat.type === "supergroup" && chat.is_forum === true,
-        });
-      } catch {
-        await ctx.reply("The target chat is not reachable by this bot.");
-        return;
-      }
-      await ctx.reply(`Moderation target set to ${chatId}. It remains disabled until /moderation enable succeeds.`);
-      return;
-    }
-    if (action === "enable") {
-      const rights = await validateModerationRights(ctx.api, current.targetChatId, bot.botInfo?.id);
-      if (rights !== "ok") {
-        await ctx.reply(`Moderation remains disabled: ${rights}`);
-        return;
-      }
-      db.setSetting(moderationSettingKey("enabled"), "true");
-      if (current.targetChatId !== null) db.setManagedPublicChatModerationEnabled(current.targetChatId, true);
-      await ctx.reply("English-only moderation is enabled.");
-      return;
-    }
-    if (action === "disable") {
-      db.setSetting(moderationSettingKey("enabled"), "false");
-      if (current.targetChatId !== null) db.setManagedPublicChatModerationEnabled(current.targetChatId, false);
-      await ctx.reply("Moderation disabled. Existing strikes and tiers were preserved.");
-      return;
-    }
-    if (action === "allowlist") {
-      await ctx.reply(
-        current.allowlist.length
-          ? `Allowlist (${current.allowlist.length}): ${current.allowlist.join(", ")}`
-          : "Allowlist is empty."
-      );
-      return;
-    }
-    if (action === "allow" || action === "unallow") {
-      const term = args.join(" ").trim().toLowerCase();
-      if (!term || term.length > 80) {
-        await ctx.reply(`Usage: /moderation ${action} <term up to 80 characters>`);
-        return;
-      }
-      const entries = new Set(current.allowlist);
-      if (action === "allow") entries.add(term);
-      else entries.delete(term);
-      db.setSetting(moderationSettingKey("allowlist"), JSON.stringify([...entries].sort()));
-      if (current.targetChatId !== null)
-        db.updateManagedPublicChatConfig(current.targetChatId, {
-          warningText: current.warningText,
-          allowlist: [...entries].sort(),
-          warningCooldownMinutes: current.warningCooldownMinutes,
-          warningMessageThreshold: current.warningMessageThreshold,
-          lookbackMinutes: current.lookbackMinutes,
-        });
-      await ctx.reply(action === "allow" ? "Allowlist entry saved." : "Allowlist entry removed.");
-      return;
-    }
-    const userId = Number(args[0]);
-    if (!Number.isSafeInteger(userId) || !current.targetChatId) {
-      await ctx.reply(`Usage: /moderation ${action} <user_id>`);
-      return;
-    }
-    const state = db.getLanguageModerationUserState(current.targetChatId, userId) ?? {
-      username: null,
-      current_strikes: 0,
-      sanction_tier: 0,
-      first_strike_at: null,
-    };
-    if (action === "user") {
-      await ctx.reply(`User ${userId}: strikes ${state.current_strikes}/2, sanction tier ${state.sanction_tier}/3.`);
-      return;
-    }
-    if (action === "resetstrikes") {
-      db.upsertLanguageModerationUserState({
-        chat_id: current.targetChatId,
-        user_telegram_id: userId,
-        username: state.username,
-        current_strikes: 0,
-        sanction_tier: state.sanction_tier,
-        first_strike_at: null,
-      });
-      db.clearLanguageModerationCycleViolations(current.targetChatId, userId, state.sanction_tier);
-      await ctx.reply(`Strikes reset for ${userId}. Sanction tier remains ${state.sanction_tier}.`);
-      return;
-    }
-    if (action === "resettier") {
-      db.upsertLanguageModerationUserState({
-        chat_id: current.targetChatId,
-        user_telegram_id: userId,
-        username: state.username,
-        current_strikes: state.current_strikes,
-        sanction_tier: 0,
-        first_strike_at: state.first_strike_at,
-      });
-      await ctx.reply(`Sanction tier reset for ${userId}. This does not unmute or unban the user.`);
-      return;
-    }
-    await ctx.reply(
-      "Usage: /moderation status|target|enable|disable|allowlist|allow|unallow|user|resetstrikes|resettier"
-    );
-  });
+  moderationSurface.registerCommand();
 
   bot.command("questnotify", async (ctx) => {
     if (!isStaffChat(ctx)) {
@@ -1841,74 +1186,9 @@ export function createBot(
     }
 
     if (namespace === "batch-ui") {
-      if (!(await requirePrivatePermission(ctx, "BATCH_OPERATIONS"))) {
-        await ctx.answerCallbackQuery({ text: "Batch operations require OWNER or ADMIN.", show_alert: true });
-        return;
-      }
-      const action = data.split(":")[1];
-      await ctx.answerCallbackQuery();
-      if (action === "export") {
-        if (!ctx.chat) return;
-        const existing = getPendingPrivateBatchExport(ctx.from!.id);
-        if (existing) {
-          await showPrivateBatchWaiting(ctx, existing);
-          return;
-        }
-        await retirePrivateScreens(ctx);
-        const exportId = await exportActiveTickets(ctx, ctx.chat.id);
-        if (exportId) {
-          setPendingPrivateBatchExport(ctx.from!.id, exportId);
-          await sendFreshPrivateScreen(ctx, privateBatchWaitingText(exportId), privateBatchWaitingKeyboard());
-        }
-        return;
-      }
-      if (action === "continue") {
-        const exportId = getPendingPrivateBatchExport(ctx.from!.id);
-        if (exportId) await showPrivateBatchWaiting(ctx, exportId);
-        else await showDashboard(ctx);
-        return;
-      }
-      if (action === "apply") {
-        const exportId = getPendingPrivateBatchExport(ctx.from!.id);
-        if (exportId) await showPrivateBatchWaiting(ctx, exportId);
-        else await showDashboard(ctx);
-        return;
-      }
-      if (action === "help") {
-        const exportId = getPendingPrivateBatchExport(ctx.from!.id);
-        if (exportId) await showPrivateBatchHelp(ctx);
-        else await showDashboard(ctx);
-        return;
-      }
-      if (action === "abort") {
-        await renderPrivateScreen(
-          ctx,
-          "Abort this batch workflow? The export remains available in history, but this private answer-import flow will be cleared.",
-          new InlineKeyboard()
-            .text("Abort batch", "batch-ui:abort-confirm")
-            .row()
-            .text("Keep waiting", "batch-ui:continue")
-        );
-        return;
-      }
-      if (action === "abort-confirm") {
-        setPendingPrivateBatchExport(ctx.from!.id, undefined);
-        await showDashboard(ctx);
-        return;
-      }
-      if (action === "recent") {
-        const pending = db.getInstallationOperationalCounts().pendingBatchStaffOperations;
-        await renderPrivateScreen(
-          ctx,
-          `Batch status\n\nPending staff synchronization: ${pending}`,
-          new InlineKeyboard().text("Back", "dashboard:home")
-        );
-        return;
-      }
-      await showDashboard(ctx);
+      await ticketBatchSurface.handlePrivateWorkflowCallback(ctx, data, namespace);
       return;
     }
-
     if (namespace === "user") {
       await handleUserCallback(db, ctx, installation, ticketRouting, data, async (ticketId) => {
         if (!ctx.from || staffTestTicketId(ctx.from.id) !== ticketId) return;
@@ -1924,7 +1204,7 @@ export function createBot(
     }
 
     if (namespace === "qr") {
-      await handleQuickRepliesCallback(ctx, data);
+      await quickRepliesSurface.handleCallback(ctx, data);
       return;
     }
 
@@ -1950,7 +1230,7 @@ export function createBot(
         await ctx.answerCallbackQuery({ text: "Batch operations require OWNER or ADMIN.", show_alert: true });
         return;
       }
-      await handleTicketBatchCallback(ctx, data);
+      await ticketBatchSurface.handleTicketBatchCallback(ctx, data);
       return;
     }
 
@@ -2009,126 +1289,13 @@ export function createBot(
     enrollBaselineStaffMember(member.user);
   });
 
-  bot.on("message_reaction", async (ctx) => {
-    const reaction = ctx.messageReaction;
-    const actor = reaction.user;
-    const owner = installation.getOwner();
-    const managed = db.getManagedPublicChat(reaction.chat.id, true);
-    const triggerReaction = managed?.manual_strike_reaction;
-    if (
-      !actor ||
-      reaction.actor_chat ||
-      actor.is_bot ||
-      !owner ||
-      owner.userTelegramId !== actor.id ||
-      !managed ||
-      managed.active !== 1 ||
-      managed.moderation_enabled !== 1 ||
-      managed.manual_strikes_enabled !== 1 ||
-      reaction.chat.id === requireStaffChatId() ||
-      !triggerReaction ||
-      hasEmojiReaction(reaction.old_reaction, triggerReaction) ||
-      !hasEmojiReaction(reaction.new_reaction, triggerReaction)
-    )
-      return;
-
-    const author = db.getLanguageModerationMessageAuthor(reaction.chat.id, reaction.message_id);
-    if (!author) {
-      logger.debug(
-        { chatId: reaction.chat.id, messageId: reaction.message_id },
-        "Manual moderation reaction has no stored message author"
-      );
-      return;
-    }
-
-    const feedbackTime = moderationNow();
-    const feedback = db.recordLanguageModerationOwnerFeedback({
-      chatId: reaction.chat.id,
-      messageId: reaction.message_id,
-      userTelegramId: author.user_telegram_id,
-      recordedAt: feedbackTime.toISOString(),
-      retainUntil: new Date(feedbackTime.getTime() + ADAPTIVE_LEARNING_HORIZON_MS).toISOString(),
-    });
-    if (feedback.feedbackRecorded && !feedback.featuresAvailable) {
-      logger.debug(
-        { chatId: reaction.chat.id, messageId: reaction.message_id, targetUserId: author.user_telegram_id },
-        "Manual moderation feedback has no stored adaptive features"
-      );
-    }
-
-    const state = db.getLanguageModerationUserState(reaction.chat.id, author.user_telegram_id) ?? {
-      current_strikes: 0,
-      sanction_tier: 0,
-      first_strike_at: null,
-    };
-    const added = db.addLanguageModerationViolation({
-      chat_id: reaction.chat.id,
-      user_telegram_id: author.user_telegram_id,
-      message_id: reaction.message_id,
-      message_thread_id: author.message_thread_id,
-      username: author.username,
-      cycle_tier: state.sanction_tier,
-    });
-    if (
-      !added &&
-      !isPendingCurrentCycleFirstStrike(
-        db.getLanguageModerationViolation(reaction.chat.id, reaction.message_id),
-        author.user_telegram_id,
-        state
-      )
-    ) {
-      if (feedback.feedbackRecorded) {
-        logger.info(
-          {
-            chatId: reaction.chat.id,
-            messageId: reaction.message_id,
-            targetUserId: author.user_telegram_id,
-            targetUsername: author.username,
-            triggerReaction,
-          },
-          "Manual moderation feedback recorded without another strike"
-        );
-      }
-      return;
-    }
-
-    const outcome = await advanceModerationStrike({
-      db,
-      api: ctx.api,
-      chatId: reaction.chat.id,
-      chatTitle: ("title" in reaction.chat ? reaction.chat.title : null) ?? null,
-      userId: author.user_telegram_id,
-      username: author.username,
-      messageId: reaction.message_id,
-      state,
-      now: moderationNow,
-      botId: bot.botInfo?.id,
-      cleanupScheduler: moderationCleanupScheduler,
-      staffChatId: requireStaffChatId(),
-      setStrikeReaction: false,
-    });
-    if (outcome) {
-      logger.info(
-        {
-          chatId: reaction.chat.id,
-          messageId: reaction.message_id,
-          targetUserId: author.user_telegram_id,
-          targetUsername: author.username,
-          currentStrikes: outcome.currentStrikes,
-          sanctionTier: outcome.sanctionTier,
-          triggerReaction,
-          feedbackRecorded: feedback.feedbackRecorded,
-        },
-        "Manual moderation strike applied"
-      );
-    }
-  });
+  moderationSurface.registerManualReaction();
 
   bot.on("message", async (ctx) => {
     if (isConfiguredStaffWorkspace(ctx)) {
       enrollBaselineStaffMember(ctx.from);
       if (!isStaffChat(ctx)) return;
-      if (isTicketAnswerPackageDocument(ctx.message)) {
+      if (ticketBatchSurface.isTicketAnswerPackageDocument(ctx.message)) {
         if (typeof ctx.message.message_thread_id === "number") {
           await ctx.reply("Upload ticket answer packages outside ticket topics.");
           return;
@@ -2138,7 +1305,7 @@ export function createBot(
           return;
         }
         if (!(await requirePermission(ctx, "BATCH_OPERATIONS"))) return;
-        await handleTicketAnswerPackageUpload(ctx);
+        await ticketBatchSurface.handleTicketAnswerPackageUpload(ctx);
         return;
       }
       await ticketRouting.handleStaffGroupMessage(ctx, () => hasApplicationPermission(ctx, "REPLY_TO_TICKETS"));
@@ -2146,15 +1313,7 @@ export function createBot(
     }
 
     if (!isPrivateChat(ctx)) {
-      await handlePublicLanguageModeration(
-        db,
-        ctx,
-        installation,
-        bot.botInfo?.id,
-        moderationNow,
-        moderationCleanupScheduler,
-        pendingWarnings
-      );
+      await moderationSurface.handlePublicMessage(ctx);
       return;
     }
 
@@ -2163,17 +1322,22 @@ export function createBot(
     if (
       ctx.from &&
       installation.getMember(ctx.from.id) &&
-      getPendingPrivateBatchExport(ctx.from.id) &&
-      isTicketAnswerPackageDocument(ctx.message)
+      ticketBatchSurface.getPendingPrivateBatchExport(ctx.from.id) &&
+      ticketBatchSurface.isTicketAnswerPackageDocument(ctx.message)
     ) {
       if (!(await requirePrivatePermission(ctx, "BATCH_OPERATIONS"))) return;
-      const exportId = getPendingPrivateBatchExport(ctx.from.id)!;
+      const exportId = ticketBatchSurface.getPendingPrivateBatchExport(ctx.from.id)!;
       const filename = ctx.message.document?.file_name ?? "";
       if (filename.toLowerCase() !== `ticket-answers_${exportId}.json`.toLowerCase()) {
-        await showPrivateBatchWaiting(ctx, exportId, true, "This answer package belongs to a different export.");
+        await ticketBatchSurface.showPrivateBatchWaiting(
+          ctx,
+          exportId,
+          true,
+          "This answer package belongs to a different export."
+        );
         return;
       }
-      await handleTicketAnswerPackageUpload(ctx, exportId);
+      await ticketBatchSurface.handleTicketAnswerPackageUpload(ctx, exportId);
       return;
     }
 
@@ -2268,343 +1432,6 @@ export function createBot(
       }
     }
   });
-
-  async function handleTicketAnswerPackageUpload(ctx: Context, privateWorkflowExportId?: string): Promise<void> {
-    const document = ctx.message && "document" in ctx.message ? ctx.message.document : undefined;
-    if (!document || !ctx.chat) {
-      return;
-    }
-    if (typeof document.file_size === "number" && document.file_size > 5 * 1024 * 1024) {
-      if (privateWorkflowExportId && isPrivateChat(ctx)) {
-        await showPrivateBatchWaiting(
-          ctx,
-          privateWorkflowExportId,
-          true,
-          "Ticket answer packages must be 5 MiB or smaller."
-        );
-      } else {
-        await ctx.reply("Ticket answer packages must be 5 MiB or smaller.");
-      }
-      return;
-    }
-    const filename = document.file_name ?? "";
-    const filenameMatch = /^ticket-answers_(.+)\.json$/i.exec(filename);
-    const exportId = filenameMatch?.[1];
-    if (!exportId) {
-      return;
-    }
-
-    try {
-      const file = await ctx.api.getFile(document.file_id);
-      if (!file.file_path) {
-        throw new TicketBatchValidationError("Telegram did not return a file path for the answer package.");
-      }
-      const response = await fetchImpl(`https://api.telegram.org/file/bot${config.botToken}/${file.file_path}`);
-      if (!response.ok) {
-        throw new TicketBatchValidationError("Telegram could not download the answer package.");
-      }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength > 5 * 1024 * 1024) {
-        throw new TicketBatchValidationError("Ticket answer packages must be 5 MiB or smaller.");
-      }
-      const raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      const exportRecord = db.getTicketBatchExport(exportId, requireStaffChatId());
-      if (!exportRecord) {
-        throw new TicketBatchValidationError("This answer package references an unknown export for this staff chat.");
-      }
-      if (privateWorkflowExportId && exportId !== privateWorkflowExportId) {
-        throw new TicketBatchValidationError("This answer package belongs to a different export.");
-      }
-      if (exportRecord.delivery_state !== "DELIVERED") {
-        throw new TicketBatchValidationError(
-          "This answer package references an export whose delivery was not confirmed."
-        );
-      }
-      const exportItems = db.listTicketBatchExportItems(exportId);
-      const answerPackage = parseAndValidateAnswerPackage(raw, exportId, exportItems);
-      const pages = buildTicketBatchPreviewPagesForAnswerPackage(answerPackage, exportItems);
-      const packageHash = getAnswerPackageHash(answerPackage);
-      const existingById = db.getTicketBatchAnswerPackage(answerPackage.answer_package_id, requireStaffChatId());
-      const existingByHash = db.getTicketBatchAnswerPackageByHash(packageHash, requireStaffChatId());
-      let persistedPackage = existingById;
-      if (existingById && existingById.package_hash !== packageHash) {
-        throw new TicketBatchValidationError("This answer_package_id was already imported with different content.");
-      }
-      if (!existingById && existingByHash) {
-        throw new TicketBatchValidationError(
-          "This answer package content was already imported under a different identity."
-        );
-      }
-      if (persistedPackage && persistedPackage.status !== "PENDING") {
-        throw new TicketBatchValidationError("This answer package is no longer previewable.");
-      }
-      if (!persistedPackage) {
-        persistedPackage = db.createTicketBatchAnswerPackage({
-          answerPackageId: answerPackage.answer_package_id,
-          exportId,
-          staffChatId: requireStaffChatId(),
-          packageHash,
-          sourceChatId: ctx.chat.id,
-          sourceMessageId: ctx.message?.message_id ?? null,
-          packageCreatedAt: answerPackage.created_at,
-          items: answerPackage.answers,
-        });
-      }
-      const previewToken = persistedPackage.preview_token ?? randomUUID().replace(/-/g, "");
-      const previewPage = Math.min(Math.max(persistedPackage.preview_page ?? 0, 0), pages.length - 1);
-      const text = formatTicketBatchPreviewPage(pages, previewPage);
-      const keyboard = ticketBatchPreviewKeyboard(previewToken, previewPage, pages.length);
-      if (persistedPackage.preview_chat_id !== null && persistedPackage.preview_message_id !== null) {
-        await ctx.api.editMessageText(persistedPackage.preview_chat_id, persistedPackage.preview_message_id, text, {
-          reply_markup: keyboard,
-        });
-        db.updateTicketBatchAnswerPackagePreviewPage(
-          persistedPackage.answer_package_id,
-          requireStaffChatId(),
-          previewPage
-        );
-        if (isPrivateChat(ctx) && ctx.from) {
-          setPendingPrivateBatchExport(ctx.from.id, undefined);
-        }
-        return;
-      }
-      const previewMessage =
-        privateWorkflowExportId && isPrivateChat(ctx)
-          ? await refreshPrivateScreen(ctx, text, keyboard)
-          : await ctx.reply(text, { reply_markup: keyboard });
-      if (
-        !db.setTicketBatchAnswerPackagePreview(persistedPackage.answer_package_id, requireStaffChatId(), {
-          token: previewToken,
-          chatId: ctx.chat.id,
-          messageId: previewMessage.message_id,
-          page: previewPage,
-        })
-      ) {
-        try {
-          await ctx.api.deleteMessage(ctx.chat.id, previewMessage.message_id);
-        } catch (cleanupError) {
-          logger.warn({ err: cleanupError, exportId }, "Could not remove untracked ticket batch preview");
-        }
-        throw new TicketBatchValidationError("This answer package already has an active preview.");
-      }
-      if (isPrivateChat(ctx) && ctx.from) {
-        setPendingPrivateBatchExport(ctx.from.id, undefined);
-      }
-      logger.info({ exportId, previewMessageId: previewMessage.message_id }, "Ticket answer package preview created");
-    } catch (error) {
-      const message =
-        error instanceof TicketBatchValidationError ? error.message : "Could not validate the ticket answer package.";
-      logger.warn("Ticket answer package validation failed");
-      if (privateWorkflowExportId && isPrivateChat(ctx)) {
-        await showPrivateBatchWaiting(ctx, privateWorkflowExportId, true, message);
-      } else {
-        await ctx.reply(message);
-      }
-    }
-  }
-
-  async function handleTicketBatchCallback(ctx: Context, data: string): Promise<void> {
-    const [, action, token, pageValue] = data.split(":");
-    if ((action !== "cancel" && action !== "apply" && action !== "page") || !token) {
-      await ctx.answerCallbackQuery({ text: "Unknown ticket batch action." });
-      return;
-    }
-    const message = ctx.callbackQuery?.message;
-    if (!message || !("chat" in message) || !("message_id" in message)) {
-      await ctx.answerCallbackQuery({ text: "This preview message is no longer available." });
-      return;
-    }
-    if ("message_thread_id" in message && typeof message.message_thread_id === "number") {
-      await ctx.answerCallbackQuery({ text: "Use ticket batch controls outside ticket topics." });
-      return;
-    }
-    const packageRecord = db.getTicketBatchAnswerPackageByPreviewToken(token, requireStaffChatId());
-    if (
-      !packageRecord ||
-      packageRecord.preview_chat_id !== message.chat.id ||
-      packageRecord.preview_message_id !== message.message_id
-    ) {
-      await ctx.answerCallbackQuery({ text: "This preview has expired." });
-      return;
-    }
-    if (packageRecord.status !== "PENDING") {
-      await ctx.answerCallbackQuery({ text: "This package can no longer be changed." });
-      return;
-    }
-    if (action === "page") {
-      const page = Number(pageValue);
-      const pages = buildStoredTicketBatchPreviewPages(packageRecord);
-      if (!Number.isInteger(page) || page < 0 || page >= pages.length) {
-        await ctx.answerCallbackQuery({ text: "That preview page is not available." });
-        return;
-      }
-      await ctx.api.editMessageText(message.chat.id, message.message_id, formatTicketBatchPreviewPage(pages, page), {
-        reply_markup: ticketBatchPreviewKeyboard(token, page, pages.length),
-      });
-      db.updateTicketBatchAnswerPackagePreviewPage(packageRecord.answer_package_id, requireStaffChatId(), page);
-      await ctx.answerCallbackQuery();
-      return;
-    }
-    if (action === "cancel") {
-      const cancelled = db.cancelTicketBatchAnswerPackage(packageRecord.answer_package_id, requireStaffChatId());
-      if (!cancelled) {
-        await ctx.answerCallbackQuery({ text: "This package can no longer be cancelled." });
-        return;
-      }
-      await ctx.answerCallbackQuery({ text: "Ticket batch preview cancelled." });
-      db.clearTicketBatchAnswerPackagePreview(packageRecord.answer_package_id, requireStaffChatId());
-      await cleanupTicketBatchPreview(packageRecord, "Package cancelled.");
-      if (isPrivateChat(ctx) && ctx.from) {
-        setPendingPrivateBatchExport(ctx.from.id, packageRecord.export_id);
-        await showPrivateBatchWaiting(
-          ctx,
-          packageRecord.export_id,
-          true,
-          "The preview was cancelled. You can send another answer file for this export."
-        );
-      }
-      return;
-    }
-
-    const beforeClaim = db.getTicketBatchAnswerPackage(packageRecord.answer_package_id, requireStaffChatId());
-    if (beforeClaim?.status === "APPLYING") {
-      await ctx.answerCallbackQuery({ text: "Answer package is already being applied." });
-      return;
-    }
-    if (beforeClaim?.status === "COMPLETED") {
-      await ctx.answerCallbackQuery({ text: "Answer package is already completed." });
-      return;
-    }
-    const claimed = db.claimTicketBatchAnswerPackage(packageRecord.answer_package_id, requireStaffChatId());
-    if (!claimed) {
-      const current = db.getTicketBatchAnswerPackage(packageRecord.answer_package_id, requireStaffChatId());
-      await ctx.answerCallbackQuery({
-        text:
-          current?.status === "APPLYING"
-            ? "Answer package is already being applied."
-            : current?.status === "CANCELLED"
-              ? "This package was cancelled."
-              : "Answer package not found.",
-      });
-      return;
-    }
-    if (claimed.status === "CANCELLED") {
-      await ctx.answerCallbackQuery({ text: "This package was cancelled." });
-      return;
-    }
-
-    // Clear the active callback token immediately, but retain the message coordinates in final-summary state.
-    db.clearTicketBatchAnswerPackagePreview(claimed.answer_package_id, requireStaffChatId());
-    await ctx.answerCallbackQuery({ text: "Applying answer package..." });
-    await neutralizeTicketBatchPreview(claimed, "Applying...");
-    const summary = await ticketBatchRuntime.applyAnswerPackage(claimed.answer_package_id, ctx.from);
-    db.queueTicketBatchFinalSummary(claimed.answer_package_id, requireStaffChatId(), {
-      text: summary,
-      chatId: ctx.chat?.id ?? requireStaffChatId(),
-      originChatId: claimed.preview_chat_id,
-      originMessageId: claimed.preview_message_id,
-    });
-    await ticketBatchRuntime.recoverPendingStaffOperations(claimed.answer_package_id);
-  }
-
-  function buildStoredTicketBatchPreviewPages(
-    packageRecord: ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>
-  ): string[] {
-    if (!packageRecord) {
-      throw new TicketBatchValidationError("Ticket answer package not found.");
-    }
-    const answerPackage: TicketAnswerPackage = {
-      schema: "telegram_ticket_answer_package",
-      version: 2,
-      export_id: packageRecord.export_id,
-      answer_package_id: packageRecord.answer_package_id,
-      created_at: packageRecord.package_created_at,
-      answers: db.listTicketBatchAnswerItems(packageRecord.answer_package_id).map((item) => ({
-        ticket_id: item.ticket_id,
-        snapshot_token: item.snapshot_token,
-        action: item.action,
-        reply_text: item.reply_text,
-        follow_up_state: item.follow_up_state,
-        internal_note: item.internal_note,
-        escalation_target: item.escalation_target,
-      })),
-    };
-    return buildTicketBatchPreviewPagesForAnswerPackage(
-      answerPackage,
-      db.listTicketBatchExportItems(packageRecord.export_id)
-    );
-  }
-
-  function buildTicketBatchPreviewPagesForAnswerPackage(
-    answerPackage: TicketAnswerPackage,
-    exportItems: ReturnType<SupportDatabase["listTicketBatchExportItems"]>
-  ): string[] {
-    const preview = buildAnswerPackagePreview(answerPackage, exportItems, (ticketId) => {
-      const ticket = db.getTicketWithUser(ticketId);
-      if (!ticket || ticket.staff_chat_id !== requireStaffChatId()) return null;
-      return {
-        status: ticket.status,
-        snapshotToken: getTicketSnapshotToken(ticket, db.listMessagesChronological(ticket.id)),
-      };
-    });
-    return buildTicketBatchPreviewPages(answerPackage.export_id, preview);
-  }
-
-  async function cleanupTicketBatchPreview(
-    packageRecord: NonNullable<ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>>,
-    fallbackText: string
-  ): Promise<boolean> {
-    if (packageRecord.preview_chat_id === null || packageRecord.preview_message_id === null) {
-      return true;
-    }
-    try {
-      await bot.api.deleteMessage(packageRecord.preview_chat_id, packageRecord.preview_message_id);
-      return true;
-    } catch (error) {
-      const diagnostic = normalizeTelegramDeliveryError(error);
-      logger.warn(
-        { answerPackageId: packageRecord.answer_package_id, category: diagnostic.category },
-        "Could not delete ticket batch preview"
-      );
-      try {
-        await bot.api.editMessageText(packageRecord.preview_chat_id, packageRecord.preview_message_id, fallbackText, {
-          reply_markup: undefined,
-        });
-      } catch (editError) {
-        const diagnostic = normalizeTelegramDeliveryError(editError);
-        logger.warn(
-          { answerPackageId: packageRecord.answer_package_id, category: diagnostic.category },
-          "Could not neutralize ticket batch preview"
-        );
-      }
-      return false;
-    }
-  }
-
-  async function neutralizeTicketBatchPreview(
-    packageRecord: NonNullable<ReturnType<SupportDatabase["getTicketBatchAnswerPackage"]>>,
-    text: string
-  ): Promise<void> {
-    if (packageRecord.preview_chat_id === null || packageRecord.preview_message_id === null) return;
-    const previewChatId = packageRecord.preview_chat_id;
-    const previewMessageId = packageRecord.preview_message_id;
-    try {
-      await runStaffChatOperation(
-        () =>
-          runReplaySafeTelegramEdit(() =>
-            bot.api.editMessageText(previewChatId, previewMessageId, text, { reply_markup: undefined })
-          ),
-        { replaySafety: "REPLAY_SAFE", operationName: "editMessageText" },
-        previewChatId
-      );
-    } catch (error) {
-      const failure = ticketBatchRuntime.scheduleRecoveryForStaffOperation(error);
-      logger.warn(
-        { answerPackageId: packageRecord.answer_package_id, category: failure.category },
-        "Could not neutralize active ticket batch preview"
-      );
-    }
-  }
 
   bot.catch(async (error) => {
     const ctx = error.ctx;
@@ -2890,127 +1717,6 @@ function staffTicketKeyboard(ticketId: number, expectedStatus: TicketStatus = "O
     .text("Quick replies", quickRepliesOpenCallbackData(ticketId));
 }
 
-function quickRepliesOpenCallbackData(ticketId: number): string {
-  return validateQuickRepliesCallbackData(`qr:open:${ticketId}`);
-}
-
-function quickRepliesCategoryCallbackData(ticketId: number, categoryId: string): string {
-  return validateQuickRepliesCallbackData(`qr:category:${ticketId}:${categoryId}`);
-}
-
-function quickRepliesTemplateCallbackData(ticketId: number, templateId: string): string {
-  return validateQuickRepliesCallbackData(`qr:template:${ticketId}:${templateId}`);
-}
-
-function quickRepliesPageCallbackData(ticketId: number, categoryId: string, page: number): string {
-  return validateQuickRepliesCallbackData(`qr:page:${ticketId}:${categoryId}:${page}`);
-}
-
-function quickRepliesBackCallbackData(ticketId: number): string {
-  return validateQuickRepliesCallbackData(`qr:back:${ticketId}`);
-}
-
-function quickRepliesCancelCallbackData(ticketId: number): string {
-  return validateQuickRepliesCallbackData(`qr:cancel:${ticketId}`);
-}
-
-function validateQuickRepliesCallbackData(callbackData: string): string {
-  const byteLength = Buffer.byteLength(callbackData, "utf8");
-  if (byteLength > TELEGRAM_CALLBACK_DATA_MAX_BYTES) {
-    throw new Error(
-      `Quick Replies callback_data exceeds ${TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes (${byteLength} bytes): ${callbackData}`
-    );
-  }
-
-  return callbackData;
-}
-
-function ticketBatchCancelCallbackData(previewToken: string): string {
-  const callbackData = `batch:cancel:${previewToken}`;
-  const byteLength = Buffer.byteLength(callbackData, "utf8");
-  if (byteLength > TELEGRAM_CALLBACK_DATA_MAX_BYTES) {
-    throw new Error(
-      `Ticket batch callback_data exceeds ${TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes (${byteLength} bytes).`
-    );
-  }
-  return callbackData;
-}
-
-function ticketBatchApplyCallbackData(previewToken: string): string {
-  return validateTicketBatchCallbackData(`batch:apply:${previewToken}`);
-}
-
-function ticketBatchPageCallbackData(previewToken: string, page: number): string {
-  return validateTicketBatchCallbackData(`batch:page:${previewToken}:${page}`);
-}
-
-function validateTicketBatchCallbackData(callbackData: string): string {
-  const byteLength = Buffer.byteLength(callbackData, "utf8");
-  if (byteLength > TELEGRAM_CALLBACK_DATA_MAX_BYTES) {
-    throw new Error(
-      `Ticket batch callback_data exceeds ${TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes (${byteLength} bytes).`
-    );
-  }
-  return callbackData;
-}
-
-function isTicketAnswerPackageDocument(message: Message | undefined): boolean {
-  if (!message || !("document" in message) || !message.document) {
-    return false;
-  }
-  return /^ticket-answers_.+\.json$/i.test(message.document.file_name ?? "");
-}
-
-function ticketBatchPreviewKeyboard(previewToken: string, page: number, pageCount: number): InlineKeyboard {
-  const keyboard = new InlineKeyboard();
-  if (page > 0) keyboard.text("Previous", ticketBatchPageCallbackData(previewToken, page - 1));
-  if (page + 1 < pageCount) keyboard.text("Next", ticketBatchPageCallbackData(previewToken, page + 1));
-  return keyboard
-    .row()
-    .text("Apply", ticketBatchApplyCallbackData(previewToken))
-    .text("Cancel", ticketBatchCancelCallbackData(previewToken));
-}
-
-function formatTicketBatchPreviewPage(pages: string[], page: number): string {
-  const content = pages[page];
-  if (content === undefined) {
-    throw new TicketBatchValidationError("Ticket answer package preview page is not available.");
-  }
-  return `${content}\n\nPage ${page + 1}/${pages.length}`;
-}
-
-function formatTicketBatchExportCaption(
-  exportId: string,
-  zip: Pick<
-    Awaited<ReturnType<typeof createTicketBatchZip>>,
-    "ticketCount" | "messageCount" | "attachmentCount" | "embeddedAttachmentCount" | "failedAttachmentCount"
-  >
-): string {
-  const attachments = zip.failedAttachmentCount
-    ? `Attachments: ${zip.embeddedAttachmentCount} embedded, ${zip.failedAttachmentCount} unavailable`
-    : `Attachments: ${zip.attachmentCount}`;
-  return [
-    "Ticket export ready",
-    `Export: ${exportId}`,
-    `Tickets: ${zip.ticketCount}`,
-    `Messages: ${zip.messageCount}`,
-    attachments,
-    `Use the included instructions to prepare and return ticket-answers_${exportId}.json.`,
-  ].join("\n");
-}
-
-function isHostedTelegramFileTooLargeError(error: unknown): error is GrammyError {
-  return error instanceof GrammyError && error.error_code === 400 && /\bfile is too big\b/i.test(error.description);
-}
-
-function isUnavailableTelegramFileError(error: unknown): error is GrammyError {
-  return (
-    error instanceof GrammyError &&
-    error.error_code === 400 &&
-    /\bwrong file_id or the file is temporarily unavailable\b/i.test(error.description)
-  );
-}
-
 function userTicketKeyboard(ticketId: number): InlineKeyboard {
   return new InlineKeyboard().text("Close ticket", `user:close:${ticketId}`);
 }
@@ -3171,601 +1877,6 @@ function entityNotificationProviderStatus(provider: { status?(): string }): stri
   }
 }
 
-function moderationSettingKey(name: string): string {
-  return `${MODERATION_SETTING_PREFIX}:${name}`;
-}
-
-function moderationConfig(db: SupportDatabase) {
-  const legacy = parseModerationConfig({
-    enabled: db.getSetting(moderationSettingKey("enabled")),
-    target: db.getSetting(moderationSettingKey("target")),
-    warning_text: db.getSetting(moderationSettingKey("warning_text")),
-    lookback_minutes: db.getSetting(moderationSettingKey("lookback_minutes")),
-    warning_cooldown_minutes: db.getSetting(moderationSettingKey("warning_cooldown_minutes")),
-    warning_message_threshold: db.getSetting(moderationSettingKey("warning_message_threshold")),
-    allowlist: db.getSetting(moderationSettingKey("allowlist")),
-  });
-  const managed = legacy.targetChatId === null ? undefined : db.getManagedPublicChat(legacy.targetChatId, true);
-  if (managed?.active === 0) return { ...legacy, enabled: false, targetChatId: null };
-  return managed
-    ? {
-        enabled: managed.moderation_enabled === 1,
-        targetChatId: managed.chat_id,
-        warningText: managed.warning_text,
-        lookbackMinutes: managed.lookback_minutes,
-        warningCooldownMinutes: managed.warning_cooldown_minutes,
-        warningMessageThreshold: managed.warning_message_threshold,
-        allowlist: managed.allowlist,
-      }
-    : legacy;
-}
-
-function moderationConfigForChat(db: SupportDatabase, chatId: number) {
-  const managed = db.getManagedPublicChat(chatId, true);
-  if (managed) {
-    return {
-      enabled: managed.active === 1 && managed.moderation_enabled === 1,
-      targetChatId: managed.active === 1 ? managed.chat_id : null,
-      warningText: managed.warning_text,
-      lookbackMinutes: managed.lookback_minutes,
-      warningCooldownMinutes: managed.warning_cooldown_minutes,
-      warningMessageThreshold: managed.warning_message_threshold,
-      allowlist: managed.allowlist,
-    };
-  }
-  const legacy = moderationConfig(db);
-  return legacy.targetChatId === chatId ? legacy : { ...legacy, enabled: false, targetChatId: null };
-}
-
-async function formatModerationStatus(
-  db: SupportDatabase,
-  moderation: ReturnType<typeof moderationConfig>,
-  api: BotApi,
-  botId: number | undefined,
-  staffChatId: number
-): Promise<string> {
-  const pending = db.listLanguageModerationRecoveryJobs(staffChatId, new Date().toISOString()).length;
-  const rights = await validateModerationRights(api, moderation.targetChatId, botId);
-  return [
-    `Moderation: ${moderation.enabled ? "enabled" : "disabled"}`,
-    `Target: ${moderation.targetChatId ?? "not configured"}`,
-    `Bot rights: ${rights}`,
-    `Warning cooldown: ${moderation.warningCooldownMinutes} minutes and ${moderation.warningMessageThreshold} ordinary messages`,
-    `Lookback: ${moderation.lookbackMinutes} minutes`,
-    `Allowlist entries: ${moderation.allowlist.length}`,
-    `Due cleanup/log recovery jobs: ${pending}`,
-  ].join("\n");
-}
-
-async function validateModerationRights(
-  api: BotApi,
-  targetChatId: number | null,
-  botId: number | undefined
-): Promise<string> {
-  if (!targetChatId || !botId) return "configure a reachable target chat first.";
-  try {
-    const result = await validatePublicModerationChat(api, targetChatId, botId);
-    const missing = result.checks.filter((check) => !check.passed).map((check) => check.label.toLowerCase());
-    return result.valid ? "ok" : `missing required rights: ${missing.join(", ")}.`;
-  } catch {
-    return "the target chat or bot membership could not be verified.";
-  }
-}
-
-async function handlePublicLanguageModeration(
-  db: SupportDatabase,
-  ctx: Context,
-  installation: InstallationService,
-  botId: number | undefined,
-  now: () => Date,
-  cleanupScheduler: ModerationCleanupScheduler,
-  pendingWarnings: PendingWarningScheduler
-): Promise<void> {
-  if (!ctx.chat || !ctx.from || !ctx.message || ctx.from.is_bot) return;
-  const moderation = moderationConfigForChat(db, ctx.chat.id);
-  if (
-    !moderation.enabled ||
-    moderation.targetChatId !== ctx.chat.id ||
-    ctx.chat.id === installation.requireStaffChatId()
-  )
-    return;
-  const content = getMessageContent(ctx.message).text;
-  const messageThreadId = typeof ctx.message.message_thread_id === "number" ? ctx.message.message_thread_id : null;
-  if (isOrdinaryUserModerationTarget(ctx.message, ctx.from)) {
-    db.addLanguageModerationMessageAuthor({
-      chatId: ctx.chat.id,
-      messageId: ctx.message.message_id,
-      userTelegramId: ctx.from.id,
-      username: usernameOf(ctx.from),
-      messageThreadId,
-    });
-  }
-  const chatState = db.getLanguageModerationWarningState(ctx.chat.id, messageThreadId);
-  db.upsertLanguageModerationWarningState(ctx.chat.id, messageThreadId, {
-    lastWarningMessageId: chatState?.last_warning_message_id ?? null,
-    lastWarningAt: chatState?.last_warning_at ?? null,
-    ordinaryMessagesSinceWarning: (chatState?.ordinary_messages_since_warning ?? 0) + 1,
-    pendingWarningDueAt: chatState?.pending_warning_due_at ?? null,
-    pendingWarningStartedAt: chatState?.pending_warning_started_at ?? null,
-  });
-  if (!content || isCommandText(content)) return;
-  const classificationTime = now();
-  const adaptiveFeatures = extractAdaptiveModerationFeatures(content, moderation.allowlist);
-  let adaptiveEvidence;
-  if (adaptiveFeatures && isOrdinaryUserModerationTarget(ctx.message, ctx.from)) {
-    db.recordLanguageModerationObservation({
-      chatId: ctx.chat.id,
-      messageId: ctx.message.message_id,
-      userTelegramId: ctx.from.id,
-      features: adaptiveFeatures,
-      observedAt: classificationTime.toISOString(),
-      expiresAt: new Date(classificationTime.getTime() + ADAPTIVE_MESSAGE_FEATURE_TTL_MS).toISOString(),
-    });
-    adaptiveEvidence = db.getLanguageModerationAdaptiveEvidence({
-      chatId: ctx.chat.id,
-      features: adaptiveFeatures,
-      activeSince: new Date(classificationTime.getTime() - ADAPTIVE_LEARNING_HORIZON_MS).toISOString(),
-      currentTime: classificationTime.toISOString(),
-    });
-  }
-  if (classifyEnglishOnlyMessage(content, moderation.allowlist, adaptiveEvidence, classificationTime) !== "violation")
-    return;
-
-  const state = db.getLanguageModerationUserState(ctx.chat.id, ctx.from.id) ?? {
-    current_strikes: 0,
-    sanction_tier: 0,
-    first_strike_at: null,
-  };
-  if (
-    !db.addLanguageModerationViolation({
-      chat_id: ctx.chat.id,
-      user_telegram_id: ctx.from.id,
-      message_id: ctx.message.message_id,
-      message_thread_id: messageThreadId,
-      username: usernameOf(ctx.from),
-      cycle_tier: state.sanction_tier,
-    })
-  )
-    return;
-  if (state.current_strikes === 0) {
-    const currentChatState = db.getLanguageModerationWarningState(ctx.chat.id, messageThreadId);
-    const currentTime = now();
-    const lastWarningAt = currentChatState?.last_warning_at ? Date.parse(currentChatState.last_warning_at) : 0;
-    const canWarn =
-      !lastWarningAt ||
-      (currentTime.getTime() - lastWarningAt >= moderation.warningCooldownMinutes * 60_000 &&
-        (currentChatState?.ordinary_messages_since_warning ?? 0) >= moderation.warningMessageThreshold);
-    if (canWarn) {
-      if (!currentChatState?.pending_warning_due_at) {
-        const startedAt = currentTime;
-        const dueAt = new Date(startedAt.getTime() + 3_000);
-        db.upsertLanguageModerationWarningState(ctx.chat.id, messageThreadId, {
-          lastWarningMessageId: currentChatState?.last_warning_message_id ?? null,
-          lastWarningAt: currentChatState?.last_warning_at ?? null,
-          ordinaryMessagesSinceWarning: currentChatState?.ordinary_messages_since_warning ?? 0,
-          pendingWarningStartedAt: startedAt.toISOString(),
-          pendingWarningDueAt: dueAt.toISOString(),
-        });
-        pendingWarnings.schedule(ctx.api, db, ctx.chat.id, messageThreadId, 3_000);
-      }
-    } else {
-      await advanceModerationStrike({
-        db,
-        api: ctx.api,
-        chatId: ctx.chat.id,
-        chatTitle: ("title" in ctx.chat ? ctx.chat.title : null) ?? null,
-        userId: ctx.from.id,
-        username: usernameOf(ctx.from),
-        messageId: ctx.message.message_id,
-        state,
-        now,
-        botId,
-        cleanupScheduler,
-        staffChatId: installation.requireStaffChatId(),
-        setStrikeReaction: true,
-        strikeTime: currentTime,
-      });
-    }
-    return;
-  }
-  await advanceModerationStrike({
-    db,
-    api: ctx.api,
-    chatId: ctx.chat.id,
-    chatTitle: ("title" in ctx.chat ? ctx.chat.title : null) ?? null,
-    userId: ctx.from.id,
-    username: usernameOf(ctx.from),
-    messageId: ctx.message.message_id,
-    state,
-    now,
-    botId,
-    cleanupScheduler,
-    staffChatId: installation.requireStaffChatId(),
-    setStrikeReaction: true,
-  });
-}
-
-function isOrdinaryUserModerationTarget(message: Message, from: User): boolean {
-  if (from.is_bot || message.sender_chat || message.message_id <= 0) return false;
-  return ORDINARY_MODERATION_MESSAGE_FIELDS.some((field) => field in message);
-}
-
-function isPendingCurrentCycleFirstStrike(
-  violation: LanguageModerationViolation | undefined,
-  userId: number,
-  state: Pick<LanguageModerationUserState, "current_strikes" | "sanction_tier">
-): boolean {
-  return Boolean(
-    violation &&
-    state.current_strikes === 0 &&
-    violation.user_telegram_id === userId &&
-    violation.cycle_tier === state.sanction_tier &&
-    violation.moderation_cycle_id === null &&
-    violation.cleanup_state === "PENDING"
-  );
-}
-
-async function advanceModerationStrike(input: {
-  db: SupportDatabase;
-  api: BotApi;
-  chatId: number;
-  chatTitle: string | null;
-  userId: number;
-  username: string | null;
-  messageId: number;
-  state: Pick<LanguageModerationUserState, "current_strikes" | "sanction_tier" | "first_strike_at">;
-  now: () => Date;
-  botId: number | undefined;
-  cleanupScheduler: ModerationCleanupScheduler;
-  staffChatId: number;
-  setStrikeReaction: boolean;
-  strikeTime?: Date;
-}): Promise<{ currentStrikes: number; sanctionTier: number } | undefined> {
-  if (input.state.current_strikes < 2) {
-    const currentStrikes = input.state.current_strikes + 1;
-    input.db.upsertLanguageModerationUserState({
-      chat_id: input.chatId,
-      user_telegram_id: input.userId,
-      username: input.username,
-      current_strikes: currentStrikes,
-      sanction_tier: input.state.sanction_tier,
-      first_strike_at:
-        input.state.current_strikes === 0
-          ? (input.strikeTime ?? input.now()).toISOString()
-          : input.state.first_strike_at,
-    });
-    if (input.setStrikeReaction) {
-      await setModerationReaction(input.api, input.chatId, input.messageId, MODERATION_STRIKE_REACTION);
-    }
-    return { currentStrikes, sanctionTier: input.state.sanction_tier };
-  }
-
-  const tier = Math.min(input.state.sanction_tier, 2);
-  const sanctionKind = tier === 0 ? "24-hour mute" : tier === 1 ? "7-day mute" : "permanent ban";
-  await setModerationReaction(input.api, input.chatId, input.messageId, MODERATION_SANCTION_REACTION);
-  try {
-    if (tier === 2) await input.api.banChatMember(input.chatId, input.userId);
-    else
-      await input.api.restrictChatMember(
-        input.chatId,
-        input.userId,
-        { can_send_messages: false },
-        { until_date: Math.floor(input.now().getTime() / 1000) + (tier === 0 ? 86_400 : 604_800) }
-      );
-  } catch (error) {
-    await containModerationSanctionFailure(input, sanctionKind, error);
-    return undefined;
-  }
-
-  const nextTier = Math.min(3, input.state.sanction_tier + 1);
-  const violationCycleId = randomUUID();
-  let cleanupJobId: number;
-  try {
-    cleanupJobId = input.db.completeLanguageModerationSanction({
-      chatId: input.chatId,
-      userId: input.userId,
-      cycleTier: input.state.sanction_tier,
-      violationCycleId,
-      userState: {
-        chat_id: input.chatId,
-        user_telegram_id: input.userId,
-        username: input.username,
-        current_strikes: 0,
-        sanction_tier: nextTier,
-        first_strike_at: null,
-      },
-      cleanupJob: {
-        staff_chat_id: input.staffChatId,
-        chat_id: input.chatId,
-        user_telegram_id: input.userId,
-        username: input.username,
-        chat_title: input.chatTitle,
-        sanction_tier: nextTier,
-        sanction_kind: sanctionKind,
-        violation_cycle_id: violationCycleId,
-        cleanup_due_at: new Date(input.now().getTime() + 10_000).toISOString(),
-      },
-    });
-  } catch (error) {
-    logger.error(
-      {
-        phase: "post_sanction_persistence",
-        chatId: input.chatId,
-        userId: input.userId,
-        sanctionTier: tier,
-        sanctionKind,
-        errorName: error instanceof Error ? error.name : "unknown",
-      },
-      "MODERATION_POST_SANCTION_PERSISTENCE_FAILED"
-    );
-    throw error;
-  }
-
-  try {
-    input.cleanupScheduler(input.api, input.db, cleanupJobId);
-  } catch (error) {
-    logger.warn(
-      {
-        chatId: input.chatId,
-        userId: input.userId,
-        cleanupJobId,
-        sanctionTier: tier,
-        sanctionKind,
-        errorName: error instanceof Error ? error.name : "unknown",
-      },
-      "MODERATION_CLEANUP_SCHEDULE_FAILED"
-    );
-  }
-  return { currentStrikes: 0, sanctionTier: nextTier };
-}
-
-async function containModerationSanctionFailure(
-  input: {
-    db: SupportDatabase;
-    api: BotApi;
-    chatId: number;
-    userId: number;
-    botId: number | undefined;
-    state: Pick<LanguageModerationUserState, "sanction_tier">;
-  },
-  sanctionKind: string,
-  error: unknown
-): Promise<void> {
-  const diagnostic = normalizeTelegramDeliveryError(error);
-  logger.warn(
-    {
-      chatId: input.chatId,
-      userId: input.userId,
-      sanctionTier: input.state.sanction_tier,
-      sanctionKind,
-      category: diagnostic.category,
-      permanence: diagnostic.permanence,
-      telegramErrorCode: diagnostic.telegramErrorCode,
-    },
-    "MODERATION_SANCTION_FAILED"
-  );
-
-  if (diagnostic.permanence !== "PERMANENT") return;
-  if (input.botId === undefined) {
-    logger.warn(
-      {
-        chatId: input.chatId,
-        userId: input.userId,
-        sanctionTier: input.state.sanction_tier,
-        sanctionKind,
-        category: diagnostic.category,
-        permanence: diagnostic.permanence,
-      },
-      "MODERATION_RIGHTS_REVALIDATION_UNKNOWN"
-    );
-    return;
-  }
-
-  let validation;
-  try {
-    validation = await validatePublicModerationChat(input.api, input.chatId, input.botId);
-  } catch (validationError) {
-    const validationDiagnostic = normalizeTelegramDeliveryError(validationError);
-    if (isConfirmedTelegramChatAccessLoss(validationError)) {
-      disableModerationAfterConfirmedRightsLoss(input, sanctionKind, ["bot_member", "bot_admin"], true);
-      return;
-    }
-    logger.warn(
-      {
-        chatId: input.chatId,
-        userId: input.userId,
-        sanctionTier: input.state.sanction_tier,
-        sanctionKind,
-        category: validationDiagnostic.category,
-        permanence: validationDiagnostic.permanence,
-        telegramErrorCode: validationDiagnostic.telegramErrorCode,
-      },
-      "MODERATION_RIGHTS_REVALIDATION_UNKNOWN"
-    );
-    return;
-  }
-
-  if (validation.valid) return;
-
-  const missingChecks = validation.checks.filter((check) => !check.passed).map((check) => check.key);
-  disableModerationAfterConfirmedRightsLoss(input, sanctionKind, missingChecks, false, validation);
-}
-
-function disableModerationAfterConfirmedRightsLoss(
-  input: {
-    db: SupportDatabase;
-    chatId: number;
-    userId: number;
-    state: Pick<LanguageModerationUserState, "sanction_tier">;
-  },
-  sanctionKind: string,
-  missingChecks: readonly string[],
-  connectionUnreachable: boolean,
-  validation?: {
-    reactionsAvailable: boolean | null;
-    title: string | null;
-    username: string | null;
-    isForum: boolean;
-  }
-): void {
-  const managed = input.db.getManagedPublicChat(input.chatId);
-  if (managed) {
-    if (connectionUnreachable) input.db.recordManagedPublicChatUnreachable(input.chatId);
-    else if (validation)
-      input.db.recordManagedPublicChatPermissionHealth({
-        chatId: input.chatId,
-        healthy: false,
-        reactionsAvailable: validation.reactionsAvailable,
-        connected: true,
-        title: validation.title,
-        username: validation.username,
-        isForum: validation.isForum,
-      });
-    input.db.setManagedPublicChatModerationEnabled(input.chatId, false);
-  } else {
-    input.db.setSetting(moderationSettingKey("enabled"), "false");
-  }
-  logger.error(
-    {
-      chatId: input.chatId,
-      userId: input.userId,
-      sanctionTier: input.state.sanction_tier,
-      sanctionKind,
-      missingChecks,
-      managed: Boolean(managed),
-    },
-    "MODERATION_RIGHTS_CONFIRMED_MISSING"
-  );
-}
-
-function isConfirmedTelegramChatAccessLoss(error: unknown): boolean {
-  if (!(error instanceof GrammyError) || (error.error_code !== 400 && error.error_code !== 403)) return false;
-  const description = error.description.toLowerCase();
-  return [
-    "bot is not a member of the chat",
-    "bot is not a member of the supergroup chat",
-    "bot was kicked from the chat",
-    "bot was kicked from the supergroup chat",
-    "chat not found",
-  ].some((phrase) => description.includes(phrase));
-}
-
-function hasEmojiReaction(reactions: readonly ReactionType[], emoji: string): boolean {
-  return reactions.some((reaction) => reaction.type === "emoji" && reaction.emoji === emoji);
-}
-
-async function setModerationReaction(
-  api: BotApi,
-  chatId: number,
-  messageId: number,
-  emoji: ModerationReactionEmoji
-): Promise<void> {
-  try {
-    const reaction: ReactionTypeEmoji = { type: "emoji", emoji };
-    await api.setMessageReaction(chatId, messageId, [reaction]);
-  } catch (error) {
-    const diagnostic = normalizeTelegramDeliveryError(error);
-    logger.warn(
-      {
-        chatId,
-        messageId,
-        emoji,
-        telegramErrorCode: diagnostic.telegramErrorCode,
-        description: diagnostic.description,
-      },
-      "Could not set moderation reaction"
-    );
-  }
-}
-
-type PendingWarningTimer = ReturnType<typeof setTimeout>;
-type PendingWarningTimerFactory = (callback: () => void, delayMs: number) => PendingWarningTimer;
-
-export class PendingWarningScheduler {
-  private readonly timers = new Map<string, PendingWarningTimer>();
-
-  constructor(
-    private readonly backgroundTasks?: BackgroundTaskTracker,
-    private readonly createTimer: PendingWarningTimerFactory = setTimeout,
-    private readonly clearTimer: (timer: PendingWarningTimer) => void = clearTimeout
-  ) {}
-
-  schedule(api: BotApi, db: SupportDatabase, chatId: number, messageThreadId: number | null, delayMs: number): void {
-    const key = `${chatId}:${messageThreadId ?? 0}`;
-    if (this.timers.has(key)) return;
-    const timer = this.createTimer(() => {
-      this.timers.delete(key);
-      const run = () => processPendingWarning(api, db, chatId, messageThreadId);
-      if (this.backgroundTasks) {
-        const accepted = this.backgroundTasks.run(run);
-        if (!accepted)
-          logger.debug(
-            { operation: "moderation_pending_warning", chatId, messageThreadId },
-            "Background work was dropped during shutdown"
-          );
-      } else void run();
-    }, delayMs);
-    timer.unref();
-    this.timers.set(key, timer);
-  }
-
-  stop(): void {
-    for (const timer of this.timers.values()) this.clearTimer(timer);
-    this.timers.clear();
-  }
-}
-
-export async function processPendingWarning(
-  api: BotApi,
-  db: SupportDatabase,
-  chatId: number,
-  messageThreadId: number | null = null
-): Promise<void> {
-  const state = db.getLanguageModerationWarningState(chatId, messageThreadId);
-  if (!state?.pending_warning_due_at || Date.parse(state.pending_warning_due_at) > Date.now()) return;
-  const moderation = moderationConfigForChat(db, chatId);
-  if (!moderation.enabled || moderation.targetChatId !== chatId) return;
-  const grouped = db.claimLanguageModerationFirstStrikes(
-    chatId,
-    new Date(Date.now() - moderation.lookbackMinutes * 60_000).toISOString(),
-    messageThreadId
-  );
-  if (!grouped.length) {
-    db.upsertLanguageModerationWarningState(chatId, messageThreadId, {
-      lastWarningMessageId: state.last_warning_message_id,
-      lastWarningAt: state.last_warning_at,
-      ordinaryMessagesSinceWarning: state.ordinary_messages_since_warning,
-      pendingWarningDueAt: null,
-      pendingWarningStartedAt: null,
-    });
-    return;
-  }
-  for (const user of grouped) {
-    await setModerationReaction(api, chatId, user.messageId, MODERATION_STRIKE_REACTION);
-  }
-  if (state.last_warning_message_id) {
-    try {
-      await api.deleteMessage(chatId, state.last_warning_message_id);
-    } catch {}
-  }
-  try {
-    const warning = await api.sendMessage(
-      chatId,
-      moderation.warningText,
-      messageThreadId === null ? {} : { message_thread_id: messageThreadId }
-    );
-    db.upsertLanguageModerationWarningState(chatId, messageThreadId, {
-      lastWarningMessageId: warning.message_id,
-      lastWarningAt: new Date().toISOString(),
-      ordinaryMessagesSinceWarning: 0,
-      pendingWarningDueAt: null,
-      pendingWarningStartedAt: null,
-    });
-  } catch (error) {
-    logger.warn({ chatId, err: error }, "Could not send pending language moderation warning");
-  }
-}
-
 function isPrivateChat(ctx: Context): boolean {
   return ctx.chat?.type === "private";
 }
@@ -3801,15 +1912,6 @@ function parseTicketId(ctx: CommandContext<Context>): number | null {
 function parseUserId(value: string): number | null {
   const id = Number(value);
   return Number.isSafeInteger(id) && id > 0 ? id : null;
-}
-
-function parseQuickRepliesPage(value: string | undefined): number | null {
-  if (!value || !/^(0|[1-9]\d*)$/.test(value)) {
-    return null;
-  }
-
-  const page = Number(value);
-  return Number.isSafeInteger(page) ? page : null;
 }
 
 function parseBanCommand(ctx: CommandContext<Context>): BanCommand | null {
