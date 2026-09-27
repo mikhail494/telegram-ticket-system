@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { GrammyError } from "grammy";
+import { Bot, GrammyError } from "grammy";
 import type { NormalizedDeliveryError } from "../src/deliveryDiagnostics.js";
-import type { SupportDatabase } from "../src/db.js";
-import type { InstallationService } from "../src/installation.js";
+import { SupportDatabase } from "../src/db.js";
+import { InstallationService } from "../src/installation.js";
 import {
   TicketBatchExportInProgressError,
   TicketBatchRuntime,
@@ -32,6 +32,79 @@ const unknownDiagnostic: NormalizedDeliveryError = {
   description: null,
   occurredAt: "2026-01-01T00:00:00.000Z",
 };
+
+class WorkspaceRecoveryDatabase extends SupportDatabase {
+  constructor(private readonly calls: number[]) {
+    super(":memory:");
+  }
+
+  override listInvalidTicketBatchSuccessEchoes(
+    staffChatId: number
+  ): ReturnType<SupportDatabase["listInvalidTicketBatchSuccessEchoes"]> {
+    this.calls.push(staffChatId);
+    return [];
+  }
+
+  override listClosedTicketBatchPendingReplyEchoes(
+    staffChatId: number
+  ): ReturnType<SupportDatabase["listClosedTicketBatchPendingReplyEchoes"]> {
+    this.calls.push(staffChatId);
+    return [];
+  }
+
+  override listPendingTicketBatchFailureEvents(
+    staffChatId: number
+  ): ReturnType<SupportDatabase["listPendingTicketBatchFailureEvents"]> {
+    this.calls.push(staffChatId);
+    return [];
+  }
+
+  override listPendingTicketBatchTopicEchoes(
+    staffChatId: number
+  ): ReturnType<SupportDatabase["listPendingTicketBatchTopicEchoes"]> {
+    this.calls.push(staffChatId);
+    return [];
+  }
+
+  override listPendingTicketBatchReplyAndCloseContinuations(
+    staffChatId: number
+  ): ReturnType<SupportDatabase["listPendingTicketBatchReplyAndCloseContinuations"]> {
+    this.calls.push(staffChatId);
+    return [];
+  }
+
+  override listPendingTicketBatchSilentCloseContinuations(
+    staffChatId: number
+  ): ReturnType<SupportDatabase["listPendingTicketBatchSilentCloseContinuations"]> {
+    this.calls.push(staffChatId);
+    return [];
+  }
+
+  override listPendingTicketBatchFinalSummaries(
+    staffChatId: number
+  ): ReturnType<SupportDatabase["listPendingTicketBatchFinalSummaries"]> {
+    this.calls.push(staffChatId);
+    return [];
+  }
+
+  override getNextTicketBatchStaffRetryAt(staffChatId: number): string | undefined {
+    this.calls.push(staffChatId);
+    return undefined;
+  }
+}
+
+class WorkspaceRecoveryInstallation extends InstallationService {
+  constructor(
+    db: SupportDatabase,
+    private readonly activeWorkspace: () => number
+  ) {
+    super(db);
+  }
+
+  override requireStaffChatId(): number {
+    return this.activeWorkspace();
+  }
+}
 
 function createRuntime(
   timers: Array<{ callback: () => void; delayMs: number; unref(): void }>,
@@ -197,58 +270,39 @@ describe("ticket batch runtime ownership", () => {
     const secondCalls: number[] = [];
     let firstWorkspace = -1001;
     const secondWorkspace = -1002;
-    const recoveryDependencies = (workspace: () => number, calls: number[]): TicketBatchRuntimeDependencies => {
-      const database = {
-        listInvalidTicketBatchSuccessEchoes: (chatId: number) => {
-          calls.push(chatId);
-          return [];
-        },
-        listClosedTicketBatchPendingReplyEchoes: (chatId: number) => {
-          calls.push(chatId);
-          return [];
-        },
-        listPendingTicketBatchFailureEvents: (chatId: number) => {
-          calls.push(chatId);
-          return [];
-        },
-        listPendingTicketBatchTopicEchoes: (chatId: number) => {
-          calls.push(chatId);
-          return [];
-        },
-        listPendingTicketBatchReplyAndCloseContinuations: (chatId: number) => {
-          calls.push(chatId);
-          return [];
-        },
-        listPendingTicketBatchSilentCloseContinuations: (chatId: number) => {
-          calls.push(chatId);
-          return [];
-        },
-        listPendingTicketBatchFinalSummaries: (chatId: number) => {
-          calls.push(chatId);
-          return [];
-        },
-        getNextTicketBatchStaffRetryAt: (chatId: number) => {
-          calls.push(chatId);
-          return null;
-        },
-      } as unknown as SupportDatabase;
-      return {
+    const firstDatabase = new WorkspaceRecoveryDatabase(firstCalls);
+    const secondDatabase = new WorkspaceRecoveryDatabase(secondCalls);
+    const createRuntime = (database: SupportDatabase, workspace: () => number) =>
+      new TicketBatchRuntime({
         db: database,
-        installation: { requireStaffChatId: workspace } as unknown as InstallationService,
-      } as unknown as TicketBatchRuntimeDependencies;
-    };
-    const first = new TicketBatchRuntime(recoveryDependencies(() => firstWorkspace, firstCalls));
-    const second = new TicketBatchRuntime(recoveryDependencies(() => secondWorkspace, secondCalls));
+        installation: new WorkspaceRecoveryInstallation(database, workspace),
+        api: new Bot("123456:TEST_BOT_TOKEN").api,
+        backgroundTasks: { run: () => true, stopAccepting: () => undefined, drain: async () => undefined },
+        runStaffChatOperation: (operation) => operation(),
+        deliverUserReply: async () => 0,
+        closeTicket: async () => undefined,
+        staffActor: () => ({ type: "SYSTEM", displayName: "system", username: null, telegramId: null }),
+        refreshTicket: async () => undefined,
+      });
+    const first = createRuntime(firstDatabase, () => firstWorkspace);
+    const second = createRuntime(secondDatabase, () => secondWorkspace);
 
-    await first.recoverPendingStaffOperations();
-    await second.recoverPendingStaffOperations();
-    firstWorkspace = -1003;
-    await first.recoverPendingStaffOperations();
+    try {
+      await first.recoverPendingStaffOperations();
+      await second.recoverPendingStaffOperations();
+      firstWorkspace = -1003;
+      await first.recoverPendingStaffOperations();
 
-    assert.equal(firstCalls.includes(-1002), false);
-    assert.equal(secondCalls.includes(-1001), false);
-    assert.equal(firstCalls.includes(-1003), true);
-    assert.deepEqual(new Set(secondCalls), new Set([-1002]));
+      assert.equal(firstCalls.includes(-1002), false);
+      assert.equal(secondCalls.includes(-1001), false);
+      assert.equal(firstCalls.includes(-1003), true);
+      assert.deepEqual(new Set(secondCalls), new Set([-1002]));
+    } finally {
+      first.stop();
+      second.stop();
+      firstDatabase.close();
+      secondDatabase.close();
+    }
   });
 
   it("does not recover a reconciled package through a workspace that became active later", async () => {
