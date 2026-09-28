@@ -6,6 +6,7 @@ import { config } from "./config.js";
 import type { SupportDatabase } from "./db.js";
 import { logger } from "./logger.js";
 import { normalizeTelegramDeliveryError, runReplaySafeTelegramEdit } from "./deliveryDiagnostics.js";
+import { readResponseBytesBounded, ResponseBodyLimitExceededError } from "./boundedTelegramResponse.js";
 import type { InstallationService, Permission } from "./installation.js";
 import type { PrivateControlPlane } from "./privateControlPlane.js";
 import {
@@ -22,6 +23,8 @@ import {
   type TicketBatchAttachmentDownloadResult,
 } from "./ticketBatch.js";
 import { TELEGRAM_CALLBACK_DATA_MAX_BYTES } from "./telegram.js";
+import { DEFAULT_TICKET_BATCH_RESOURCE_LIMITS, type TicketBatchResourceLimits } from "./ticketBatchResourceLimits.js";
+import { streamTicketBatchAttachment } from "./ticketBatchTransfer.js";
 import { TicketBatchExportInProgressError, type TicketBatchRuntime } from "./ticketBatchRuntime.js";
 import type { StaffChatOperationOptions } from "./staffChatDelivery.js";
 
@@ -61,6 +64,7 @@ export interface TicketBatchTelegramDependencies {
   installation: InstallationService;
   ticketBatchRuntime: TicketBatchRuntime;
   fetchImpl: typeof fetch;
+  resourceLimits?: Partial<TicketBatchResourceLimits>;
   runStaffChatOperation<T>(
     operation: () => Promise<T>,
     options: StaffChatOperationOptions,
@@ -94,6 +98,7 @@ export function createTicketBatchTelegramSurface(dependencies: TicketBatchTelegr
     staffOnlyText: STAFF_ONLY_TEXT,
     privateControlPlane,
   } = dependencies;
+  const resourceLimits = { ...DEFAULT_TICKET_BATCH_RESOURCE_LIMITS, ...dependencies.resourceLimits };
   const renderPrivateScreen = privateControlPlane.renderScreen.bind(privateControlPlane);
   const refreshPrivateScreen = privateControlPlane.refreshScreen.bind(privateControlPlane);
   const sendFreshPrivateScreen = privateControlPlane.sendFreshScreen.bind(privateControlPlane);
@@ -190,7 +195,7 @@ export function createTicketBatchTelegramSurface(dependencies: TicketBatchTelegr
           });
           zip = await createTicketBatchZip(
             snapshot,
-            async (attachment): Promise<TicketBatchAttachmentDownloadResult> => {
+            async (attachment, destinationPath, limits): Promise<TicketBatchAttachmentDownloadResult> => {
               if (!attachment.fileId) {
                 throw new TicketBatchValidationError(
                   `Ticket #${attachment.ticketId} message ${attachment.messageId} has no downloadable media reference.`
@@ -217,6 +222,13 @@ export function createTicketBatchTelegramSurface(dependencies: TicketBatchTelegr
                 }
                 throw error;
               }
+              if (typeof file.file_size === "number" && file.file_size > resourceLimits.attachmentMaxBytes) {
+                return {
+                  unavailable: true,
+                  failureCategory: "TELEGRAM_FILE_TOO_LARGE",
+                  failureReason: "Attachment exceeds the hosted Telegram Bot API download limit.",
+                };
+              }
               if (!file.file_path) {
                 throw new TicketBatchValidationError(
                   `Ticket #${attachment.ticketId} message ${attachment.messageId} attachment could not be retrieved.`
@@ -228,7 +240,13 @@ export function createTicketBatchTelegramSurface(dependencies: TicketBatchTelegr
                   `Ticket #${attachment.ticketId} message ${attachment.messageId} attachment could not be downloaded.`
                 );
               }
-              return { bytes: new Uint8Array(await response.arrayBuffer()), telegramFilePath: file.file_path };
+              const result = await streamTicketBatchAttachment(response, destinationPath, file.file_size, limits);
+              return "unavailable" in result ? result : { ...result, telegramFilePath: file.file_path };
+            },
+            {
+              maxAttachmentBytes: resourceLimits.attachmentMaxBytes,
+              maxExportBytes: resourceLimits.exportMaxBytes,
+              maxZipBytes: resourceLimits.zipMaxBytes,
             }
           );
           db.createTicketBatchExport({
@@ -405,7 +423,7 @@ export function createTicketBatchTelegramSurface(dependencies: TicketBatchTelegr
     if (!document || !ctx.chat) {
       return;
     }
-    if (typeof document.file_size === "number" && document.file_size > 5 * 1024 * 1024) {
+    if (typeof document.file_size === "number" && document.file_size > resourceLimits.answerPackageMaxBytes) {
       if (privateWorkflowExportId && isPrivateChat(ctx)) {
         await showPrivateBatchWaiting(
           ctx,
@@ -434,9 +452,14 @@ export function createTicketBatchTelegramSurface(dependencies: TicketBatchTelegr
       if (!response.ok) {
         throw new TicketBatchValidationError("Telegram could not download the answer package.");
       }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength > 5 * 1024 * 1024) {
-        throw new TicketBatchValidationError("Ticket answer packages must be 5 MiB or smaller.");
+      let bytes: Uint8Array;
+      try {
+        bytes = await readResponseBytesBounded(response, resourceLimits.answerPackageMaxBytes);
+      } catch (error) {
+        if (error instanceof ResponseBodyLimitExceededError) {
+          throw new TicketBatchValidationError("Ticket answer packages must be 5 MiB or smaller.");
+        }
+        throw error;
       }
       const raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
       const exportRecord = db.getTicketBatchExport(exportId, requireStaffChatId());

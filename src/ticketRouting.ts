@@ -213,7 +213,7 @@ export class TicketRoutingService {
   }
 
   async handleStaffGroupMessage(ctx: Context, canReply: () => boolean): Promise<void> {
-    if (!ctx.message || !ctx.chat) return;
+    if (!ctx.message || !ctx.chat || !ctx.from || ctx.from.is_bot || hasSenderChat(ctx.message)) return;
     if ("text" in ctx.message && isCommandText(ctx.message.text)) return;
 
     const messageThreadId = ctx.message.message_thread_id;
@@ -868,6 +868,10 @@ export class TicketRoutingService {
       lastName: ctx.from.last_name ?? null,
     });
   }
+}
+
+function hasSenderChat(message: NonNullable<Context["message"]>): boolean {
+  return "sender_chat" in message && Boolean(message.sender_chat);
 }
 
 function topicName(ticketId: number, user: { id: number; username?: string }): string {

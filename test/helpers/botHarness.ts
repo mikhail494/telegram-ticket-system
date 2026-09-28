@@ -7,6 +7,7 @@ import type { EntityNotificationProviderRegistry } from "../../src/entityNotific
 import type { InstallationService } from "../../src/installation.js";
 import type { SupportIngressLimiter } from "../../src/supportIngressLimiter.js";
 import type { RuntimeHealthRegistry } from "../../src/runtimeObservability.js";
+import type { TicketBatchResourceLimits } from "../../src/ticketBatchResourceLimits.js";
 import type { SupportDatabase as SupportDatabaseType, TicketStatus, TicketWithUser } from "../../src/db.js";
 
 process.env.NODE_ENV = "test";
@@ -110,6 +111,8 @@ export interface StaffDocumentUpdateOptions extends Omit<StaffTopicUpdateOptions
 }
 
 export interface BotHarnessOptions {
+  fetch?: typeof fetch;
+  ticketBatchResourceLimits?: Partial<TicketBatchResourceLimits>;
   databasePath?: string;
   quickRepliesRegistry?: QuickRepliesRegistry;
   moderationNow?: () => Date;
@@ -137,7 +140,11 @@ export interface BotHarness {
   countApiCalls(method: string): number;
   clearApiCalls(): void;
   setDownloadResponse(body: string | Uint8Array, status?: number): void;
-  setFileDownload(fileId: string, body: string | Uint8Array, options?: { filePath?: string; status?: number }): void;
+  setFileDownload(
+    fileId: string,
+    body: string | Uint8Array,
+    options?: { filePath?: string; fileSize?: number; status?: number }
+  ): void;
   failNextDownload(status?: number): void;
 }
 
@@ -145,7 +152,10 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
   const db = new SupportDatabase(options.databasePath ?? ":memory:");
   const registry = createPersistentQuickRepliesRegistry(db, options.quickRepliesRegistry ?? loadQuickRepliesRegistry());
   let downloadResponse: { body: string | Uint8Array; status: number } = { body: "{}", status: 200 };
-  const fileDownloads = new Map<string, { body: string | Uint8Array; status: number; filePath: string }>();
+  const fileDownloads = new Map<
+    string,
+    { body: string | Uint8Array; fileSize?: number; status: number; filePath: string }
+  >();
   const scheduledModerationCleanupJobIds: number[] = [];
   const scheduleCleanup: ModerationCleanupScheduler =
     options.scheduleModerationCleanup ??
@@ -154,22 +164,25 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
     });
   const installationService = options.installationServiceFactory?.(db);
   const bot = createBot(db, registry, {
-    fetch: async (input) => {
-      const pathname = new URL(String(input)).pathname;
-      const downloaded = [...fileDownloads.values()].find((item) => pathname.endsWith(`/${item.filePath}`));
-      const response = downloaded ?? downloadResponse;
-      if (typeof response.body === "string") {
-        return new Response(response.body, { status: response.status });
-      }
-      const bytes = response.body;
-      const body = new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(bytes);
-          controller.close();
-        },
-      });
-      return new Response(body, { status: response.status });
-    },
+    fetch:
+      options.fetch ??
+      (async (input) => {
+        const pathname = new URL(String(input)).pathname;
+        const downloaded = [...fileDownloads.values()].find((item) => pathname.endsWith(`/${item.filePath}`));
+        const response = downloaded ?? downloadResponse;
+        if (typeof response.body === "string") {
+          return new Response(response.body, { status: response.status });
+        }
+        const bytes = response.body;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(bytes);
+            controller.close();
+          },
+        });
+        return new Response(body, { status: response.status });
+      }),
+    ticketBatchResourceLimits: options.ticketBatchResourceLimits,
     now: options.moderationNow,
     scheduleModerationCleanup: scheduleCleanup,
     entityNotificationProviders: options.entityNotificationProviders,
@@ -263,6 +276,7 @@ export function createBotHarness(options: BotHarnessOptions = {}): BotHarness {
     setFileDownload: (fileId, body, options = {}) => {
       fileDownloads.set(fileId, {
         body,
+        fileSize: options.fileSize,
         status: options.status ?? 200,
         filePath: options.filePath ?? `test/${fileId}`,
       });
@@ -476,7 +490,10 @@ function createDefaultSuccessResponse(
   method: string,
   payload: Record<string, unknown>,
   messageId: number,
-  fileDownloads: ReadonlyMap<string, { body: string | Uint8Array; status: number; filePath: string }>,
+  fileDownloads: ReadonlyMap<
+    string,
+    { body: string | Uint8Array; fileSize?: number; status: number; filePath: string }
+  >,
   getStaffMembership: (userId: number) => TestStaffMembership
 ): ApiMockSuccess {
   if (method === "getMe") {
@@ -575,6 +592,7 @@ function createDefaultSuccessResponse(
       result: {
         file_id: fileId,
         file_path: fileDownloads.get(fileId)?.filePath ?? "test/answer.json",
+        file_size: fileDownloads.get(fileId)?.fileSize ?? 100,
       },
     };
   }

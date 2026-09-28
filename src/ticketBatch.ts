@@ -13,6 +13,7 @@ import type {
   TicketMessageRecord,
   TicketWithUser,
 } from "./db.js";
+import { HOSTED_TELEGRAM_DOWNLOAD_MAX_BYTES, TICKET_BATCH_EXPORT_MAX_BYTES } from "./ticketBatchResourceLimits.js";
 
 const MAX_ANSWER_TEXT_CHARACTERS = 3500;
 const MAX_INTERNAL_NOTE_CHARACTERS = 2000;
@@ -144,7 +145,8 @@ export interface TicketBatchExportManifest {
 }
 
 export interface DownloadedTicketBatchAttachment {
-  bytes: Uint8Array;
+  byteLength: number;
+  sha256: string;
   telegramFilePath?: string | null;
   mimeType?: string | null;
 }
@@ -160,8 +162,24 @@ export interface UnavailableTicketBatchAttachment {
 export type TicketBatchAttachmentDownloadResult = DownloadedTicketBatchAttachment | UnavailableTicketBatchAttachment;
 
 export type TicketBatchAttachmentDownloader = (
-  source: Readonly<TicketBatchAttachmentSource>
+  source: Readonly<TicketBatchAttachmentSource>,
+  destinationPath: string,
+  limits: { maxAttachmentBytes: number; remainingExportBytes: number }
 ) => Promise<TicketBatchAttachmentDownloadResult>;
+
+export interface TicketBatchZipLimits {
+  maxAttachmentBytes: number;
+  maxExportBytes: number;
+  maxZipBytes: number;
+  temporaryRoot?: string;
+}
+
+export class TicketBatchExportSizeLimitError extends Error {
+  constructor() {
+    super("Ticket export exceeds the supported 50 MiB size limit.");
+    this.name = "TicketBatchExportSizeLimitError";
+  }
+}
 
 export interface TicketBatchEmbeddedAttachment {
   ticket_id: number;
@@ -473,13 +491,21 @@ export function buildTicketBatchExportSnapshot(input: TicketBatchExportSnapshotI
 
 export async function createTicketBatchZip(
   snapshot: TicketBatchExportSnapshot,
-  downloadAttachment: TicketBatchAttachmentDownloader = missingAttachmentDownloader
+  downloadAttachment: TicketBatchAttachmentDownloader = missingAttachmentDownloader,
+  configuredLimits: Partial<TicketBatchZipLimits> = {}
 ): Promise<TemporaryTicketBatchZip> {
+  const limits: TicketBatchZipLimits = {
+    maxAttachmentBytes: configuredLimits.maxAttachmentBytes ?? HOSTED_TELEGRAM_DOWNLOAD_MAX_BYTES,
+    maxExportBytes: configuredLimits.maxExportBytes ?? TICKET_BATCH_EXPORT_MAX_BYTES,
+    maxZipBytes: configuredLimits.maxZipBytes ?? TICKET_BATCH_EXPORT_MAX_BYTES,
+    temporaryRoot: configuredLimits.temporaryRoot,
+  };
+  validateTicketBatchZipLimits(limits);
   const filename = `ticket-export_${snapshot.exportId}.zip`;
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "telegram-ticket-export-"));
+  const directory = await fs.mkdtemp(path.join(limits.temporaryRoot ?? os.tmpdir(), "telegram-ticket-export-"));
   const filePath = path.join(directory, filename);
   try {
-    const attachments = await embedAttachments(snapshot, directory, downloadAttachment);
+    const { attachments, embeddedBytes } = await embedAttachments(snapshot, directory, downloadAttachment, limits);
     const embeddedAttachments = attachments.filter(isEmbeddedAttachment);
     const manifest: TicketBatchExportManifest = {
       ...snapshot.manifest,
@@ -509,8 +535,11 @@ export async function createTicketBatchZip(
         filePath: attachment.disk_path,
       })),
     ];
+    const metadataBytes = entries.reduce((total, entry) => total + ("bytes" in entry ? entry.bytes.byteLength : 0), 0);
+    if (embeddedBytes + metadataBytes > limits.maxExportBytes) throw new TicketBatchExportSizeLimitError();
     await writeZip(entries, filePath);
     await validateTicketBatchZip(filePath, manifest, records, attachments);
+    if ((await fs.stat(filePath)).size > limits.maxZipBytes) throw new TicketBatchExportSizeLimitError();
     return {
       directory,
       filePath,
@@ -841,14 +870,16 @@ export function getAnswerPackageJsonSchema(): Record<string, unknown> {
 async function embedAttachments(
   snapshot: TicketBatchExportSnapshot,
   directory: string,
-  downloadAttachment: TicketBatchAttachmentDownloader
-): Promise<TicketBatchExportAttachment[]> {
+  downloadAttachment: TicketBatchAttachmentDownloader,
+  limits: TicketBatchZipLimits
+): Promise<{ attachments: TicketBatchExportAttachment[]; embeddedBytes: number }> {
   const attachments: TicketBatchExportAttachment[] = [];
   const usedPaths = new Set<string>();
+  let embeddedBytes = 0;
   const messageById = new Map(
     snapshot.records.flatMap((record) => record.messages.map((message) => [message.id, message]))
   );
-  for (const source of snapshot.attachmentSources) {
+  for (const [index, source] of snapshot.attachmentSources.entries()) {
     if (!source.fileId) {
       throw new TicketBatchValidationError(
         `Ticket #${source.ticketId} message ${source.messageId} has no downloadable media reference.`
@@ -860,8 +891,16 @@ async function embedAttachments(
         `Ticket #${source.ticketId} message ${source.messageId} could not be mapped into the export.`
       );
     }
-    const downloaded = await downloadAttachment(source);
+    const stagingDirectory = path.join(directory, ".staged-attachments");
+    await fs.mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
+    const stagingPath = path.join(stagingDirectory, `attachment-${index}`);
+    const remainingExportBytes = limits.maxExportBytes - embeddedBytes;
+    const downloaded = await downloadAttachment(source, stagingPath, {
+      maxAttachmentBytes: limits.maxAttachmentBytes,
+      remainingExportBytes,
+    });
     if (isUnavailableAttachment(downloaded)) {
+      await fs.rm(stagingPath, { force: true });
       attachments.push({
         ticket_id: source.ticketId,
         database_message_id: source.messageId,
@@ -877,7 +916,19 @@ async function embedAttachments(
       });
       continue;
     }
-    if (!(downloaded.bytes instanceof Uint8Array) || downloaded.bytes.byteLength === 0) {
+    if (
+      !Number.isSafeInteger(downloaded.byteLength) ||
+      downloaded.byteLength <= 0 ||
+      downloaded.byteLength > limits.maxAttachmentBytes ||
+      !/^sha256:[0-9a-f]{64}$/.test(downloaded.sha256)
+    ) {
+      throw new TicketBatchValidationError(
+        `Ticket #${source.ticketId} message ${source.messageId} attachment could not be embedded.`
+      );
+    }
+    if (downloaded.byteLength > remainingExportBytes) throw new TicketBatchExportSizeLimitError();
+    const stagedFile = await fs.stat(stagingPath);
+    if (!stagedFile.isFile() || stagedFile.size !== downloaded.byteLength) {
       throw new TicketBatchValidationError(
         `Ticket #${source.ticketId} message ${source.messageId} attachment could not be embedded.`
       );
@@ -891,9 +942,8 @@ async function embedAttachments(
     const archivePath = `attachments/ticket-${source.ticketId}/message-${source.messageId}/${filename}`;
     const diskPath = path.join(directory, ...archivePath.split("/"));
     await fs.mkdir(path.dirname(diskPath), { recursive: true, mode: 0o700 });
-    await fs.writeFile(diskPath, downloaded.bytes, { mode: 0o600 });
-    const stored = await fs.readFile(diskPath);
-    const sha256 = `sha256:${createHash("sha256").update(stored).digest("hex")}`;
+    await fs.rename(stagingPath, diskPath);
+    embeddedBytes += downloaded.byteLength;
     attachments.push({
       ticket_id: source.ticketId,
       database_message_id: source.messageId,
@@ -904,18 +954,29 @@ async function embedAttachments(
       mime_type: downloaded.mimeType ?? mimeTypeFor(source.mediaType, filename),
       original_filename: source.filename,
       archive_path: archivePath,
-      byte_length: stored.byteLength,
-      sha256,
+      byte_length: downloaded.byteLength,
+      sha256: downloaded.sha256,
       embedded: true,
       disk_path: diskPath,
     });
   }
-  return attachments.sort(
-    (left, right) =>
-      left.ticket_id - right.ticket_id ||
-      left.database_message_id - right.database_message_id ||
-      attachmentSortKey(left).localeCompare(attachmentSortKey(right))
-  );
+  return {
+    attachments: attachments.sort(
+      (left, right) =>
+        left.ticket_id - right.ticket_id ||
+        left.database_message_id - right.database_message_id ||
+        attachmentSortKey(left).localeCompare(attachmentSortKey(right))
+    ),
+    embeddedBytes,
+  };
+}
+
+function validateTicketBatchZipLimits(limits: TicketBatchZipLimits): void {
+  for (const value of [limits.maxAttachmentBytes, limits.maxExportBytes, limits.maxZipBytes]) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new RangeError("Ticket batch ZIP limits must be non-negative safe integers.");
+    }
+  }
 }
 
 function renderTicketRecords(

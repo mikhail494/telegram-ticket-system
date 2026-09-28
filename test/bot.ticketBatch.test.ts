@@ -6,6 +6,7 @@ import { afterEach, describe, it } from "node:test";
 import type { Update } from "grammy/types";
 import { strFromU8, unzipSync } from "fflate";
 import { getTicketSnapshotToken } from "../src/ticketBatch.js";
+import { ANSWER_PACKAGE_MAX_BYTES } from "../src/ticketBatchResourceLimits.js";
 import { InstallationService } from "../src/installation.js";
 import { BackgroundTaskRegistry } from "../src/lifecycle.js";
 import {
@@ -13,6 +14,7 @@ import {
   buildStaffDocumentUpdate,
   createBotHarness,
   type BotHarness,
+  type BotHarnessOptions,
   type RecordedApiCall,
 } from "./helpers/botHarness.js";
 
@@ -23,8 +25,8 @@ afterEach(() => {
   harnesses.length = 0;
 });
 
-function createHarness(): BotHarness {
-  const harness = createBotHarness();
+function createHarness(options: BotHarnessOptions = {}): BotHarness {
+  const harness = createBotHarness(options);
   harnesses.push(harness);
   return harness;
 }
@@ -131,6 +133,13 @@ function batchCallback(data: string, updateId: number, preview: RecordedApiCall)
       },
     },
   };
+}
+
+function exportIdFromHarness(harness: BotHarness): string {
+  const caption = String(harness.findApiCalls("sendDocument")[0]?.payload.caption);
+  const exportId = /^Export: (export_[a-z0-9]+)$/m.exec(caption)?.[1];
+  if (!exportId) throw new Error("Expected a delivered ticket export.");
+  return exportId;
 }
 
 describe("ticket batch Telegram workflow", () => {
@@ -980,6 +989,269 @@ describe("ticket batch Telegram workflow", () => {
     assert.equal(
       Object.keys(entries).some((name) => name.includes("historical.pdf")),
       false
+    );
+  });
+
+  it("rejects an answer package when actual streamed bytes exceed the bounded read", async () => {
+    let cancelled = false;
+    let fetchCount = 0;
+    const harness = createHarness({
+      ticketBatchResourceLimits: { answerPackageMaxBytes: 6 },
+      fetch: async () => {
+        fetchCount += 1;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+              controller.enqueue(new Uint8Array([5, 6, 7]));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { headers: { "content-length": "1" } }
+        );
+      },
+    });
+    harness.seedTicket();
+    await harness.bot.handleUpdate(exportCommand());
+    const exportId = exportIdFromHarness(harness);
+
+    await harness.bot.handleUpdate(
+      buildStaffDocumentUpdate({
+        fileName: `ticket-answers_${exportId}.json`,
+        fileSize: 6,
+      })
+    );
+
+    assert.equal(fetchCount, 1);
+    assert.equal(cancelled, true);
+    assert.equal(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID), undefined);
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some((call) => String(call.payload.text).includes("Ticket answer packages must be 5 MiB or smaller")),
+      true
+    );
+  });
+
+  it("rejects declared answer-package size above 5 MiB before getFile", async () => {
+    const harness = createHarness();
+    harness.seedTicket();
+    await harness.bot.handleUpdate(exportCommand());
+    const exportId = exportIdFromHarness(harness);
+
+    await harness.bot.handleUpdate(
+      buildStaffDocumentUpdate({
+        fileName: `ticket-answers_${exportId}.json`,
+        fileSize: ANSWER_PACKAGE_MAX_BYTES + 1,
+      })
+    );
+
+    assert.equal(harness.countApiCalls("getFile"), 0);
+    assert.equal(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID), undefined);
+  });
+
+  it("accepts a valid answer package whose actual body is just within the configured bound", async () => {
+    const expectedLength = Buffer.byteLength(answerPackage(`export_${"0".repeat(32)}`, 1, `sha256:${"0".repeat(64)}`));
+    let answerBody = "";
+    const harness = createHarness({
+      ticketBatchResourceLimits: { answerPackageMaxBytes: expectedLength },
+      fetch: async () => new Response(answerBody),
+    });
+    const ticket = harness.seedTicket();
+    await harness.bot.handleUpdate(exportCommand());
+    const exportId = exportIdFromHarness(harness);
+    const token = getTicketSnapshotToken(ticket, []);
+    answerBody = answerPackage(exportId, ticket.id, token);
+    assert.equal(Buffer.byteLength(answerBody), expectedLength);
+    await harness.bot.handleUpdate(
+      buildStaffDocumentUpdate({
+        fileId: "valid-answer-package",
+        fileName: `ticket-answers_${exportId}.json`,
+        fileSize: Buffer.byteLength(answerBody),
+      })
+    );
+
+    assert.ok(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID));
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some((call) => String(call.payload.text).includes("Ticket answer package preview")),
+      true
+    );
+  });
+
+  it("keeps malformed UTF-8 answer packages rejected", async () => {
+    const harness = createHarness({
+      fetch: async () => new Response(new Uint8Array([0xc3, 0x28])),
+    });
+    harness.seedTicket();
+    await harness.bot.handleUpdate(exportCommand());
+    const exportId = exportIdFromHarness(harness);
+
+    await harness.bot.handleUpdate(
+      buildStaffDocumentUpdate({
+        fileId: "malformed-answer-package",
+        fileName: `ticket-answers_${exportId}.json`,
+        fileSize: 2,
+      })
+    );
+
+    assert.equal(harness.db.getTicketBatchAnswerPackage("answers_1", TEST_STAFF_CHAT_ID), undefined);
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some((call) => String(call.payload.text).includes("Could not validate the ticket answer package")),
+      true
+    );
+  });
+
+  it("marks attachment metadata over the hosted download limit unavailable without fetching it", async () => {
+    let fetchCount = 0;
+    const harness = createHarness({
+      ticketBatchResourceLimits: { attachmentMaxBytes: 5 },
+      fetch: async () => {
+        fetchCount += 1;
+        return new Response(new Uint8Array([1]));
+      },
+    });
+    const ticket = harness.seedTicket();
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "USER_TO_STAFF",
+      sourceChatId: ticket.user_telegram_id,
+      sourceMessageId: 99,
+      mediaType: "document",
+      fileId: "too-large",
+    });
+    harness.setFileDownload("too-large", new Uint8Array([1]), { fileSize: 6 });
+
+    await harness.bot.handleUpdate(exportCommand());
+
+    assert.equal(fetchCount, 0);
+    assert.equal(harness.countApiCalls("sendDocument"), 1);
+    assert.match(
+      String(harness.findApiCalls("sendDocument")[0]?.payload.caption),
+      /Attachments: 0 embedded, 1 unavailable/
+    );
+  });
+
+  it("treats an attachment response Content-Length above the per-file bound as unavailable", async () => {
+    const harness = createHarness({
+      ticketBatchResourceLimits: { attachmentMaxBytes: 5, exportMaxBytes: 100_000, zipMaxBytes: 100_000 },
+      fetch: async () => new Response(new Uint8Array(), { headers: { "content-length": "6" } }),
+    });
+    const ticket = harness.seedTicket();
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "USER_TO_STAFF",
+      sourceChatId: ticket.user_telegram_id,
+      sourceMessageId: 99,
+      mediaType: "document",
+      fileId: "header-large",
+    });
+    harness.setFileDownload("header-large", new Uint8Array([1]), { fileSize: 2 });
+
+    await harness.bot.handleUpdate(exportCommand());
+
+    assert.equal(harness.countApiCalls("sendDocument"), 1);
+    assert.match(
+      String(harness.findApiCalls("sendDocument")[0]?.payload.caption),
+      /Attachments: 0 embedded, 1 unavailable/
+    );
+  });
+
+  it("fails an aggregate export overrun before sendDocument and keeps it a pre-delivery failure", async () => {
+    const harness = createHarness({
+      ticketBatchResourceLimits: { attachmentMaxBytes: 10, exportMaxBytes: 5, zipMaxBytes: 100_000 },
+      fetch: async () => new Response(new Uint8Array([1, 2, 3])),
+    });
+    const ticket = harness.seedTicket();
+    for (const [index, fileId] of ["aggregate-a", "aggregate-b"].entries()) {
+      harness.db.addMessage({
+        ticketId: ticket.id,
+        direction: "USER_TO_STAFF",
+        sourceChatId: ticket.user_telegram_id,
+        sourceMessageId: 100 + index,
+        mediaType: "document",
+        fileId,
+      });
+      harness.setFileDownload(fileId, new Uint8Array([1, 2, 3]), { fileSize: 3 });
+    }
+
+    await harness.bot.handleUpdate(exportCommand());
+
+    assert.equal(harness.countApiCalls("sendDocument"), 0);
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some((call) => String(call.payload.text).includes("Export failed before delivery")),
+      true
+    );
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some((call) => String(call.payload.text).includes("delivery could not be confirmed")),
+      false
+    );
+  });
+
+  it("rejects a generated ZIP above the hosted upload bound before sendDocument", async () => {
+    const harness = createHarness({
+      ticketBatchResourceLimits: { exportMaxBytes: 100_000, zipMaxBytes: 1 },
+    });
+    harness.seedTicket();
+
+    await harness.bot.handleUpdate(exportCommand());
+
+    assert.equal(harness.countApiCalls("sendDocument"), 0);
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some((call) => String(call.payload.text).includes("Export failed before delivery")),
+      true
+    );
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some((call) => String(call.payload.text).includes("delivery could not be confirmed")),
+      false
+    );
+  });
+
+  it("keeps a mid-stream attachment network failure strict and before delivery", async () => {
+    const harness = createHarness({
+      ticketBatchResourceLimits: { attachmentMaxBytes: 10, exportMaxBytes: 100_000, zipMaxBytes: 100_000 },
+      fetch: async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array([1, 2]));
+              controller.error(new Error("attachment stream interrupted"));
+            },
+          })
+        ),
+    });
+    const ticket = harness.seedTicket();
+    harness.db.addMessage({
+      ticketId: ticket.id,
+      direction: "USER_TO_STAFF",
+      sourceChatId: ticket.user_telegram_id,
+      sourceMessageId: 99,
+      mediaType: "document",
+      fileId: "mid-stream-failure",
+    });
+    harness.setFileDownload("mid-stream-failure", new Uint8Array([1]), { fileSize: 2 });
+
+    await harness.bot.handleUpdate(exportCommand());
+
+    assert.equal(harness.countApiCalls("sendDocument"), 0);
+    assert.equal(
+      harness
+        .findApiCalls("sendMessage")
+        .some((call) => String(call.payload.text).includes("Export failed before delivery")),
+      true
     );
   });
 
