@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { afterEach, describe, it } from "node:test";
 import { OperationalServer } from "../src/operationsHttp.js";
-import { RuntimeHealthRegistry, type OperationalRuntimeState } from "../src/runtimeObservability.js";
+import {
+  RuntimeHealthRegistry,
+  RuntimeHealthEvaluator,
+  type OperationalRuntimeState,
+} from "../src/runtimeObservability.js";
+import { SupportDatabase } from "../src/db.js";
 import type { BackgroundTaskSnapshot } from "../src/lifecycle.js";
 
 const servers: OperationalServer[] = [];
@@ -51,6 +56,89 @@ function createOperationalServer(
 }
 
 describe("OperationalServer", () => {
+  it("serves cached backlog data without backlog SQL per scrape and preserves readiness on telemetry errors", async () => {
+    const db = new SupportDatabase(":memory:");
+    const workspace = db.upsertWorkspace({ telegramChatId: -100900 });
+    db.setInstallationState({ active_workspace_id: workspace.id });
+    let queryFails = false;
+    let samples = 0;
+    const health = new RuntimeHealthRegistry({
+      backupEnabled: false,
+      backupIntervalMs: 1,
+      now: () => new Date("2026-10-20T12:00:00.000Z"),
+      getBacklogWorkspace: () => db.getActiveWorkspace()?.telegram_chat_id ?? null,
+    });
+    health.setRuntimeState("READY");
+    health.markPollingStarted();
+    const evaluator = new RuntimeHealthEvaluator({
+      health,
+      checkDatabase: () => db.ping(),
+      evaluateAlerts: () => undefined,
+      observeBacklog: () => {
+        samples += 1;
+        if (queryFails) throw new Error("BOT_TOKEN=private");
+        return db.observeOperationalBacklog("2026-10-20T12:00:00.000Z");
+      },
+      setTimer: () => ({ unref() {} }),
+      clearTimer: () => undefined,
+    });
+    const server = new OperationalServer({
+      host: "127.0.0.1",
+      port: 0,
+      getSnapshot: () => health.snapshot(),
+      checkDatabase: () => db.ping(),
+      recordDatabaseProbe: (ready) => health.recordDatabaseProbe(ready),
+    });
+    try {
+      await server.start();
+      evaluator.start();
+      const metrics = async () => (await request(server.port!, "/metrics")).body;
+      const unsampled = await metrics();
+      assert.match(unsampled, /^telegram_support_backlog_sample_available 0$/m);
+      assert.match(unsampled, /^telegram_support_delivery_review_cases NaN$/m);
+      evaluator.evaluateNow();
+      for (let index = 0; index < 3; index += 1)
+        assert.match(await metrics(), /^telegram_support_delivery_review_cases 0$/m);
+      assert.equal(samples, 1);
+      db.upsertUser({ telegramId: 1 });
+      const ticket = db.createTicket(1, -100900);
+      db.createTicketOutboundDeliveryIntent({
+        operationKey: "staff-message:secret-id",
+        ticketId: ticket.id,
+        direction: "STAFF_TO_USER",
+        text: "private customer content",
+      });
+      db.markTicketOutboundDeliveryUnknown("staff-message:secret-id", "private failure");
+      assert.match(await metrics(), /^telegram_support_delivery_review_cases 0$/m);
+      evaluator.evaluateNow();
+      assert.match(await metrics(), /^telegram_support_delivery_review_cases 1$/m);
+      queryFails = true;
+      evaluator.evaluateNow();
+      const stale = await metrics();
+      assert.match(stale, /^telegram_support_delivery_review_cases 1$/m);
+      assert.match(stale, /^telegram_support_backlog_sample_success 0$/m);
+      assert.match(stale, /^telegram_support_backlog_observation_failures_total 1$/m);
+      assert.equal((await request(server.port!, "/readyz")).status, 200);
+      assert.doesNotMatch(stale, /secret-id|private|BOT_TOKEN|-100900/);
+      const names = [...stale.matchAll(/^# HELP (telegram_support_\w+)/gm)].map((match) => match[1]);
+      assert.equal(new Set(names).size, names.length);
+      for (const name of names) assert.match(stale, new RegExp(`^# TYPE ${name} (gauge|counter)$`, "m"));
+      const other = db.upsertWorkspace({ telegramChatId: -100901 });
+      db.setInstallationState({ active_workspace_id: other.id });
+      assert.match(await metrics(), /^telegram_support_delivery_review_cases NaN$/m);
+      queryFails = false;
+      evaluator.evaluateNow();
+      assert.match(await metrics(), /^telegram_support_delivery_review_cases 0$/m);
+      db.setInstallationState({ active_workspace_id: null });
+      evaluator.evaluateNow();
+      assert.match(await metrics(), /^telegram_support_backlog_workspace_configured 0$/m);
+      assert.match(await metrics(), /^telegram_support_delivery_review_cases NaN$/m);
+    } finally {
+      evaluator.stop();
+      await server.stop();
+      db.close();
+    }
+  });
   it("keeps health live while startup and readiness follows runtime/database state", async () => {
     let databaseReady = true;
     const { server, health } = createOperationalServer("STARTING", () => databaseReady);

@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. This project fo
 
 ## [Unreleased]
 
+### Added
+
+- Cached, workspace-scoped operational backlog metrics distinguish Delivery Review cases from actual unknown deliveries and eligible recovery work. Fresh observations drive deduplicated alerts for stale review and overdue Batch/moderation recovery without changing readiness or retrying delivery.
+
 ### Fixed
 
 - Ticket Batch exports no longer fail entirely when Telegram cannot resolve a historical attachment file_id; the attachment is recorded as unavailable instead.
