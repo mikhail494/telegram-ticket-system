@@ -1,15 +1,27 @@
 import type { BackgroundTaskSnapshot, BackgroundTaskTracker } from "./lifecycle.js";
 import { logger } from "./logger.js";
+import {
+  OperationalBacklogRegistry,
+  type OperationalBacklogHealthSnapshot,
+  type OperationalBacklogObservation,
+} from "./operationalBacklog.js";
 
 export type OperationalRuntimeState = "STARTING" | "READY" | "SHUTTING_DOWN" | "STOPPED";
 export type UpdateErrorCategory = "telegram" | "http" | "unknown";
-export type OperationalAlertCondition = "DATABASE_UNHEALTHY" | "POLLING_TERMINATED" | "BACKUP_FAILURE" | "BACKUP_STALE";
+export type OperationalAlertCondition =
+  | "DATABASE_UNHEALTHY"
+  | "POLLING_TERMINATED"
+  | "BACKUP_FAILURE"
+  | "BACKUP_STALE"
+  | "DELIVERY_REVIEW_STALE"
+  | "AUTOMATED_RECOVERY_OVERDUE";
 
 const ONE_HOUR_MS = 3_600_000;
 const DATABASE_ALERT_FAILURE_THRESHOLD = 3;
 export const RUNTIME_HEALTH_EVALUATION_INTERVAL_MS = 60_000;
 
 export interface RuntimeHealthSnapshot {
+  backlog: OperationalBacklogHealthSnapshot;
   runtimeState: OperationalRuntimeState;
   processStartedAt: Date;
   processUptimeSeconds: number;
@@ -49,6 +61,7 @@ export interface RuntimeHealthSnapshot {
 }
 
 interface RuntimeHealthOptions {
+  getBacklogWorkspace?: () => number | null;
   backupEnabled: boolean;
   backupIntervalMs: number;
   now?: () => Date;
@@ -76,6 +89,7 @@ function copyDate(value: Date | null): Date | null {
 }
 
 export class RuntimeHealthRegistry {
+  private readonly backlog: OperationalBacklogRegistry;
   private readonly now: () => Date;
   private readonly startedAt: Date;
   private readonly backupStaleAfterMs: number;
@@ -111,6 +125,7 @@ export class RuntimeHealthRegistry {
 
   constructor(private readonly options: RuntimeHealthOptions) {
     this.now = options.now ?? (() => new Date());
+    this.backlog = new OperationalBacklogRegistry(this.now, options.getBacklogWorkspace);
     const observedNow = this.now();
     this.startedAt = options.processStartedAt
       ? new Date(options.processStartedAt)
@@ -190,6 +205,18 @@ export class RuntimeHealthRegistry {
     this.alertDeliveryFailuresTotal += 1;
   }
 
+  recordBacklogObservation(observation: OperationalBacklogObservation | null): void {
+    this.backlog.record(observation);
+  }
+
+  recordBacklogObservationFailure(): void {
+    this.backlog.recordFailure();
+  }
+
+  invalidateBacklogObservation(): void {
+    this.backlog.invalidate();
+  }
+
   snapshot(backgroundTasks: BackgroundTaskSnapshot = EMPTY_BACKGROUND_TASKS): RuntimeHealthSnapshot {
     const now = this.now().getTime();
     const backupReference = this.backupLastSuccessAt?.getTime() ?? this.startedAt.getTime();
@@ -199,6 +226,7 @@ export class RuntimeHealthRegistry {
         : 0;
     const backupStale = this.options.backupEnabled && now - backupReference >= this.backupStaleAfterMs;
     return {
+      backlog: this.backlog.snapshot(),
       runtimeState: this.runtimeState,
       processStartedAt: new Date(this.startedAt),
       processUptimeSeconds: Math.max(0, (now - this.startedAt.getTime()) / 1000),
@@ -252,9 +280,12 @@ const ALERT_DETAILS: Readonly<Record<OperationalAlertCondition, string>> = {
   POLLING_TERMINATED: "Telegram polling terminated unexpectedly.",
   BACKUP_FAILURE: "The scheduled SQLite backup could not be completed.",
   BACKUP_STALE: "No successful SQLite backup exists within the configured freshness window.",
+  DELIVERY_REVIEW_STALE: "Unresolved Delivery Review work has had no state update for at least 60 minutes.",
+  AUTOMATED_RECOVERY_OVERDUE: "Runnable Batch or moderation cleanup work is overdue by at least 30 minutes.",
 };
 
 export class OperationalAlertCoordinator {
+  private backlogWorkspace: number | null = null;
   private readonly now: () => Date;
   private deliveryTail: Promise<void> = Promise.resolve();
   private readonly firing: Record<OperationalAlertCondition, boolean> = {
@@ -262,6 +293,8 @@ export class OperationalAlertCoordinator {
     POLLING_TERMINATED: false,
     BACKUP_FAILURE: false,
     BACKUP_STALE: false,
+    DELIVERY_REVIEW_STALE: false,
+    AUTOMATED_RECOVERY_OVERDUE: false,
   };
 
   constructor(private readonly options: AlertCoordinatorOptions) {
@@ -273,9 +306,37 @@ export class OperationalAlertCoordinator {
     this.transition("POLLING_TERMINATED", snapshot.pollingUnexpectedlyTerminated);
     this.transition("BACKUP_FAILURE", snapshot.backupEnabled && snapshot.backupConsecutiveFailures > 0);
     this.transition("BACKUP_STALE", snapshot.backupStale);
+    const backlog = snapshot.backlog;
+    if (backlog.workspaceConfigured === null) return;
+    const workspace = backlog.observation?.staffChatId ?? null;
+    if (this.backlogWorkspace !== workspace) {
+      this.backlogWorkspace = workspace;
+      this.firing.DELIVERY_REVIEW_STALE = false;
+      this.firing.AUTOMATED_RECOVERY_OVERDUE = false;
+    }
+    if (snapshot.runtimeState !== "READY" || !snapshot.pollingActive || !backlog.fresh || !backlog.observation) return;
+    const observed = backlog.observation;
+    this.transition(
+      "DELIVERY_REVIEW_STALE",
+      observed.deliveryReview.count > 0 && observed.deliveryReview.oldestAgeSeconds >= 3600,
+      `Open cases: ${observed.deliveryReview.count}; oldest last-update age: ${observed.deliveryReview.oldestAgeSeconds}s.`,
+      observed.staffChatId
+    );
+    this.transition(
+      "AUTOMATED_RECOVERY_OVERDUE",
+      (observed.batchRecovery.count > 0 && observed.batchRecovery.oldestOverdueSeconds >= 1800) ||
+        (observed.moderationCleanup.count > 0 && observed.moderationCleanup.oldestOverdueSeconds >= 1800),
+      `Batch due: ${observed.batchRecovery.count}; oldest overdue: ${observed.batchRecovery.oldestOverdueSeconds}s. Moderation cleanup due: ${observed.moderationCleanup.count}; oldest overdue: ${observed.moderationCleanup.oldestOverdueSeconds}s.`,
+      observed.staffChatId
+    );
   }
 
-  private transition(condition: OperationalAlertCondition, nextFiring: boolean): void {
+  private transition(
+    condition: OperationalAlertCondition,
+    nextFiring: boolean,
+    details?: string,
+    boundStaffChatId?: number
+  ): void {
     if (this.firing[condition] === nextFiring) return;
     this.firing[condition] = nextFiring;
     const status = nextFiring ? "FIRING" : "RECOVERED";
@@ -291,7 +352,7 @@ export class OperationalAlertCoordinator {
       });
       try {
         await previous;
-        await this.deliver(condition, status, nextFiring);
+        await this.deliver(condition, status, nextFiring, details, boundStaffChatId);
       } finally {
         release();
       }
@@ -302,9 +363,12 @@ export class OperationalAlertCoordinator {
   private async deliver(
     condition: OperationalAlertCondition,
     status: "FIRING" | "RECOVERED",
-    firing: boolean
+    firing: boolean,
+    details?: string,
+    boundStaffChatId?: number
   ): Promise<void> {
     const staffChatId = this.options.getStaffChatId();
+    if (boundStaffChatId !== undefined && boundStaffChatId !== staffChatId) return;
     if (staffChatId === null) {
       this.options.health.recordAlertDeliveryFailure();
       logger.warn({ condition, status }, "Operational alert has no configured staff workspace destination");
@@ -318,6 +382,7 @@ export class OperationalAlertCoordinator {
       `Status: ${status}`,
       `UTC: ${this.now().toISOString()}`,
       `Details: ${ALERT_DETAILS[condition]}`,
+      ...(details ? [details] : []),
     ].join("\n");
     try {
       await this.options.sendMessage(staffChatId, text);
@@ -334,6 +399,7 @@ interface TimerHandle {
 }
 
 interface RuntimeHealthEvaluatorOptions {
+  observeBacklog?(): OperationalBacklogObservation | null;
   health: RuntimeHealthRegistry;
   checkDatabase(): boolean;
   evaluateAlerts(): void;
@@ -379,6 +445,18 @@ export class RuntimeHealthEvaluator {
         databaseReady = false;
       }
       this.options.health.recordDatabaseProbe(databaseReady);
+      if (this.options.observeBacklog) {
+        if (databaseReady) {
+          try {
+            this.options.health.recordBacklogObservation(this.options.observeBacklog());
+          } catch {
+            this.options.health.recordBacklogObservationFailure();
+            logger.warn({ stage: "backlog_observation" }, "Durable backlog observation failed");
+          }
+        } else {
+          this.options.health.invalidateBacklogObservation();
+        }
+      }
       this.options.evaluateAlerts();
     } catch (error) {
       logger.warn({ stage: "evaluation", errorType: typeof error }, "Runtime health evaluator failed");

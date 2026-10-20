@@ -76,7 +76,7 @@ const UNKNOWN_DELIVERY_ROWS_SQL = `
          d.created_at, d.updated_at, 'UNKNOWN_DELIVERY' AS state, NULL AS inbound_stage
   FROM ticket_outbound_deliveries d
   JOIN tickets t ON t.id = d.ticket_id
-  WHERE t.staff_chat_id = ? AND d.state = 'UNKNOWN_DELIVERY'
+  WHERE t.staff_chat_id = @staffChatId AND d.state = 'UNKNOWN_DELIVERY'
     AND d.operation_key NOT LIKE 'ticket-batch:%'
   UNION ALL
   SELECT CASE WHEN a.summary_message_id IS NULL THEN 'ARCHIVE_SUMMARY' ELSE 'ARCHIVE_DOCUMENT' END,
@@ -87,7 +87,7 @@ const UNKNOWN_DELIVERY_ROWS_SQL = `
          a.failure_category, a.failure_description, a.created_at, a.updated_at, 'UNKNOWN_DELIVERY', NULL
   FROM ticket_archive_deliveries a
   JOIN tickets t ON t.id = a.ticket_id
-  WHERE t.staff_chat_id = ? AND a.state = 'UNKNOWN_DELIVERY'
+  WHERE t.staff_chat_id = @staffChatId AND a.state = 'UNKNOWN_DELIVERY'
   UNION ALL
   SELECT 'BATCH_REPLY', 'ticket-batch:' || i.answer_package_id || ':' || i.ticket_id,
          i.ticket_id, p.staff_chat_id, p.source_chat_id, p.source_message_id,
@@ -98,7 +98,7 @@ const UNKNOWN_DELIVERY_ROWS_SQL = `
   JOIN tickets t ON t.id = i.ticket_id
   LEFT JOIN ticket_outbound_deliveries d
     ON d.operation_key = 'ticket-batch:' || i.answer_package_id || ':' || i.ticket_id
-  WHERE p.staff_chat_id = ? AND t.staff_chat_id = p.staff_chat_id AND i.state = 'UNKNOWN_DELIVERY'
+  WHERE p.staff_chat_id = @staffChatId AND t.staff_chat_id = p.staff_chat_id AND i.state = 'UNKNOWN_DELIVERY'
   UNION ALL
   SELECT 'INBOUND_ROUTING', 'inbound:' || r.source_chat_id || ':' || r.source_message_id || ':' || r.stage || ':' || r.attempt,
          r.ticket_id, r.staff_chat_id, r.source_chat_id, r.source_message_id, r.staff_chat_id,
@@ -106,10 +106,17 @@ const UNKNOWN_DELIVERY_ROWS_SQL = `
            WHEN 'SEND_SUMMARY' THEN r.summary_message_id WHEN 'COPY_ORIGINAL' THEN r.copied_message_id ELSE r.delivery_message_id END,
          r.failure_category, r.failure_description, r.created_at, r.updated_at, r.state, r.stage
   FROM ticket_inbound_routing_operations r JOIN tickets t ON t.id = r.ticket_id
-  WHERE r.staff_chat_id = ? AND t.staff_chat_id = r.staff_chat_id
+  WHERE r.staff_chat_id = @staffChatId AND t.staff_chat_id = r.staff_chat_id
     AND r.state IN ('UNKNOWN_DELIVERY', 'RETRY_REQUIRED', 'READY', 'FAILED')
     AND r.stage NOT IN ('WAITING_FOR_TOPIC', 'DONE')
 `;
+
+// Shared by the operator queue and its read-only operational aggregate.
+export const DELIVERY_REVIEW_CASES_SQL = `SELECT * FROM (${UNKNOWN_DELIVERY_ROWS_SQL}) AS unresolved
+  WHERE (unresolved.kind, unresolved.delivery_key) NOT IN (
+    SELECT audit.delivery_kind, audit.delivery_key FROM delivery_reconciliation_audit audit
+    WHERE audit.staff_chat_id = @staffChatId
+  )`;
 
 function caseToken(kind: DeliveryReconciliationKind, deliveryKey: string): string {
   return createHash("sha256").update(`${kind}\0${deliveryKey}`).digest("base64url").slice(0, 32);
@@ -148,17 +155,9 @@ export class DeliveryReconciliationRepository {
 
   countUnknown(staffChatId: number): number {
     return (
-      this.db
-        .prepare(
-          `SELECT COUNT(*) AS count FROM (${UNKNOWN_DELIVERY_ROWS_SQL}) AS unresolved
-           WHERE NOT EXISTS (
-             SELECT 1 FROM delivery_reconciliation_audit audit
-             WHERE audit.staff_chat_id = unresolved.staff_chat_id
-               AND audit.delivery_kind = unresolved.kind
-               AND audit.delivery_key = unresolved.delivery_key
-           )`
-        )
-        .get(staffChatId, staffChatId, staffChatId, staffChatId) as { count: number }
+      this.db.prepare(`SELECT COUNT(*) AS count FROM (${DELIVERY_REVIEW_CASES_SQL})`).get({ staffChatId }) as {
+        count: number;
+      }
     ).count;
   }
 
@@ -217,17 +216,11 @@ export class DeliveryReconciliationRepository {
     const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 100)) : 50;
     return this.db
       .prepare(
-        `SELECT * FROM (${UNKNOWN_DELIVERY_ROWS_SQL}) AS unresolved
-         WHERE NOT EXISTS (
-           SELECT 1 FROM delivery_reconciliation_audit audit
-           WHERE audit.staff_chat_id = unresolved.staff_chat_id
-             AND audit.delivery_kind = unresolved.kind
-             AND audit.delivery_key = unresolved.delivery_key
-         )
+        `SELECT * FROM (${DELIVERY_REVIEW_CASES_SQL})
          ORDER BY updated_at ASC, ticket_id ASC
-         LIMIT ?`
+         LIMIT @limit`
       )
-      .all(staffChatId, staffChatId, staffChatId, staffChatId, boundedLimit) as ReconciliationRow[];
+      .all({ staffChatId, limit: boundedLimit }) as ReconciliationRow[];
   }
 
   private applyReconciliation(

@@ -5,6 +5,8 @@ import { InstallationRepository } from "./persistence/installationRepository.js"
 import { DeliveryReconciliationRepository } from "./persistence/deliveryReconciliationRepository.js";
 import { ModerationRepository } from "./persistence/moderationRepository.js";
 import { QuickRepliesRepository } from "./persistence/quickRepliesRepository.js";
+import { OperationalBacklogRepository } from "./persistence/operationalBacklogRepository.js";
+import type { OperationalBacklogObservation } from "./operationalBacklog.js";
 import { TicketBatchRepository } from "./persistence/ticketBatchRepository.js";
 import { TicketRepository } from "./persistence/ticketsRepository.js";
 import { now } from "./persistence/helpers.js";
@@ -128,6 +130,7 @@ export class SupportDatabase {
   private readonly moderation: ModerationRepository;
   private readonly quickReplies: QuickRepliesRepository;
   private readonly deliveryReconciliation: DeliveryReconciliationRepository;
+  private readonly operationalBacklog: OperationalBacklogRepository;
   readonly databasePath: string;
   constructor(databaseUrl: string) {
     const databasePath = resolveDatabasePath(databaseUrl);
@@ -146,6 +149,7 @@ export class SupportDatabase {
     this.moderation = new ModerationRepository(this.db);
     this.quickReplies = new QuickRepliesRepository(this.db);
     this.deliveryReconciliation = new DeliveryReconciliationRepository(this.db, this.tickets);
+    this.operationalBacklog = new OperationalBacklogRepository(this.db);
     secureDatabaseArtifacts(databasePath);
   }
   close(): void {
@@ -154,6 +158,12 @@ export class SupportDatabase {
   ping(): boolean {
     this.db.prepare("SELECT 1").get();
     return true;
+  }
+  observeOperationalBacklog(at: string): OperationalBacklogObservation | null {
+    return this.db.transaction(() => {
+      const workspace = this.installation.getActiveWorkspace();
+      return workspace ? this.operationalBacklog.observe(workspace.telegram_chat_id, at) : null;
+    })();
   }
   backupTo(destination: string): Promise<Database.BackupMetadata> {
     return this.db.backup(destination);

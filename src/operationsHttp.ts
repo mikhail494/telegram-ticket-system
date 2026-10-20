@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { RuntimeHealthSnapshot } from "./runtimeObservability.js";
+import { operationalBacklogMetrics } from "./operationalBacklog.js";
 
 export type { OperationalRuntimeState } from "./runtimeObservability.js";
 
@@ -229,6 +230,7 @@ export class OperationalServer {
       "# HELP telegram_support_alert_delivery_failures_total Operational alert delivery failures.",
       "# TYPE telegram_support_alert_delivery_failures_total counter",
       `telegram_support_alert_delivery_failures_total ${snapshot.alertDeliveryFailuresTotal}`,
+      ...operationalBacklogMetrics(snapshot.backlog),
       "",
     ].join("\n");
   }

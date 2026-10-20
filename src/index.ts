@@ -46,6 +46,7 @@ const backupOptions = {
   retentionCount: config.backupRetentionCount,
 };
 const runtimeHealth = new RuntimeHealthRegistry({
+  getBacklogWorkspace: () => installationService.getStaffChatId(),
   backupEnabled: backupOptions.enabled,
   backupIntervalMs: backupOptions.intervalMs,
 });
@@ -69,6 +70,7 @@ const evaluateAlertsWhileRunning = () => {
 const healthEvaluator = new RuntimeHealthEvaluator({
   health: runtimeHealth,
   checkDatabase: () => db.ping(),
+  observeBacklog: () => db.observeOperationalBacklog(new Date().toISOString()),
   evaluateAlerts,
 });
 const recordAutomaticBackupFailure = (error: unknown) => {

@@ -1,6 +1,15 @@
 import Database from "better-sqlite3";
 import type { NormalizedDeliveryError } from "../deliveryDiagnostics.js";
 import { now } from "./helpers.js";
+import {
+  BATCH_FAILURE_EVENT_PENDING,
+  BATCH_FINAL_SUMMARY_PENDING,
+  BATCH_TOPIC_ECHO_PENDING,
+  BATCH_CLOSED_REPLY_PENDING,
+  BATCH_REPLY_AND_CLOSE_PENDING,
+  BATCH_SILENT_CLOSE_PENDING,
+  BATCH_INVALID_SUCCESS_ECHO,
+} from "./batchRecoveryQueries.js";
 import { TICKET_BATCH_FOLLOW_UP_CONFLICT, TICKET_BATCH_FOLLOW_UP_PERSISTENCE_FAILURE } from "./types.js";
 import type {
   CreateTicketBatchAnswerPackageInput,
@@ -406,15 +415,10 @@ export class TicketBatchRepository {
         `SELECT i.* FROM ticket_batch_answer_items i
       JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
       JOIN tickets t ON t.id = i.ticket_id
-      WHERE p.staff_chat_id = ? AND i.delivery_failure_event_state IN ('PENDING', 'FAILED')
-        AND t.status != 'CLOSED'
-        AND i.action IN ('reply_keep_open', 'reply_and_close')
-        AND i.delivery_error_category IS NOT NULL
-        AND i.delivery_message_id IS NULL
-        AND (i.delivery_failure_event_next_retry_at IS NULL OR i.delivery_failure_event_next_retry_at <= ?)
-      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`
+      WHERE ${BATCH_FAILURE_EVENT_PENDING}
+      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT @limit`
       )
-      .all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
+      .all({ staffChatId, at, limit }) as TicketBatchAnswerItemRecord[];
   }
 
   recordTicketBatchSummaryDelivery(
@@ -476,12 +480,11 @@ export class TicketBatchRepository {
   listPendingTicketBatchFinalSummaries(staffChatId: number, at: string, limit = 20): TicketBatchAnswerPackageRecord[] {
     return this.db
       .prepare(
-        `SELECT * FROM ticket_batch_answer_packages
-      WHERE staff_chat_id = ? AND final_summary_state IN ('PENDING', 'FAILED')
-        AND (final_summary_next_retry_at IS NULL OR final_summary_next_retry_at <= ?)
-      ORDER BY updated_at ASC, answer_package_id ASC LIMIT ?`
+        `SELECT p.* FROM ticket_batch_answer_packages p
+      WHERE ${BATCH_FINAL_SUMMARY_PENDING}
+      ORDER BY p.updated_at ASC, p.answer_package_id ASC LIMIT @limit`
       )
-      .all(staffChatId, at, limit) as TicketBatchAnswerPackageRecord[];
+      .all({ staffChatId, at, limit }) as TicketBatchAnswerPackageRecord[];
   }
 
   recordTicketBatchFinalSummaryAttempt(answerPackageId: string, staffChatId: number): void {
@@ -569,21 +572,10 @@ export class TicketBatchRepository {
         `SELECT i.* FROM ticket_batch_answer_items i
       JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
       JOIN tickets t ON t.id = i.ticket_id
-      WHERE p.staff_chat_id = ? AND (i.topic_echo_state IN ('PENDING', 'FAILED')
-        OR (i.action = 'reply_keep_open' AND i.state = 'REPLY_SENT' AND i.topic_echo_state = 'SENT'))
-        AND t.status != 'CLOSED'
-        AND (i.topic_echo_next_retry_at IS NULL OR i.topic_echo_next_retry_at <= ?)
-        AND (
-          (i.action = 'no_action' AND (i.follow_up_state != 'NONE' OR i.internal_note IS NOT NULL OR i.escalation_target != 'NONE'))
-          OR
-          (i.action IN ('reply_keep_open', 'reply_and_close') AND i.delivery_message_id IS NOT NULL
-            AND i.delivery_error_category IS NULL AND i.delivery_error_permanence IS NULL
-            AND i.delivery_failure_event_state != 'SENT'
-            AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING', 'COMPLETED'))
-        )
-      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`
+      WHERE ${BATCH_TOPIC_ECHO_PENDING}
+      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT @limit`
       )
-      .all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
+      .all({ staffChatId, at, limit }) as TicketBatchAnswerItemRecord[];
   }
 
   listClosedTicketBatchPendingReplyEchoes(staffChatId: number, limit = 20): TicketBatchAnswerItemRecord[] {
@@ -592,19 +584,10 @@ export class TicketBatchRepository {
         `SELECT i.* FROM ticket_batch_answer_items i
       JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
       JOIN tickets t ON t.id = i.ticket_id
-      WHERE p.staff_chat_id = ? AND p.status IN ('APPLYING', 'PARTIAL')
-        AND t.status = 'CLOSED'
-        AND t.staff_chat_id = p.staff_chat_id
-        AND i.action IN ('reply_and_close', 'reply_keep_open')
-        AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING')
-        AND i.delivery_message_id IS NOT NULL
-        AND i.delivery_error_category IS NULL
-        AND i.delivery_error_permanence IS NULL
-        AND i.delivery_failure_event_state != 'SENT'
-        AND (i.topic_echo_state IN ('PENDING', 'FAILED') OR i.action = 'reply_keep_open')
-      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`
+      WHERE ${BATCH_CLOSED_REPLY_PENDING}
+      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT @limit`
       )
-      .all(staffChatId, limit) as TicketBatchAnswerItemRecord[];
+      .all({ staffChatId, limit }) as TicketBatchAnswerItemRecord[];
   }
 
   setTicketBatchPostDeliveryRetry(
@@ -640,18 +623,10 @@ export class TicketBatchRepository {
         `SELECT i.* FROM ticket_batch_answer_items i
       JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
       JOIN tickets t ON t.id = i.ticket_id
-      WHERE p.staff_chat_id = ? AND p.status IN ('APPLYING', 'PARTIAL')
-        AND i.action = 'reply_and_close'
-        AND i.state IN ('REPLY_SENT', 'STAFF_SYNC_PENDING')
-        AND i.delivery_message_id IS NOT NULL
-        AND i.delivery_error_category IS NULL
-        AND i.delivery_error_permanence IS NULL
-        AND i.delivery_failure_event_state != 'SENT'
-        AND (i.topic_echo_state = 'SENT' OR (i.topic_echo_state = 'NOT_REQUIRED' AND t.status = 'CLOSED'))
-        AND (i.topic_echo_next_retry_at IS NULL OR i.topic_echo_next_retry_at <= ?)
-      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`
+      WHERE ${BATCH_REPLY_AND_CLOSE_PENDING}
+      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT @limit`
       )
-      .all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
+      .all({ staffChatId, at, limit }) as TicketBatchAnswerItemRecord[];
   }
 
   listPendingTicketBatchSilentCloseContinuations(
@@ -663,12 +638,10 @@ export class TicketBatchRepository {
       .prepare(
         `SELECT i.* FROM ticket_batch_answer_items i
       JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
-      WHERE p.staff_chat_id = ? AND p.status IN ('APPLYING', 'PARTIAL')
-        AND i.action = 'silent_close' AND i.state = 'APPLYING'
-        AND (i.topic_echo_next_retry_at IS NULL OR i.topic_echo_next_retry_at <= ?)
-      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`
+      WHERE ${BATCH_SILENT_CLOSE_PENDING}
+      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT @limit`
       )
-      .all(staffChatId, at, limit) as TicketBatchAnswerItemRecord[];
+      .all({ staffChatId, at, limit }) as TicketBatchAnswerItemRecord[];
   }
 
   getNextTicketBatchStaffRetryAt(staffChatId: number): string | undefined {
@@ -706,12 +679,10 @@ export class TicketBatchRepository {
       .prepare(
         `SELECT i.* FROM ticket_batch_answer_items i
       JOIN ticket_batch_answer_packages p ON p.answer_package_id = i.answer_package_id
-      WHERE p.staff_chat_id = ? AND i.topic_echo_state IN ('PENDING', 'FAILED')
-        AND i.action IN ('reply_keep_open', 'reply_and_close')
-        AND (i.delivery_message_id IS NULL OR i.delivery_error_category IS NOT NULL OR i.delivery_error_permanence IS NOT NULL OR i.delivery_failure_event_state = 'SENT')
-      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT ?`
+      WHERE ${BATCH_INVALID_SUCCESS_ECHO}
+      ORDER BY i.updated_at ASC, i.ticket_id ASC LIMIT @limit`
       )
-      .all(staffChatId, limit) as TicketBatchAnswerItemRecord[];
+      .all({ staffChatId, limit }) as TicketBatchAnswerItemRecord[];
   }
 
   getTicketBatchRecoveryAudit(staffChatId: number, at: string): TicketBatchRecoveryAudit {
