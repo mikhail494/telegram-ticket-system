@@ -24,6 +24,7 @@ Node.js 24 LTS is required.
 Run the same core checks used by CI before opening a pull request:
 
 ```bash
+npm run architecture:check
 npm run security:audit
 npm run format:check
 npm run lint
@@ -47,6 +48,7 @@ docker build -t telegram-ticket-system-local .
 - Update tests for changed behavior and retain regression coverage for failure and recovery paths.
 - Update documentation and the Unreleased changelog when public behavior or operator workflows change.
 - Change `package-lock.json` only when dependency metadata actually changes.
+- Architectural budgets and ownership exceptions live in `scripts/architecture-baseline.json`. Do not regenerate them to make CI pass. A justified exception must name the affected module, explain why a smaller change/extraction is unsuitable, and document the proposed limit or ownership change for explicit review. See [Architecture guardrails](docs/ARCHITECTURE.md#architecture-guardrails).
 - Do not include production deployment actions or production credentials in a pull request.
 
 The maintainer may ask for a smaller scope when a change mixes product behavior, architecture cleanup, and operational changes.
