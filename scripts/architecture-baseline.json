@@ -1,0 +1,62 @@
+{
+  "base": "a545aec0039666dbe2508b0b11b8ec3958e92904",
+  "defaultMaxLines": 800,
+  "moduleBudgets": {
+    "src/archive.ts": { "baselineLines": 847, "maxLines": 872, "reason": "Existing durable archive orchestration." },
+    "src/bot.ts": { "baselineLines": 1960, "maxLines": 1985, "reason": "Existing Telegram composition root." },
+    "src/db.ts": {
+      "baselineLines": 2418,
+      "maxLines": 2443,
+      "reason": "Existing connection, migrations and compatibility facade."
+    },
+    "src/persistence/ticketsRepository.ts": {
+      "baselineLines": 1822,
+      "maxLines": 1847,
+      "reason": "Existing ticket persistence and durable routing transitions."
+    },
+    "src/privateControlPlane.ts": {
+      "baselineLines": 2010,
+      "maxLines": 2035,
+      "reason": "Existing private operator Telegram control plane."
+    },
+    "src/publicModerationTelegram.ts": {
+      "baselineLines": 968,
+      "maxLines": 993,
+      "reason": "Existing public moderation Telegram adapter."
+    },
+    "src/ticketBatch.ts": {
+      "baselineLines": 1523,
+      "maxLines": 1548,
+      "reason": "Existing Batch package validation and serialization."
+    },
+    "src/ticketBatchRuntime.ts": {
+      "baselineLines": 1244,
+      "maxLines": 1269,
+      "reason": "Existing durable Batch orchestration and recovery."
+    },
+    "src/ticketBatchTelegram.ts": {
+      "baselineLines": 858,
+      "maxLines": 883,
+      "reason": "Existing Batch Telegram upload/export and preview adapter."
+    },
+    "src/ticketRouting.ts": {
+      "baselineLines": 897,
+      "maxLines": 922,
+      "reason": "Existing source-bound routing and ticket lifecycle orchestration."
+    }
+  },
+  "forbiddenPersistenceRuntimeModules": [
+    "src/index.ts",
+    "src/bot.ts",
+    "src/privateControlPlane.ts",
+    "src/ticketRouting.ts",
+    "src/ticketBatchRuntime.ts",
+    "src/entityNotifications.ts",
+    "src/languageModeration.ts",
+    "src/telegram.ts"
+  ],
+  "sqliteOwners": {
+    "src/db.ts": "SupportDatabase owns the application connection and migrations.",
+    "src/backups.ts": "verifySqlite opens a read-only backup candidate for integrity verification."
+  }
+}

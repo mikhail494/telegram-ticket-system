@@ -37,6 +37,9 @@ jobs:
       - name: Audit production dependencies
         run: npm run security:audit
 
+      - name: Check architectural boundaries
+        run: npm run architecture:check
+
       - name: Lint source and tests
         run: npm run lint
 
