@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { validationError } from "./validationCompatibility.js";
 import type { SupportDatabase } from "./db.js";
 
 type QuickRepliesStore = Pick<
@@ -32,7 +33,7 @@ const templateSchema = z.object({
 
 const quickRepliesConfigSchema = z
   .object({
-    version: z.literal(1, { errorMap: () => ({ message: "Version must equal 1" }) }),
+    version: z.literal(1, { error: "Version must equal 1" }),
     categories: z
       .array(
         z.object({
@@ -195,11 +196,14 @@ export function createQuickRepliesManager(db: QuickRepliesStore, defaults: Quick
     updateTemplate: (templateId: string, input: { title?: string; text?: string }) => {
       const existing = db.getQuickReplyTemplate(templateId);
       if (!existing) return undefined;
-      const validated = templateSchema.parse({
-        id: existing.id,
-        title: input.title ?? existing.title,
-        text: input.text ?? existing.text,
-      });
+      const validated = templateSchema.parse(
+        {
+          id: existing.id,
+          title: input.title ?? existing.title,
+          text: input.text ?? existing.text,
+        },
+        { error: validationError }
+      );
       const updated = db.updateQuickReplyTemplate(templateId, {
         title: validated.title,
         text: validated.text,
@@ -207,11 +211,14 @@ export function createQuickRepliesManager(db: QuickRepliesStore, defaults: Quick
       return updated ? toQuickReplyTemplate(updated) : undefined;
     },
     createTemplate: (input: { categoryId: string; title: string; text: string }) => {
-      const validated = templateSchema.parse({
-        id: `custom_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
-        title: input.title,
-        text: input.text,
-      });
+      const validated = templateSchema.parse(
+        {
+          id: `custom_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+          title: input.title,
+          text: input.text,
+        },
+        { error: validationError }
+      );
       return toQuickReplyTemplate(
         db.createQuickReplyTemplate({
           id: validated.id,
@@ -254,7 +261,7 @@ function parseConfigFile(configPath: string): ValidatedQuickRepliesConfig {
     );
   }
 
-  const result = quickRepliesConfigSchema.safeParse(json);
+  const result = quickRepliesConfigSchema.safeParse(json, { error: validationError });
 
   if (!result.success) {
     throw new QuickRepliesConfigError(

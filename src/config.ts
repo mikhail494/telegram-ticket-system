@@ -2,34 +2,35 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import dotenv from "dotenv";
 import { z } from "zod";
+import { validationEnum, validationError, validationInteger } from "./validationCompatibility.js";
 
 const hostSchema = z.object({
-  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  NODE_ENV: validationEnum(["development", "test", "production"]).default("development"),
   BOT_TOKEN: z.string().trim().min(1, "BOT_TOKEN is required"),
-  STAFF_CHAT_ID: z.union([z.coerce.number().int(), z.literal("")]).optional(),
+  STAFF_CHAT_ID: z.union([validationInteger({ coerce: true }), z.literal("")]).optional(),
   DATABASE_URL: z.string().trim().min(1).default("file:./data/support.db"),
   LOG_LEVEL: z.string().trim().min(1).default("info"),
   BACKUP_ENABLED: z
     .string()
     .trim()
     .toLowerCase()
-    .pipe(z.enum(["true", "false", "1", "0"]))
+    .pipe(validationEnum(["true", "false", "1", "0"]))
     .default("true"),
   BACKUP_DIR: z
     .string()
     .trim()
     .transform((value) => value || undefined)
     .optional(),
-  BACKUP_INTERVAL_HOURS: z.coerce.number().int().min(1).max(8760).default(24),
-  BACKUP_RETENTION_COUNT: z.coerce.number().int().min(1).max(365).default(14),
+  BACKUP_INTERVAL_HOURS: validationInteger({ coerce: true, min: 1, max: 8760 }).default(24),
+  BACKUP_RETENTION_COUNT: validationInteger({ coerce: true, min: 1, max: 365 }).default(14),
   OPS_HTTP_ENABLED: z
     .string()
     .trim()
     .toLowerCase()
-    .pipe(z.enum(["true", "false", "1", "0"]))
+    .pipe(validationEnum(["true", "false", "1", "0"]))
     .default("false"),
   OPS_HTTP_HOST: z.string().trim().min(1, "OPS_HTTP_HOST must not be empty").default("127.0.0.1"),
-  OPS_HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+  OPS_HTTP_PORT: validationInteger({ coerce: true, min: 1, max: 65535 }).default(3000),
 });
 
 export interface HostConfig {
@@ -62,7 +63,7 @@ export function loadHostConfig(options: { env?: NodeJS.ProcessEnv; envFile?: str
     ...local,
     ...Object.fromEntries(Object.entries(explicit).filter(([, value]) => value !== undefined)),
   };
-  const parsed = hostSchema.safeParse(merged);
+  const parsed = hostSchema.safeParse(merged, { error: validationError });
   if (!parsed.success)
     throw new Error(
       `Invalid host configuration: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}. Run npm run setup.`
