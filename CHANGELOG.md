@@ -10,6 +10,7 @@ All notable changes to this project are documented in this file. This project fo
 
 ### Fixed
 
+- Upgraded to patched Zod 4 to address GHSA-mrhx-c7xc-m3w5 while preserving configuration and Batch validation formats and diagnostics.
 - Ticket Batch exports no longer fail entirely when Telegram cannot resolve a historical attachment file_id; the attachment is recorded as unavailable instead.
 - Interactive staff replies and Support Logs transcript archives now persist delivery intent and confirmed Telegram message IDs around external sends. Ambiguous outcomes become `UNKNOWN_DELIVERY` and require reconciliation instead of blind resend.
 - Telegram transport failures now remain `UNKNOWN_DELIVERY` unless Telegram returned a confirmed retryable API response; non-idempotent staff operations are not replayed automatically.

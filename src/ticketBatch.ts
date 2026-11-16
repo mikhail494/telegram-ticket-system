@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { Unzip, UnzipInflate, Zip, ZipDeflate, strFromU8, strToU8 } from "fflate";
 import { z } from "zod";
+import { validationError, validationInteger } from "./validationCompatibility.js";
 import type {
   TicketBatchDeliveryFailureContext,
   TicketBatchExportItemRecord,
@@ -242,7 +243,7 @@ export interface TicketBatchAnswer {
 
 const answerFieldsSchema = z
   .object({
-    ticket_id: z.number().int().min(1),
+    ticket_id: validationInteger({ min: 1 }),
     snapshot_token: z.string().min(1).max(256),
     action: z.enum(["reply_keep_open", "reply_and_close", "silent_close", "no_action"]),
     reply_text: z.string().nullable(),
@@ -301,13 +302,20 @@ const answerSchemaV2 = answerFieldsSchema
     }
   });
 
+const isoDatetime = z.iso.datetime();
+// Zod 3 accepted UTC minute precision too; normalize only for the check,
+// retaining the original created_at string in the answer package.
+const answerCreatedAtSchema = z
+  .string()
+  .refine((value) => isoDatetime.safeParse(value.replace(/T(\d{2}:\d{2})Z$/, "T$1:00Z")).success, "Invalid datetime");
+
 const answerPackageV1Schema = z
   .object({
     schema: z.literal("telegram_ticket_answer_package"),
     version: z.literal(1),
     export_id: z.string().min(1),
     answer_package_id: z.string().min(1),
-    created_at: z.string().datetime(),
+    created_at: answerCreatedAtSchema,
     answers: z.array(answerSchemaV1).min(1),
   })
   .strict();
@@ -318,7 +326,7 @@ const answerPackageV2Schema = z
     version: z.literal(2),
     export_id: z.string().min(1),
     answer_package_id: z.string().min(1),
-    created_at: z.string().datetime(),
+    created_at: answerCreatedAtSchema,
     answers: z.array(answerSchemaV2).min(1),
   })
   .strict();
@@ -573,10 +581,18 @@ export function parseAndValidateAnswerPackage(
   } catch {
     throw new TicketBatchValidationError("Answer package contains malformed JSON.");
   }
-  const result = answerPackageSchema.safeParse(parsed);
+  const result = answerPackageSchema.safeParse(parsed, { error: validationError });
   if (!result.success) {
+    // The V1 transform historically hid invalid answer details behind the
+    // package union's "Invalid input" result. Keep that public diagnostic.
+    const invalidV1Answer =
+      typeof parsed === "object" &&
+      parsed !== null &&
+      "version" in parsed &&
+      parsed.version === 1 &&
+      result.error.issues.some((issue) => issue.path[0] === "answers" && issue.path.length > 1);
     throw new TicketBatchValidationError(
-      `Answer package is invalid: ${result.error.issues.map((issue) => issue.message).join(" ")}`
+      `Answer package is invalid: ${invalidV1Answer ? "Invalid input" : result.error.issues.map((issue) => issue.message).join(" ")}`
     );
   }
   const value = result.data;
