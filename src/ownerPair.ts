@@ -3,6 +3,7 @@ import { Bot } from "grammy";
 import { config } from "./config.js";
 import { SupportDatabase } from "./db.js";
 import { InstallationService } from "./installation.js";
+import { AdaptiveKeyError } from "./adaptiveKeyErrors.js";
 
 export async function runOwnerPair(
   options: {
@@ -34,7 +35,8 @@ export async function runOwnerPair(
   try {
     injectedDatabase = options.openDatabase?.();
     db = injectedDatabase ?? new SupportDatabase(config.databaseUrl, { adaptiveKeyPath: config.adaptiveKeyPath });
-  } catch {
+  } catch (error) {
+    if (error instanceof AdaptiveKeyError) throw error;
     throw new Error("Owner pairing database could not be opened.");
   }
   try {
@@ -57,8 +59,29 @@ export async function runOwnerPair(
   }
 }
 
+export async function runOwnerPairCli(options: Parameters<typeof runOwnerPair>[0] = {}): Promise<number> {
+  try {
+    await runOwnerPair(options);
+    return 0;
+  } catch (error) {
+    const safe = new Set([
+      "Owner pairing requires an interactive terminal confirmation.",
+      "Owner pairing cancelled.",
+      "Owner pairing database could not be opened.",
+      "An OWNER already exists. Use npm run owner:recover for a transfer.",
+      "Telegram identity verification failed; no pairing link was created.",
+    ]);
+    console.error(
+      error instanceof AdaptiveKeyError
+        ? new AdaptiveKeyError(error.code).message
+        : error instanceof Error && safe.has(error.message)
+          ? error.message
+          : "Owner pairing failed."
+    );
+    return 1;
+  }
+}
 if (process.argv[1]?.endsWith("ownerPair.ts"))
-  runOwnerPair().catch((error) => {
-    console.error(error instanceof Error ? error.message : "Owner pairing failed.");
-    process.exitCode = 1;
+  void runOwnerPairCli().then((code) => {
+    process.exitCode = code;
   });

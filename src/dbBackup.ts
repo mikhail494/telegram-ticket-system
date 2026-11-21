@@ -12,7 +12,7 @@ async function main(): Promise<void> {
       retentionCount: config.backupRetentionCount,
     }).createBackup();
     console.log(
-      `BACKUP PASSED\nFile: ${result.path}\nSize: ${result.size}\nSHA-256: ${result.sha256}\nRetention deleted: ${result.retentionDeleted}\nRetention failed: ${result.retentionFailed}\nTemporary cleanup failed: ${result.tempCleanupFailed}`
+      `BACKUP PASSED\nFile: ${result.path}\nSize: ${result.size}\nSHA-256: ${result.sha256}\nRetention deleted: ${result.retentionDeleted}\nRetention failed: ${result.retentionFailed}\nTemporary cleanup failed: ${result.tempCleanupFailed}\nIMPORTANT: The adaptive HMAC key is NOT included in this SQLite backup. Back it up separately; losing it prevents the entire SupportDatabase from opening.`
     );
   } finally {
     db.close();

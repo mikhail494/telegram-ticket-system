@@ -16,4 +16,6 @@ Direct HMAC over original text cannot migrate historical evidence. A DB-stored k
 
 ## Consequences and Limits
 
-Separate key backup is mandatory. Key loss has no silent reset or rotation path. This protects against database-only compromise, not host/key compromise, old backups or forensic recovery of legacy artifacts. It does not encrypt support data.
+Separate key backup is mandatory: losing it blocks the entire SupportDatabase, not only adaptive moderation. Key loss has no silent reset or rotation path. The explicit interactive `adaptive:recover` command requires stopped/exclusive SQLite ownership and irreversibly clears only adaptive features, observations, OWNER learning feedback and maintenance counters. A private journal/candidate key makes reset and new-key publication resumable; ordinary startup never chooses this path. Business/delivery and sanction history are preserved, and no old backup is restored. See the operations procedure before use.
+
+Trusted parent symlinks/junctions are canonicalized and ownership/permissions checked; the final key remains a private, non-symlink, single-link file. This protects against database-only compromise, not host/key compromise, old backups or forensic recovery of legacy artifacts. It does not encrypt support data.
