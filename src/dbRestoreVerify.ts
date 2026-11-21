@@ -5,7 +5,9 @@ import { verifyRestoreCandidate } from "./backups.js";
 async function main(): Promise<void> {
   const backup = process.argv[2];
   if (!backup) throw new Error("Usage: npm run db:restore:verify -- <backup-path>");
-  const result = await verifyRestoreCandidate(backup, resolveDatabasePath(config.databaseUrl));
+  const result = await verifyRestoreCandidate(backup, resolveDatabasePath(config.databaseUrl), {
+    adaptiveKeyPath: config.adaptiveKeyPath,
+  });
   console.log(
     `RESTORE VERIFICATION PASSED\nFile: ${result.path}\nChecksum: ${result.checksum}\nSQLite integrity: ${result.sqliteIntegrity}\nApplication compatibility: ${result.applicationCompatibility}`
   );

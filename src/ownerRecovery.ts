@@ -13,7 +13,7 @@ async function main(): Promise<void> {
   );
   prompt.close();
   if (answer.trim() !== "RECOVER") throw new Error("Owner recovery cancelled.");
-  const db = new SupportDatabase(config.databaseUrl);
+  const db = new SupportDatabase(config.databaseUrl, { adaptiveKeyPath: config.adaptiveKeyPath });
   try {
     const bot = new Bot(config.botToken);
     const identity = await bot.api.getMe();

@@ -38,7 +38,7 @@
     "architecture:check": "node scripts/check-architecture.mjs",
     "security:audit": "npm audit --omit=dev --audit-level=high",
     "test": "node scripts/run-tests.mjs",
-    "test:coverage": "c8 --check-coverage --statements 84 --branches 80 --functions 89 --lines 84 --reporter=text --reporter=json node scripts/run-tests.mjs",
+    "test:coverage": "c8 --check-coverage --statements 84 --branches 80 --functions 89 --lines 84 --reporter=text --reporter=json --reporter=json-summary node scripts/run-tests.mjs && node scripts/check-critical-coverage.mjs",
     "test:typecheck": "tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint src test scripts --max-warnings=0",
     "format": "prettier --write .",

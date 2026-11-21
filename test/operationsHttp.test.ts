@@ -12,6 +12,46 @@ import type { BackgroundTaskSnapshot } from "../src/lifecycle.js";
 
 const servers: OperationalServer[] = [];
 
+for (const metricsToken of [undefined, "a".repeat(32)]) {
+  it(`protects non-loopback metrics independently of health and untrusted headers (${Boolean(metricsToken)})`, async () => {
+    const health = new RuntimeHealthRegistry({ backupEnabled: false, backupIntervalMs: 1 });
+    health.setRuntimeState("READY");
+    health.markPollingStarted();
+    const server = new OperationalServer({
+      host: "0.0.0.0",
+      port: 0,
+      metricsToken,
+      checkDatabase: () => true,
+      recordDatabaseProbe: () => undefined,
+      getSnapshot: () =>
+        health.snapshot({
+          accepting: true,
+          inFlight: 0,
+          acceptedTotal: 0,
+          rejectedTotal: 0,
+          completedTotal: 0,
+          failedTotal: 0,
+        }),
+    });
+    servers.push(server);
+    await server.start();
+    const url = `http://127.0.0.1:${server.port}`;
+    assert.equal(
+      (await fetch(`${url}/metrics`, { headers: { Host: "localhost", "X-Forwarded-For": "127.0.0.1" } })).status,
+      401
+    );
+    assert.equal((await fetch(`${url}/metrics`, { headers: { Authorization: "Bearer wrong" } })).status, 401);
+    assert.equal((await fetch(`${url}/metrics`, { method: "HEAD" })).status, 401);
+    assert.equal((await fetch(`${url}/healthz`)).status, 200);
+    assert.equal((await fetch(`${url}/readyz`)).status, 200);
+    if (metricsToken)
+      assert.equal(
+        (await fetch(`${url}/metrics`, { headers: { Authorization: `Bearer ${metricsToken}` } })).status,
+        200
+      );
+  });
+}
+
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.stop()));
 });
@@ -31,7 +71,8 @@ async function request(
 
 function createOperationalServer(
   state: OperationalRuntimeState,
-  checkDatabase: () => boolean = () => true
+  checkDatabase: () => boolean = () => true,
+  metricsToken?: string
 ): { server: OperationalServer; health: RuntimeHealthRegistry } {
   const health = new RuntimeHealthRegistry({ backupEnabled: true, backupIntervalMs: 86_400_000 });
   health.setRuntimeState(state);
@@ -46,6 +87,7 @@ function createOperationalServer(
   };
   const server = new OperationalServer({
     host: "127.0.0.1",
+    metricsToken,
     port: 0,
     getSnapshot: () => health.snapshot(background),
     checkDatabase,
@@ -56,6 +98,14 @@ function createOperationalServer(
 }
 
 describe("OperationalServer", () => {
+  it("requires an explicitly configured token even for a loopback scrape", async () => {
+    const token = "b".repeat(32);
+    const { server } = createOperationalServer("READY", undefined, token);
+    await server.start();
+    const url = `http://127.0.0.1:${server.port}/metrics`;
+    assert.equal((await fetch(url)).status, 401);
+    assert.equal((await fetch(url, { headers: { Authorization: `Bearer ${token}` } })).status, 200);
+  });
   it("serves cached backlog data without backlog SQL per scrape and preserves readiness on telemetry errors", async () => {
     const db = new SupportDatabase(":memory:");
     const workspace = db.upsertWorkspace({ telegramChatId: -100900 });

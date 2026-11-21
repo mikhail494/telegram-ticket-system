@@ -1,12 +1,15 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { RuntimeHealthSnapshot } from "./runtimeObservability.js";
 import { operationalBacklogMetrics } from "./operationalBacklog.js";
+import { timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 
 export type { OperationalRuntimeState } from "./runtimeObservability.js";
 
 export interface OperationalServerOptions {
   host: string;
   port: number;
+  metricsToken?: string;
   getSnapshot(): RuntimeHealthSnapshot;
   checkDatabase(): boolean;
   recordDatabaseProbe(ready: boolean): void;
@@ -85,11 +88,26 @@ export class OperationalServer {
       return;
     }
     if (pathname === "/metrics") {
+      if (!this.authorizeMetrics(request)) {
+        response.setHeader("www-authenticate", "Bearer");
+        this.respond(response, request.method, 401, "text/plain; charset=utf-8", "Unauthorized");
+        return;
+      }
       this.respond(response, request.method, 200, "text/plain; version=0.0.4; charset=utf-8", this.metrics());
       return;
     }
 
     this.respond(response, request.method, 404, "text/plain; charset=utf-8", "Not Found");
+  }
+
+  private authorizeMetrics(request: IncomingMessage): boolean {
+    const host = this.options.host;
+    const loopback = host === "::1" || (isIP(host) === 4 && host.split(".")[0] === "127");
+    const token = this.options.metricsToken;
+    if (!token) return loopback;
+    const expected = Buffer.from(`Bearer ${token}`);
+    const supplied = Buffer.from(request.headers.authorization ?? "");
+    return supplied.length === expected.length && timingSafeEqual(supplied, expected);
   }
 
   private isReady(): boolean {

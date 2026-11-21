@@ -688,6 +688,7 @@ function hashAdaptiveFingerprint(tokens: readonly string[]): string {
 }
 
 function hashAdaptiveFeature(kind: "FINGERPRINT" | "TOKEN" | "TRIGRAM", value: string): string {
+  // Compatibility digest only; the repository keys every lookup/write before SQLite sees it.
   return createHash("sha256").update(kind).update("\0").update(value).digest("hex");
 }
 

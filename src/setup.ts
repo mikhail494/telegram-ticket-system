@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, chmod, readFile, rename, writeFile } from "node:fs/promises";
+import { access, chmod, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline";
@@ -98,7 +98,7 @@ async function verifyWithTelegram(token: string): Promise<{ id: number; username
     description?: string;
   };
   if (!response.ok || !body.ok || !body.result?.id || !body.result.username)
-    throw new Error(`Telegram rejected the bot token: ${body.description ?? response.statusText}`);
+    throw new Error("Telegram rejected the bot token.");
   return { id: body.result.id, username: body.result.username };
 }
 
@@ -127,7 +127,12 @@ export async function runSetup(
   }
   if (!/^\d{5,}:[A-Za-z0-9_-]{10,}$/.test(token))
     throw new Error("BOT_TOKEN has an invalid format. Paste the complete token from BotFather.");
-  const identity = await (options.verifyToken ?? verifyWithTelegram)(token);
+  let identity: { id: number; username: string };
+  try {
+    identity = await (options.verifyToken ?? verifyWithTelegram)(token);
+  } catch {
+    throw new Error("Telegram bot identity verification failed. Check the token and connection.");
+  }
   const output = options.writeOutput ?? console.log;
   output(`Verified bot: @${identity.username} (${identity.id})`);
   if (envPath) {
@@ -139,8 +144,22 @@ export async function runSetup(
     };
     const contents = updateEnvContents(existingContents, existing, values);
     const temporary = `${envPath}.${process.pid}.tmp`;
-    await writeFile(temporary, contents, { mode: 0o600 });
-    await rename(temporary, envPath);
+    let created = false;
+    try {
+      const handle = await open(temporary, "wx", 0o600);
+      created = true;
+      try {
+        await handle.writeFile(contents);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(temporary, envPath);
+    } catch {
+      throw new Error("Local configuration could not be saved; check directory access.");
+    } finally {
+      if (created) await rm(temporary, { force: true });
+    }
     try {
       await chmod(envPath, 0o600);
     } catch {

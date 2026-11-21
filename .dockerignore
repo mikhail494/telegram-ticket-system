@@ -6,6 +6,10 @@ dist
 .git
 .gitignore
 data
+.adaptive-private
+**/.adaptive-private
+*.key
+**/*.key
 *.db
 *.sqlite
 *.sqlite3

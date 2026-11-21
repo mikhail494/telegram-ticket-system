@@ -79,6 +79,16 @@ describe("manual moderation persistence", () => {
         created_at TEXT NOT NULL,
         FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
       );
+      CREATE TABLE language_moderation_message_features (
+        chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, user_telegram_id INTEGER NOT NULL,
+        fingerprint_hash TEXT NOT NULL, token_hashes_json TEXT NOT NULL, trigram_hashes_json TEXT NOT NULL,
+        created_at TEXT NOT NULL, expires_at TEXT NOT NULL, PRIMARY KEY(chat_id,message_id)
+      );
+      CREATE TABLE language_moderation_learning_signal_observations (
+        chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, signal_kind TEXT NOT NULL,
+        signal_hash TEXT NOT NULL, observed_at TEXT NOT NULL, positive INTEGER NOT NULL,
+        positive_at TEXT, retained_at TEXT NOT NULL, PRIMARY KEY(chat_id,message_id,signal_kind,signal_hash)
+      );
     `);
     const migration = legacy.prepare("INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)");
     for (let id = 1; id <= 24; id += 1) migration.run(id, `migration_${id}`, timestamp);
@@ -295,7 +305,7 @@ describe("manual moderation persistence", () => {
         (inspected.prepare("SELECT id FROM schema_migrations ORDER BY id").all() as Array<{ id: number }>).map(
           (row) => row.id
         ),
-        Array.from({ length: 27 }, (_, index) => index + 1)
+        Array.from({ length: 28 }, (_, index) => index + 1)
       );
       assert.equal(
         (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 23").get() as { count: number })
@@ -499,7 +509,9 @@ describe("manual moderation persistence", () => {
         false
       );
       assert.equal(
-        currentFeatures.tokenHashes.every((hash) => retainedHashes.has(hash)),
+        (JSON.parse(db.getLanguageModerationMessageFeatures(-100701, 91)!.token_hashes_json) as string[]).every(
+          (hash) => retainedHashes.has(hash)
+        ),
         true
       );
     } finally {

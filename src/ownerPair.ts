@@ -22,17 +22,32 @@ export async function runOwnerPair(
       prompt = readline.createInterface({ input: process.stdin, output: process.stdout });
       return prompt.question("Create a one-use OWNER pairing link? Type PAIR: ");
     });
-  const answer = await confirm();
-  prompt?.close();
+  let answer: string;
+  try {
+    answer = await confirm();
+  } finally {
+    prompt?.close();
+  }
   if (answer.trim() !== "PAIR") throw new Error("Owner pairing cancelled.");
-  const injectedDatabase = options.openDatabase?.();
-  const db = injectedDatabase ?? new SupportDatabase(config.databaseUrl);
+  let injectedDatabase: SupportDatabase | undefined;
+  let db: SupportDatabase;
+  try {
+    injectedDatabase = options.openDatabase?.();
+    db = injectedDatabase ?? new SupportDatabase(config.databaseUrl, { adaptiveKeyPath: config.adaptiveKeyPath });
+  } catch {
+    throw new Error("Owner pairing database could not be opened.");
+  }
   try {
     const service = new InstallationService(db);
     if (service.getOwner()) throw new Error("An OWNER already exists. Use npm run owner:recover for a transfer.");
-    const username = options.getUsername
-      ? await options.getUsername()
-      : (await new Bot(config.botToken).api.getMe()).username;
+    let username: string;
+    try {
+      username = options.getUsername
+        ? await options.getUsername()
+        : (await new Bot(config.botToken).api.getMe()).username;
+    } catch {
+      throw new Error("Telegram identity verification failed; no pairing link was created.");
+    }
     const token = service.createOwnerPairingToken();
     (options.write ?? console.log)(
       `Open this one-use link within 30 minutes: https://t.me/${username}?start=setup_${token}`

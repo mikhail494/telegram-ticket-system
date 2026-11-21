@@ -2,12 +2,22 @@ import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { execFileSync } from "node:child_process";
+import { budgetErrors, physicalLines } from "./architecture-budgets.mjs";
 
-const baseline = JSON.parse(readFileSync(new URL("./architecture-baseline.json", import.meta.url), "utf8"));
 const root = path.resolve(process.argv[2] ?? fileURLToPath(new URL("..", import.meta.url)));
-
-function physicalLines(text) {
-  return text.length === 0 ? 0 : text.split(/\r\n|\n|\r/).length - (/[\r\n]$/.test(text) ? 1 : 0);
+const baseline = JSON.parse(readFileSync(path.join(root, "scripts/architecture-baseline.json"), "utf8"));
+function previousBaseline() {
+  if (!ts.sys.directoryExists(path.join(root, ".git")) && !ts.sys.fileExists(path.join(root, ".git"))) return null;
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const file = "scripts/architecture-baseline.json";
+  if (git("rev-parse", "--is-shallow-repository") === "true")
+    throw new Error("Architecture ratchet requires full Git history.");
+  const committed = JSON.parse(git("show", `HEAD:${file}`));
+  if (JSON.stringify(committed) !== JSON.stringify(baseline)) return committed;
+  const revisions = git("log", "-2", "--format=%H", "HEAD", "--", file).split("\n");
+  return revisions[1] ? JSON.parse(git("show", `${revisions[1]}:${file}`)) : null;
 }
 
 function sources(directory) {
@@ -93,6 +103,7 @@ function checkArchitecture() {
       return { file, absolute, lines, limit, imports: [], localImports: [] };
     });
   if (modules.length === 0) throw new Error("No production TypeScript modules found under src/.");
+  errors.push(...budgetErrors(baseline, previousBaseline(), new Map(modules.map((m) => [m.file, m.lines]))));
   const byAbsolutePath = new Map(modules.map((m) => [path.normalize(m.absolute), m]));
   const emittedModules = new Set();
   const program = ts.createProgram(
