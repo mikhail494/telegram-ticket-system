@@ -110,7 +110,7 @@ test("migrations 21 through 27 adopt legacy moderation data without changing his
       }>;
       assert.deepEqual(
         migrations.map((row) => row.id),
-        Array.from({ length: 27 }, (_, index) => index + 1)
+        Array.from({ length: 28 }, (_, index) => index + 1)
       );
       assert.equal(
         (inspected.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 21").get() as { count: number })

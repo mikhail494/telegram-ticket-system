@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { SupportDatabase } from "./db.js";
+import { defaultAdaptiveKeyPath } from "./adaptivePrivacy.js";
 
 const BACKUP_NAME = /^support-\d{8}T\d{9}Z\.sqlite$/;
 
@@ -348,7 +349,8 @@ export function createAutomaticBackupScheduler(
 
 export async function verifyRestoreCandidate(
   backupPath: string,
-  liveDatabasePath: string
+  liveDatabasePath: string,
+  options: { adaptiveKeyPath?: string } = {}
 ): Promise<RestoreVerificationResult> {
   const resolved = path.resolve(backupPath);
   if (resolved === path.resolve(liveDatabasePath))
@@ -356,7 +358,11 @@ export async function verifyRestoreCandidate(
   const checksum = await verifyBackupChecksum(resolved);
   return withTemporarySqliteCopy(resolved, "ticket-restore-", async (copy) => {
     await verifySqlite(copy);
-    const database = new SupportDatabase(`file:${copy}`);
+    const database = new SupportDatabase(`file:${copy}`, {
+      requireExistingAdaptiveKey: true,
+      adaptiveKeyPath:
+        options.adaptiveKeyPath ?? process.env.ADAPTIVE_KEY_PATH ?? defaultAdaptiveKeyPath(liveDatabasePath),
+    });
     try {
       database.getInstallationState();
     } finally {

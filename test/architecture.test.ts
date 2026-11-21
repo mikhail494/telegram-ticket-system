@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -17,6 +17,10 @@ function fixture(files: Record<string, string>, verify: (root: string) => void):
   const root = mkdtempSync(path.join(os.tmpdir(), "architecture-check-"));
   try {
     mkdirSync(path.join(root, "src"));
+    mkdirSync(path.join(root, "scripts"));
+    const baseline = JSON.parse(readFileSync(path.join(repository, "scripts/architecture-baseline.json"), "utf8"));
+    baseline.moduleBudgets = {};
+    writeFileSync(path.join(root, "scripts/architecture-baseline.json"), JSON.stringify(baseline));
     for (const [name, source] of Object.entries(files)) {
       const file = path.join(root, "src", name);
       mkdirSync(path.dirname(file), { recursive: true });
@@ -240,11 +244,20 @@ test("architecture check counts physical lines consistently with CRLF and no fin
 
 test("architecture check enforces grandfathered budgets without extending them automatically", () => {
   fixture({ "bot.ts": "// line\n".repeat(1985) }, (root) => {
+    const file = path.join(root, "scripts/architecture-baseline.json");
+    const baseline = JSON.parse(readFileSync(file, "utf8"));
+    baseline.moduleBudgets["src/bot.ts"] = { baselineLines: 1960, maxLines: 1985 };
+    writeFileSync(file, JSON.stringify(baseline));
     assert.equal(check(root).status, 0);
     writeFileSync(path.join(root, "src/bot.ts"), "// line\n".repeat(1986));
     const result = check(root);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /bot.ts.*1986.*1985/);
+    writeFileSync(path.join(root, "src/bot.ts"), "// line\n".repeat(1900));
+    assert.match(check(root).stderr, /lower baselineLines and maxLines/);
+    baseline.moduleBudgets["src/bot.ts"] = { baselineLines: 1900, maxLines: 1925 };
+    writeFileSync(file, JSON.stringify(baseline));
+    assert.equal(check(root).status, 0);
   });
 });
 

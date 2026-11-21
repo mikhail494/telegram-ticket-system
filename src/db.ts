@@ -1,6 +1,12 @@
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  databaseAdaptivePrivacy,
+  migrateAdaptivePrivacy,
+  finalizeAdaptivePrivacyMigration,
+} from "./persistence/adaptivePrivacyMigration.js";
+import type { AdaptivePrivacy } from "./adaptivePrivacy.js";
 import { InstallationRepository } from "./persistence/installationRepository.js";
 import { DeliveryReconciliationRepository } from "./persistence/deliveryReconciliationRepository.js";
 import { ModerationRepository } from "./persistence/moderationRepository.js";
@@ -132,25 +138,38 @@ export class SupportDatabase {
   private readonly deliveryReconciliation: DeliveryReconciliationRepository;
   private readonly operationalBacklog: OperationalBacklogRepository;
   readonly databasePath: string;
-  constructor(databaseUrl: string) {
+  private readonly adaptivePrivacy: AdaptivePrivacy;
+  constructor(databaseUrl: string, options: { adaptiveKeyPath?: string; requireExistingAdaptiveKey?: boolean } = {}) {
     const databasePath = resolveDatabasePath(databaseUrl);
     ensureDirectoryForDatabase(databasePath);
     createDatabaseFileWithRestrictedPermissions(databasePath);
     this.databasePath = databasePath;
     this.db = new Database(databasePath);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("foreign_keys = ON");
-    secureDatabaseArtifacts(databasePath);
-    // Migration 20 reads legacy settings through the public facade.
-    this.installation = new InstallationRepository(this.db);
-    this.migrate();
-    this.tickets = new TicketRepository(this.db);
-    this.batch = new TicketBatchRepository(this.db);
-    this.moderation = new ModerationRepository(this.db);
-    this.quickReplies = new QuickRepliesRepository(this.db);
-    this.deliveryReconciliation = new DeliveryReconciliationRepository(this.db, this.tickets);
-    this.operationalBacklog = new OperationalBacklogRepository(this.db);
-    secureDatabaseArtifacts(databasePath);
+    try {
+      this.adaptivePrivacy = databaseAdaptivePrivacy(
+        this.db,
+        databasePath,
+        options.adaptiveKeyPath ?? process.env.ADAPTIVE_KEY_PATH,
+        !options.requireExistingAdaptiveKey
+      );
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("foreign_keys = ON");
+      secureDatabaseArtifacts(databasePath);
+      // Migration 20 reads legacy settings through the public facade.
+      this.installation = new InstallationRepository(this.db);
+      this.migrate();
+      finalizeAdaptivePrivacyMigration(this.db);
+      this.tickets = new TicketRepository(this.db);
+      this.batch = new TicketBatchRepository(this.db);
+      this.moderation = new ModerationRepository(this.db, this.adaptivePrivacy);
+      this.quickReplies = new QuickRepliesRepository(this.db);
+      this.deliveryReconciliation = new DeliveryReconciliationRepository(this.db, this.tickets);
+      this.operationalBacklog = new OperationalBacklogRepository(this.db);
+      secureDatabaseArtifacts(databasePath);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
   close(): void {
     this.db.close();
@@ -2346,6 +2365,11 @@ export class SupportDatabase {
             BEGIN SELECT RAISE(ABORT, 'inbound reconciliation audit is append-only'); END;
           `);
         },
+      },
+      {
+        id: 28,
+        name: "key_adaptive_moderation_hashes",
+        up: () => migrateAdaptivePrivacy(this.db, this.adaptivePrivacy),
       },
     ];
 

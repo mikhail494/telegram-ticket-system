@@ -3,7 +3,7 @@ import { BackupService } from "./backups.js";
 import { SupportDatabase } from "./db.js";
 
 async function main(): Promise<void> {
-  const db = new SupportDatabase(config.databaseUrl);
+  const db = new SupportDatabase(config.databaseUrl, { adaptiveKeyPath: config.adaptiveKeyPath });
   try {
     const result = await new BackupService(db, {
       enabled: true,

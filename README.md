@@ -66,7 +66,7 @@ Explicit process environment variables take precedence over `.env`; existing `.e
 
 ## Operations
 
-Native and PM2 deployments keep the operational HTTP listener disabled by default. When explicitly enabled, it binds to `127.0.0.1:3000` and exposes `/healthz`, `/readyz`, and `/metrics`; see [docs/OPERATIONS.md](docs/OPERATIONS.md) for safe network exposure guidance. On `SIGINT` or `SIGTERM`, the service stops polling and drains durable work before SQLite closes. The Docker image enables these endpoints, runs as the non-root `node` user, and stores the SQLite database and local backups under `/data`; persist that volume for durable deployments.
+Native and PM2 deployments keep the operational HTTP listener disabled by default. When explicitly enabled, it binds to `127.0.0.1:3000` and exposes `/healthz`, `/readyz`, and `/metrics`. Non-loopback metrics require an explicitly configured bearer token; health/readiness remain available. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for network controls and the separate adaptive-moderation key backup requirement. On `SIGINT` or `SIGTERM`, the service stops polling and drains durable work before SQLite closes. The Docker image enables these endpoints, runs as the non-root `node` user, and stores the SQLite database, external adaptive key and local backups under `/data`; persist that volume for durable deployments.
 
 ## Ticket Workflow
 

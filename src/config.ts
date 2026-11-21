@@ -9,6 +9,7 @@ const hostSchema = z.object({
   BOT_TOKEN: z.string().trim().min(1, "BOT_TOKEN is required"),
   STAFF_CHAT_ID: z.union([validationInteger({ coerce: true }), z.literal("")]).optional(),
   DATABASE_URL: z.string().trim().min(1).default("file:./data/support.db"),
+  ADAPTIVE_KEY_PATH: z.string().trim().min(1).optional(),
   LOG_LEVEL: z.string().trim().min(1).default("info"),
   BACKUP_ENABLED: z
     .string()
@@ -31,6 +32,11 @@ const hostSchema = z.object({
     .default("false"),
   OPS_HTTP_HOST: z.string().trim().min(1, "OPS_HTTP_HOST must not be empty").default("127.0.0.1"),
   OPS_HTTP_PORT: validationInteger({ coerce: true, min: 1, max: 65535 }).default(3000),
+  OPS_METRICS_TOKEN: z
+    .string()
+    .min(32)
+    .regex(/^[A-Za-z0-9_-]+$/, "must use base64url characters")
+    .optional(),
 });
 
 export interface HostConfig {
@@ -38,6 +44,7 @@ export interface HostConfig {
   botToken: string;
   staffChatId: number | null;
   databaseUrl: string;
+  adaptiveKeyPath?: string;
   logLevel: string;
   backupEnabled: boolean;
   backupDir: string | null;
@@ -46,6 +53,7 @@ export interface HostConfig {
   opsHttpEnabled: boolean;
   opsHttpHost: string;
   opsHttpPort: number;
+  opsMetricsToken?: string;
 }
 
 export function loadHostConfig(options: { env?: NodeJS.ProcessEnv; envFile?: string | false } = {}): HostConfig {
@@ -73,6 +81,7 @@ export function loadHostConfig(options: { env?: NodeJS.ProcessEnv; envFile?: str
     botToken: parsed.data.BOT_TOKEN,
     staffChatId: typeof parsed.data.STAFF_CHAT_ID === "number" ? parsed.data.STAFF_CHAT_ID : null,
     databaseUrl: parsed.data.DATABASE_URL,
+    adaptiveKeyPath: parsed.data.ADAPTIVE_KEY_PATH,
     logLevel: parsed.data.LOG_LEVEL,
     backupEnabled: parsed.data.BACKUP_ENABLED === "true" || parsed.data.BACKUP_ENABLED === "1",
     backupDir: parsed.data.BACKUP_DIR || null,
@@ -81,6 +90,7 @@ export function loadHostConfig(options: { env?: NodeJS.ProcessEnv; envFile?: str
     opsHttpEnabled: parsed.data.OPS_HTTP_ENABLED === "true" || parsed.data.OPS_HTTP_ENABLED === "1",
     opsHttpHost: parsed.data.OPS_HTTP_HOST,
     opsHttpPort: parsed.data.OPS_HTTP_PORT,
+    opsMetricsToken: parsed.data.OPS_METRICS_TOKEN,
   };
 }
 
@@ -89,6 +99,7 @@ export const config = {
   nodeEnv: hostConfig.nodeEnv,
   botToken: hostConfig.botToken,
   databaseUrl: hostConfig.databaseUrl,
+  adaptiveKeyPath: hostConfig.adaptiveKeyPath,
   logLevel: hostConfig.logLevel,
   backupEnabled: hostConfig.backupEnabled,
   backupDir: hostConfig.backupDir,
@@ -97,4 +108,5 @@ export const config = {
   opsHttpEnabled: hostConfig.opsHttpEnabled,
   opsHttpHost: hostConfig.opsHttpHost,
   opsHttpPort: hostConfig.opsHttpPort,
+  opsMetricsToken: hostConfig.opsMetricsToken,
 } as const;

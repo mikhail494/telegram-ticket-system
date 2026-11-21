@@ -1618,7 +1618,7 @@ describe("ticket inbound routing durability", () => {
       try {
         assert.deepEqual(
           inspected.prepare("SELECT COUNT(*) AS count, MAX(id) AS latest FROM schema_migrations").get(),
-          { count: 27, latest: 27 }
+          { count: 28, latest: 28 }
         );
         assert.equal(
           (

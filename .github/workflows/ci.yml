@@ -23,6 +23,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -73,3 +74,30 @@ jobs:
           docker image inspect telegram-ticket-system-ci --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx 'OPS_HTTP_PORT=3000'
           docker run --rm --entrypoint node telegram-ticket-system-ci --version | grep -Eq '^v24\.'
           docker run --rm --entrypoint node telegram-ticket-system-ci -e "import { accessSync, constants } from 'node:fs'; if (process.getuid() === 0) process.exit(1); accessSync('/data', constants.W_OK);"
+          docker run --rm --env BOT_TOKEN=123456:CI_SYNTHETIC_ONLY --entrypoint node telegram-ticket-system-ci --input-type=module -e '
+            import assert from "node:assert/strict";
+            import { randomBytes } from "node:crypto";
+            import { statSync } from "node:fs";
+            import { OperationalServer } from "./dist/operationsHttp.js";
+            import { SupportDatabase } from "./dist/db.js";
+            import { RuntimeHealthRegistry } from "./dist/runtimeObservability.js";
+            assert.equal(process.env.OPS_METRICS_TOKEN, undefined);
+            const db = new SupportDatabase("file:/data/ci.sqlite");
+            assert.equal(statSync("/data/.adaptive-private/adaptive.key").mode & 0o777, 0o600);
+            assert.equal(statSync("/data/.adaptive-private").mode & 0o777, 0o700);
+            db.close();
+            const health = new RuntimeHealthRegistry({ backupEnabled: false, backupIntervalMs: 1 });
+            health.setRuntimeState("READY"); health.markPollingStarted();
+            const background = { accepting: true, inFlight: 0, acceptedTotal: 0, rejectedTotal: 0, completedTotal: 0, failedTotal: 0 };
+            for (const metricsToken of [undefined, randomBytes(32).toString("base64url")]) {
+              const server = new OperationalServer({ host: "0.0.0.0", port: 0, metricsToken, getSnapshot: () => health.snapshot(background), checkDatabase: () => true, recordDatabaseProbe: () => {} });
+              await server.start();
+              try {
+                const url = `http://127.0.0.1:${server.port}`;
+                assert.equal((await fetch(`${url}/healthz`)).status, 200);
+                assert.equal((await fetch(`${url}/readyz`)).status, 200);
+                assert.equal((await fetch(`${url}/metrics`)).status, 401);
+                if (metricsToken) assert.equal((await fetch(`${url}/metrics`, { headers: { Authorization: `Bearer ${metricsToken}` } })).status, 200);
+              } finally { await server.stop(); }
+            }
+          '

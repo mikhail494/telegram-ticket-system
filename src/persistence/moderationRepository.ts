@@ -8,6 +8,7 @@ import {
   MAX_ADAPTIVE_TRIGRAM_FEATURES,
 } from "../adaptiveModerationPolicy.js";
 import { now } from "./helpers.js";
+import type { AdaptivePrivacy } from "../adaptivePrivacy.js";
 import type {
   LanguageModerationCleanupJob,
   LanguageModerationLearningSignal,
@@ -27,7 +28,10 @@ const STORAGE_CAP_PRUNE_BATCH_SIZE = 8_192;
 const MAX_OWNER_FEEDBACK_PER_CHAT = 500;
 
 export class ModerationRepository {
-  constructor(private readonly db: Database.Database) {}
+  constructor(
+    private readonly db: Database.Database,
+    private readonly privacy: AdaptivePrivacy
+  ) {}
   addLanguageModerationMessageAuthor(input: {
     chatId: number;
     messageId: number;
@@ -66,6 +70,7 @@ export class ModerationRepository {
     observedAt: string;
     expiresAt: string;
   }): boolean {
+    input = { ...input, features: this.privacy.protect(input.features) };
     const fingerprintHash = normalizeHash(input.features.fingerprintHash);
     if (!fingerprintHash) return false;
     const tokenHashes = normalizeHashes(input.features.tokenHashes, MAX_ADAPTIVE_TOKEN_FEATURES);
@@ -135,6 +140,7 @@ export class ModerationRepository {
       totalTrigramCount: number;
     }>;
   } {
+    input = { ...input, features: this.privacy.protect(input.features) };
     const fingerprintHash = normalizeHash(input.features.fingerprintHash);
     const exactOwnerConfirmed = Boolean(
       fingerprintHash &&

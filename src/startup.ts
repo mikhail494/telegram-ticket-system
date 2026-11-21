@@ -1,4 +1,5 @@
 import type { InstallationService } from "./installation.js";
+import type { BackgroundTaskTracker } from "./lifecycle.js";
 
 export const STARTUP_RECOVERY_MAX_ITEMS = 50;
 export const STARTUP_RECOVERY_MAX_DURATION_MS = 10_000;
@@ -94,4 +95,12 @@ export async function runWorkspaceStartup(
   if (!(await run(tasks.recoverModeration))) return "SHUTTING_DOWN";
   if (!workspace.imported_from_legacy && !(await run(tasks.sendLegacyStaffOnboarding))) return "SHUTTING_DOWN";
   return setupState;
+}
+export function startPostPollingRecovery(
+  tasks: BackgroundTaskTracker,
+  recovery: () => Promise<void>,
+  onRejected: () => void
+): void {
+  const accepted = tasks.run(recovery);
+  if (!accepted) onRejected();
 }

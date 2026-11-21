@@ -2,8 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { SupportDatabase } from "../src/db.js";
 import { InstallationService } from "../src/installation.js";
-import { ApplicationLifecycle, installShutdownSignalHandlers } from "../src/lifecycle.js";
-import { StartupRecoveryBudget, runBoundedRecoveryPass, runWorkspaceStartup } from "../src/startup.js";
+import { ApplicationLifecycle, BackgroundTaskRegistry, installShutdownSignalHandlers } from "../src/lifecycle.js";
+import {
+  StartupRecoveryBudget,
+  runBoundedRecoveryPass,
+  runWorkspaceStartup,
+  startPostPollingRecovery,
+} from "../src/startup.js";
 
 test("setup mode skips every staff-workspace startup task", async () => {
   const db = new SupportDatabase(":memory:");
@@ -163,4 +168,37 @@ test("startup recovery finishes an in-flight item before honoring cancellation",
 
   assert.deepEqual(processed, [1]);
   assert.deepEqual(result, { processed: 1, hasMore: true });
+});
+test("accepted post-polling recovery is tracked and drained exactly once", async () => {
+  const tasks = new BackgroundTaskRegistry();
+  let calls = 0;
+  startPostPollingRecovery(
+    tasks,
+    async () => {
+      calls++;
+    },
+    () => assert.fail("unexpected rejection")
+  );
+  await tasks.drain();
+  assert.equal(calls, 1);
+  assert.equal(tasks.snapshot().completedTotal, 1);
+});
+test("rejects post-polling recovery during shutdown without launching or retrying it", async () => {
+  const tasks = new BackgroundTaskRegistry();
+  let calls = 0;
+  let rejected = 0;
+  tasks.stopAccepting();
+  startPostPollingRecovery(
+    tasks,
+    async () => {
+      calls++;
+    },
+    () => {
+      rejected++;
+    }
+  );
+  await tasks.drain();
+  assert.equal(calls, 0);
+  assert.equal(rejected, 1);
+  assert.equal(tasks.snapshot().rejectedTotal, 1);
 });

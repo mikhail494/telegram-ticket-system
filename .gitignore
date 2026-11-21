@@ -9,6 +9,8 @@ dist/
 
 # Runtime data
 data/
+.adaptive-private/
+*.key
 outputs/
 
 # SQLite databases and sidecars

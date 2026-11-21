@@ -7,7 +7,7 @@ import { createPersistentQuickRepliesRegistry, loadQuickRepliesRegistry } from "
 import { processModerationRecovery } from "./languageModeration.js";
 import type { EntityNotificationProviderRegistry } from "./entityNotifications.js";
 import { InstallationService } from "./installation.js";
-import { StartupRecoveryBudget, runWorkspaceStartup } from "./startup.js";
+import { StartupRecoveryBudget, runWorkspaceStartup, startPostPollingRecovery } from "./startup.js";
 import { createAutomaticBackupScheduler } from "./backups.js";
 import {
   ApplicationLifecycle,
@@ -23,7 +23,7 @@ import {
   observePollingCompletion,
 } from "./runtimeObservability.js";
 
-const db = new SupportDatabase(config.databaseUrl);
+const db = new SupportDatabase(config.databaseUrl, { adaptiveKeyPath: config.adaptiveKeyPath });
 const quickRepliesRegistry = createPersistentQuickRepliesRegistry(db, loadQuickRepliesRegistry());
 const quickReplyCategories = quickRepliesRegistry.listCategories();
 
@@ -146,6 +146,7 @@ function getOperationalSnapshot() {
 async function startApplication(): Promise<void> {
   if (config.opsHttpEnabled) {
     operationalServer = new OperationalServer({
+      metricsToken: config.opsMetricsToken,
       host: config.opsHttpHost,
       port: config.opsHttpPort,
       getSnapshot: getOperationalSnapshot,
@@ -244,14 +245,18 @@ async function startApplication(): Promise<void> {
       runtimeHealth.markPollingStarted();
       runtimeHealth.setRuntimeState("READY");
       healthEvaluator.start();
-      backgroundTasks.run(async () => {
-        try {
-          await bot.recoverPendingTicketBatchStaffOperations();
-        } catch (error) {
-          logger.warn({ err: error }, "Ticket Batch recovery after polling failed");
-          throw error;
-        }
-      });
+      startPostPollingRecovery(
+        backgroundTasks,
+        async () => {
+          try {
+            await bot.recoverPendingTicketBatchStaffOperations();
+          } catch (error) {
+            logger.warn({ err: error }, "Ticket Batch recovery after polling failed");
+            throw error;
+          }
+        },
+        () => logger.debug("Ticket Batch recovery after polling was not accepted during shutdown")
+      );
       evaluateAlerts();
       logger.info({ username: botInfo.username }, "Telegram support bot started");
     },
