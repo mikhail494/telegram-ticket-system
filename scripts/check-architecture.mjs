@@ -8,16 +8,30 @@ import { budgetErrors, physicalLines } from "./architecture-budgets.mjs";
 const root = path.resolve(process.argv[2] ?? fileURLToPath(new URL("..", import.meta.url)));
 const baseline = JSON.parse(readFileSync(path.join(root, "scripts/architecture-baseline.json"), "utf8"));
 function previousBaseline() {
-  if (!ts.sys.directoryExists(path.join(root, ".git")) && !ts.sys.fileExists(path.join(root, ".git"))) return null;
+  const ci = process.env.GITHUB_ACTIONS === "true";
+  if (!ts.sys.directoryExists(path.join(root, ".git")) && !ts.sys.fileExists(path.join(root, ".git"))) {
+    if (ci) throw new Error("Architecture CI reference requires a Git checkout.");
+    return null;
+  }
   const git = (...args) =>
     execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   const file = "scripts/architecture-baseline.json";
   if (git("rev-parse", "--is-shallow-repository") === "true")
     throw new Error("Architecture ratchet requires full Git history.");
-  const committed = JSON.parse(git("show", `HEAD:${file}`));
-  if (JSON.stringify(committed) !== JSON.stringify(baseline)) return committed;
-  const revisions = git("log", "-2", "--format=%H", "HEAD", "--", file).split("\n");
-  return revisions[1] ? JSON.parse(git("show", `${revisions[1]}:${file}`)) : null;
+  let reference;
+  if (ci) {
+    if (!process.env.GITHUB_EVENT_PATH) throw new Error("Missing trusted architecture CI event.");
+    const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
+    if (process.env.GITHUB_EVENT_NAME === "pull_request") reference = event.pull_request?.base?.sha;
+    else if (process.env.GITHUB_EVENT_NAME === "push" && event.ref === "refs/heads/main") reference = event.before;
+    else throw new Error("Unsupported architecture CI event; trusted base is required.");
+    if (typeof reference !== "string" || !/^[a-f0-9]{40}$/.test(reference) || /^0+$/.test(reference))
+      throw new Error("Missing trusted architecture base commit.");
+    git("cat-file", "-e", `${reference}^{commit}`);
+    if (process.env.GITHUB_EVENT_NAME === "push") git("merge-base", "--is-ancestor", reference, "HEAD");
+  } else reference = process.env.ARCHITECTURE_BASE_REF || "refs/remotes/origin/main";
+  const base = git("merge-base", "HEAD", reference);
+  return JSON.parse(git("show", `${base}:${file}`));
 }
 
 function sources(directory) {

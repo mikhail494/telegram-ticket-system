@@ -5,10 +5,120 @@ import { InstallationService } from "../src/installation.js";
 import readline from "node:readline/promises";
 import { mock } from "node:test";
 import { Api } from "grammy";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import { AdaptiveKeyError } from "../src/adaptiveKeyErrors.js";
 
 process.env.BOT_TOKEN ??= "123456:TEST_OWNER_PAIR_TOKEN";
 process.env.DATABASE_URL = ":memory:";
-const { runOwnerPair } = await import("../src/ownerPair.js");
+const { runOwnerPair, runOwnerPairCli } = await import("../src/ownerPair.js");
+
+test("owner pairing prints predefined key/opening diagnostics without exposing underlying errors", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "owner-pair-diagnostics-"));
+  const file = path.join(directory, "support.db");
+  const key = path.join(directory, "private", "adaptive.key");
+  const output: string[] = [];
+  const printed = mock.method(console, "error", (line: string) => output.push(line));
+  const secret = "private-link https://t.me/test?start=secret BOT_TOKEN=DO_NOT_PRINT";
+  try {
+    new SupportDatabase(file, { adaptiveKeyPath: key }).close();
+    const bytes = fs.readFileSync(key);
+    for (const mode of ["missing", "mismatch"] as const) {
+      if (mode === "missing") fs.unlinkSync(key);
+      else fs.writeFileSync(key, Buffer.alloc(32, 8), { mode: 0o600 });
+      assert.equal(
+        await runOwnerPairCli({
+          interactive: true,
+          confirm: async () => "PAIR",
+          openDatabase: () => new SupportDatabase(file, { adaptiveKeyPath: key }),
+        }),
+        1
+      );
+      assert.match(output.at(-1)!, mode === "missing" ? /key is missing/ : /key mismatch/);
+    }
+    fs.writeFileSync(key, bytes, { mode: 0o600 });
+    for (const code of ["DIRECTORY", "PERMISSIONS", "FILE", "LENGTH"] as const) {
+      const error = new AdaptiveKeyError(code);
+      error.message = secret;
+      assert.equal(
+        await runOwnerPairCli({
+          interactive: true,
+          confirm: async () => "PAIR",
+          openDatabase: () => {
+            throw error;
+          },
+        }),
+        1
+      );
+      assert.equal(output.at(-1), new AdaptiveKeyError(code).message);
+    }
+    assert.equal(await runOwnerPairCli({ interactive: false }), 1);
+    assert.equal(await runOwnerPairCli({ interactive: true, confirm: async () => "NO" }), 1);
+    assert.equal(
+      await runOwnerPairCli({
+        interactive: true,
+        confirm: async () => "PAIR",
+        openDatabase: () => {
+          throw new Error(secret);
+        },
+      }),
+      1
+    );
+    assert.equal(output.at(-1), "Owner pairing database could not be opened.");
+    const db = new SupportDatabase(":memory:");
+    try {
+      assert.equal(
+        await runOwnerPairCli({
+          interactive: true,
+          confirm: async () => "PAIR",
+          openDatabase: () => db,
+          getUsername: async () => {
+            throw new Error(secret);
+          },
+        }),
+        1
+      );
+      assert.match(output.at(-1)!, /identity verification failed/);
+      assert.equal(db.listUnconsumedTokens().length, 0);
+      assert.equal(
+        await runOwnerPairCli({
+          interactive: true,
+          confirm: async () => "PAIR",
+          openDatabase: () => db,
+          getUsername: async () => "synthetic_bot",
+          write: () => {},
+        }),
+        0
+      );
+      db.upsertTeamMember({ userId: 1, role: "OWNER", addedBy: 1 });
+      assert.equal(
+        await runOwnerPairCli({ interactive: true, confirm: async () => "PAIR", openDatabase: () => db }),
+        1
+      );
+      assert.match(output.at(-1)!, /OWNER already exists/);
+    } finally {
+      db.close();
+    }
+    assert.equal(
+      await runOwnerPairCli({
+        interactive: true,
+        confirm: async () => {
+          throw new Error(secret);
+        },
+      }),
+      1
+    );
+    assert.equal(output.at(-1), "Owner pairing failed.");
+    assert.equal(
+      output.some((line) => line.includes("DO_NOT_PRINT") || line.includes("https://")),
+      false
+    );
+  } finally {
+    printed.mock.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("owner pairing cancels wrong confirmation before opening SQLite", async () => {
   let opened = false;

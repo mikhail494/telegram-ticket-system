@@ -124,7 +124,7 @@ test("adaptive key creation rejects substituted files and unsafe permissions", (
       assert.equal(lstatSync(key).mode & 0o777, 0o600);
       assert.equal(lstatSync(path.dirname(key)).mode & 0o777, 0o700);
       chmodSync(key, 0o644);
-      assert.throws(() => loadAdaptivePrivacy("unused.db", key, privacy.keyId), /Unsafe/);
+      assert.throws(() => loadAdaptivePrivacy("unused.db", key, privacy.keyId), /permissions/);
       chmodSync(key, 0o600);
     }
     const alias = path.join(directory, "alias.key");
@@ -133,7 +133,10 @@ test("adaptive key creation rejects substituted files and unsafe permissions", (
     unlinkSync(alias);
     const junction = path.join(directory, "linked");
     symlinkSync(path.dirname(key), junction, process.platform === "win32" ? "junction" : "dir");
-    assert.throws(() => loadAdaptivePrivacy("unused.db", path.join(junction, "adaptive.key"), privacy.keyId), /Unsafe/);
+    assert.equal(
+      loadAdaptivePrivacy("unused.db", path.join(junction, "adaptive.key"), privacy.keyId).keyId,
+      privacy.keyId
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

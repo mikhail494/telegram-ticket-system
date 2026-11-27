@@ -34,6 +34,7 @@
     "owner:recover": "tsx src/ownerRecovery.ts",
     "owner:pair": "tsx src/ownerPair.ts",
     "db:backup": "tsx src/dbBackup.ts",
+    "adaptive:recover": "tsx src/adaptiveRecovery.ts",
     "db:restore:verify": "tsx src/dbRestoreVerify.ts",
     "architecture:check": "node scripts/check-architecture.mjs",
     "security:audit": "npm audit --omit=dev --audit-level=high",

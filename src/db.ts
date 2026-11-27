@@ -1,6 +1,17 @@
 import Database from "better-sqlite3";
-import fs from "node:fs";
-import path from "node:path";
+import {
+  resolveDatabasePath,
+  ensureDirectoryForDatabase,
+  createDatabaseFileWithRestrictedPermissions,
+  secureDatabaseArtifacts,
+} from "./databaseFiles.js";
+import {
+  recoverAdaptivePrivacy,
+  validateAdaptiveRecoveryRequest,
+  type AdaptiveRecoveryOptions,
+  type AdaptiveRecoveryResult,
+} from "./persistence/adaptivePrivacyRecovery.js";
+export { resolveDatabasePath } from "./databaseFiles.js";
 import {
   databaseAdaptivePrivacy,
   migrateAdaptivePrivacy,
@@ -88,47 +99,17 @@ interface Migration {
   name: string;
   up: () => void;
 }
-export function resolveDatabasePath(databaseUrl: string): string {
-  const value = databaseUrl.trim();
-  if (value === ":memory:") return value;
-  if (value.startsWith("file://")) {
-    const url = new URL(value);
-    const pathname = decodeURIComponent(url.pathname);
-    return process.platform === "win32" && /^\/[A-Za-z]:/.test(pathname) ? pathname.slice(1) : pathname;
-  }
-  if (value.startsWith("file:")) return value.slice("file:".length);
-  if (value.startsWith("sqlite://")) {
-    const url = new URL(value);
-    const pathname = decodeURIComponent(url.pathname);
-    return process.platform === "win32" && /^\/[A-Za-z]:/.test(pathname) ? pathname.slice(1) : pathname;
-  }
-  return value;
-}
-function ensureDirectoryForDatabase(databasePath: string): void {
-  if (databasePath === ":memory:") return;
-  const directory = path.dirname(databasePath);
-  if (directory && directory !== ".") fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-}
-function createDatabaseFileWithRestrictedPermissions(databasePath: string): void {
-  if (databasePath === ":memory:" || process.platform === "win32") return;
-  try {
-    const descriptor = fs.openSync(databasePath, "wx", 0o600);
-    fs.closeSync(descriptor);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  }
-}
-function secureDatabaseArtifacts(databasePath: string): void {
-  if (databasePath === ":memory:" || process.platform === "win32") return;
-  for (const filePath of [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]) {
+export class SupportDatabase {
+  static recoverAdaptivePrivacy(databaseUrl: string, options: AdaptiveRecoveryOptions): AdaptiveRecoveryResult {
+    const file = resolveDatabasePath(databaseUrl);
+    validateAdaptiveRecoveryRequest(file, options.confirmation);
+    const db = new Database(file, { fileMustExist: true });
     try {
-      fs.chmodSync(filePath, 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return recoverAdaptivePrivacy(db, file, options);
+    } finally {
+      db.close();
     }
   }
-}
-export class SupportDatabase {
   private readonly db: Database.Database;
   private readonly tickets: TicketRepository;
   private readonly batch: TicketBatchRepository;

@@ -10,7 +10,13 @@ const checker = fileURLToPath(new URL("../scripts/check-architecture.mjs", impor
 const repository = fileURLToPath(new URL("..", import.meta.url));
 
 function check(root: string) {
-  return spawnSync(process.execPath, [checker, root], { encoding: "utf8" });
+  return spawnSync(process.execPath, [checker, root], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GITHUB_ACTIONS: path.resolve(root) === path.resolve(repository) ? process.env.GITHUB_ACTIONS : "false",
+    },
+  });
 }
 
 function fixture(files: Record<string, string>, verify: (root: string) => void): void {
