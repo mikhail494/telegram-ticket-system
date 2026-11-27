@@ -10,6 +10,8 @@ All notable changes to this project are documented in this file. This project fo
 
 ### Fixed
 
+- Offline adaptive recovery now refuses a pre-commit reset if the matching original key is available or the journal's candidate key is missing or does not match.
+
 - Architecture budgets now ratchet against a trusted CI base across multiple commits. Trusted key-directory symlinks/junctions remain usable without weakening final-file security. Backup output warns that the separate HMAC key is excluded; explicit journaled offline recovery handles permanent key loss without changing delivery history. OWNER pairing prints predefined, sanitized key/opening diagnostics.
 - Adaptive moderation evidence is installation-keyed by migration 28 without discarding historical feedback. Restore verification requires the matching external key. Non-loopback metrics require bearer authorization; security CLI branch coverage and decreasing architecture budgets are enforced in CI.
 - Upgraded to patched Zod 4 to address GHSA-mrhx-c7xc-m3w5 while preserving configuration and Batch validation formats and diagnostics.

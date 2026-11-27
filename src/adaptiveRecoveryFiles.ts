@@ -25,8 +25,13 @@ export function adaptiveRecoveryFiles(database: string, keyPath?: string) {
   const journalFile = `${secured.file}.recovery.json`;
   const candidate = (journal: { nonce: string }) =>
     path.join(path.dirname(secured.file), `recovery-${journal.nonce}.key`);
+  const validateCandidate = (journal: AdaptiveRecoveryJournal): void => {
+    secured.verify();
+    loadAdaptivePrivacy(database, candidate(journal), journal.newKeyId, false);
+  };
   return {
     keyFile: secured.file,
+    validateCandidate,
     read(): AdaptiveRecoveryJournal | undefined {
       secured.verify();
       if (!fs.existsSync(journalFile)) return undefined;
@@ -80,7 +85,7 @@ export function adaptiveRecoveryFiles(database: string, keyPath?: string) {
         }
       }
       if (!fs.existsSync(secured.file)) {
-        loadAdaptivePrivacy(database, pending, journal.newKeyId, false);
+        validateCandidate(journal);
         fs.linkSync(pending, secured.file);
         secured.sync();
         fs.unlinkSync(pending);

@@ -7,6 +7,8 @@ import { spawnSync } from "node:child_process";
 import Database from "better-sqlite3";
 import { SupportDatabase } from "../src/db.js";
 import { extractAdaptiveModerationFeatures } from "../src/languageModeration.js";
+import { loadAdaptivePrivacy } from "../src/adaptivePrivacy.js";
+import { adaptiveRecoveryFiles } from "../src/adaptiveRecoveryFiles.js";
 import { ADAPTIVE_RECOVERY_CONFIRMATION } from "../src/persistence/adaptivePrivacyRecovery.js";
 
 function fixture() {
@@ -148,6 +150,52 @@ test("offline key recovery requires strong confirmation and refuses an available
     fs.rmSync(f.directory, { recursive: true, force: true });
   }
 });
+
+for (const fault of ["restored original", "missing candidate", "mismatched candidate"] as const) {
+  test(`pre-commit recovery journal preserves adaptive evidence: ${fault}`, () => {
+    const f = fixture();
+    const readEvidence = () => {
+      const db = new Database(f.file, { readonly: true });
+      try {
+        return [
+          "adaptive_moderation_hash_format",
+          "language_moderation_message_features",
+          "language_moderation_learning_signal_observations",
+          "language_moderation_owner_feedback",
+          "language_moderation_adaptive_maintenance",
+        ].map((table) => db.prepare(`SELECT * FROM "${table}"`).all());
+      } finally {
+        db.close();
+      }
+    };
+    try {
+      const original = fs.readFileSync(f.key);
+      const originalKeyId = loadAdaptivePrivacy(f.file, f.key, undefined, false).keyId;
+      fs.unlinkSync(f.key);
+      const files = adaptiveRecoveryFiles(f.file, f.key);
+      const journal = files.prepare(originalKeyId);
+      const candidate = path.join(path.dirname(f.key), `recovery-${journal.nonce}.key`);
+      const before = readEvidence();
+
+      if (fault === "restored original") {
+        fs.writeFileSync(f.key, original, { mode: 0o600 });
+        assert.throws(f.recover, /key is available/);
+        assert.equal(fs.readFileSync(f.key).equals(original), true);
+      } else if (fault === "missing candidate") {
+        fs.unlinkSync(candidate);
+        assert.throws(f.recover, { code: "MISSING" });
+      } else {
+        fs.writeFileSync(candidate, original);
+        assert.throws(f.recover, { code: "MISMATCH" });
+      }
+
+      assert.deepEqual(readEvidence(), before);
+      assert.deepEqual(files.read(), journal);
+    } finally {
+      fs.rmSync(f.directory, { recursive: true, force: true });
+    }
+  });
+}
 
 test("offline recovery rejects even an idle open application connection before clearing evidence", () => {
   const f = fixture();

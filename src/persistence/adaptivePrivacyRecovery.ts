@@ -47,7 +47,11 @@ export function recoverAdaptivePrivacy(
     const files = adaptiveRecoveryFiles(databasePath, options.adaptiveKeyPath);
     let journal = files.read();
     const resumed = Boolean(journal);
-    if (!journal) {
+    if (journal && format.key_id !== journal.originalKeyId && format.key_id !== journal.newKeyId)
+      throw new Error("Adaptive recovery state conflicts with this database.");
+    let resetPerformed = false;
+    const removed = { features: 0, observations: 0, feedback: 0, maintenance: 0 };
+    if (!journal || format.key_id !== journal.newKeyId) {
       try {
         loadAdaptivePrivacy(databasePath, files.keyFile, format.key_id, false);
         throw new Error("The installation key is available; refusing destructive adaptive recovery.");
@@ -55,13 +59,8 @@ export function recoverAdaptivePrivacy(
         if (!(error instanceof AdaptiveKeyError) || (error.code !== "MISSING" && error.code !== "MISMATCH"))
           throw error;
       }
-      journal = files.prepare(format.key_id);
-    }
-    if (format.key_id !== journal.originalKeyId && format.key_id !== journal.newKeyId)
-      throw new Error("Adaptive recovery state conflicts with this database.");
-    const resetPerformed = format.key_id !== journal.newKeyId;
-    const removed = { features: 0, observations: 0, feedback: 0, maintenance: 0 };
-    if (resetPerformed) {
+      journal ??= files.prepare(format.key_id);
+      files.validateCandidate(journal);
       removed.features = db.prepare("DELETE FROM language_moderation_message_features").run().changes;
       removed.observations = db.prepare("DELETE FROM language_moderation_learning_signal_observations").run().changes;
       removed.feedback = db.prepare("DELETE FROM language_moderation_owner_feedback").run().changes;
@@ -69,6 +68,7 @@ export function recoverAdaptivePrivacy(
       db.prepare("UPDATE adaptive_moderation_hash_format SET key_id=?, cleanup_required=1 WHERE id=1").run(
         journal.newKeyId
       );
+      resetPerformed = true;
     }
     db.exec("COMMIT");
     files.publish(journal);
