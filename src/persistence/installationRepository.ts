@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { normalizeManagedChatAllowlist, now, parseJsonStringArray, positiveIntegerOr } from "./helpers.js";
+import { MODERATION_CLEANUP_RUNNABLE, MODERATION_CLEANUP_UNFINISHED } from "./moderationCleanupQueries.js";
 import type {
   EntityNotificationPublicationState,
   InstallationStateRecord,
@@ -620,10 +621,17 @@ export class InstallationRepository {
     moderationEnabled: number;
     unhealthyModerationChats: number;
     pendingCleanup: number;
+    blockedCleanup: number;
     pendingArchives: number;
     pendingBatchStaffOperations: number;
   } {
     const scalar = (sql: string): number => (this.db.prepare(sql).get() as { count: number }).count;
+    const cleanup = this.db
+      .prepare(
+        `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE ${MODERATION_CLEANUP_RUNNABLE}) AS runnable
+          FROM language_moderation_cleanup_jobs j WHERE j.staff_chat_id = ? AND ${MODERATION_CLEANUP_UNFINISHED}`
+      )
+      .get(this.getActiveWorkspace()?.telegram_chat_id ?? null) as { total: number; runnable: number };
     return {
       publicChats: scalar("SELECT COUNT(*) AS count FROM managed_public_chats WHERE active = 1"),
       moderationEnabled: scalar(
@@ -632,9 +640,8 @@ export class InstallationRepository {
       unhealthyModerationChats: scalar(
         "SELECT COUNT(*) AS count FROM managed_public_chats WHERE active = 1 AND permission_status = 'UNHEALTHY'"
       ),
-      pendingCleanup: scalar(
-        "SELECT COUNT(*) AS count FROM language_moderation_cleanup_jobs WHERE state != 'COMPLETED'"
-      ),
+      pendingCleanup: cleanup.runnable,
+      blockedCleanup: cleanup.total - cleanup.runnable,
       pendingArchives: scalar("SELECT COUNT(*) AS count FROM tickets WHERE status = 'CLOSED' AND archived_at IS NULL"),
       pendingBatchStaffOperations: scalar(
         "SELECT COUNT(*) AS count FROM ticket_batch_answer_packages WHERE final_summary_state IN ('PENDING','FAILED')"

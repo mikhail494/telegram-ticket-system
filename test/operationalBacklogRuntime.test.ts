@@ -17,6 +17,7 @@ function sample(overrides: Partial<OperationalBacklogObservation> = {}): Operati
     unknownDeliveryCount: 0,
     batchRecovery: { count: 0, oldestOverdueSeconds: 0 },
     moderationCleanup: { count: 0, oldestOverdueSeconds: 0 },
+    moderationCleanupBlockedCount: 0,
     archiveRecovery: { count: 0, oldestAgeSeconds: 0 },
     batchExportUnknownDeliveryCount: 0,
     ...overrides,
@@ -157,7 +158,11 @@ test("queued backlog alerts stay bound to their observed workspace and do not pr
   await tasks.drain();
   assert.equal(messages.length, 0);
   health.recordBacklogObservation(
-    sample({ staffChatId: workspace, batchRecovery: { count: 1, oldestOverdueSeconds: 1800 } })
+    sample({
+      staffChatId: workspace,
+      batchRecovery: { count: 1, oldestOverdueSeconds: 1800 },
+      moderationCleanupBlockedCount: 1,
+    })
   );
   alerts.evaluate();
   alerts.evaluate();

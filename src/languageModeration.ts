@@ -210,7 +210,7 @@ export type ModerationCleanupScheduler = (
 export type LanguageModerationStore = Pick<
   SupportDatabase,
   | "clearLanguageModerationCleanupCycleViolations"
-  | "getLanguageModerationCleanupJob"
+  | "getDueLanguageModerationCleanupJob"
   | "getManagedPublicChat"
   | "listLanguageModerationCleanupCycleViolations"
   | "listLanguageModerationRecoveryJobs"
@@ -478,22 +478,8 @@ export async function processModerationCleanupJob(
   jobId: number,
   currentTime = new Date()
 ): Promise<void> {
-  const job = db.getLanguageModerationCleanupJob(jobId);
-  if (
-    !job ||
-    job.staff_chat_id !== staffChatId ||
-    job.state === "COMPLETED" ||
-    Date.parse(job.cleanup_due_at) > currentTime.getTime()
-  )
-    return;
-
-  if (!job.violation_cycle_id) {
-    logger.warn(
-      { jobId: job.id, chatId: job.chat_id },
-      "Moderation cleanup job has no immutable violation cycle reference"
-    );
-    return;
-  }
+  const job = db.getDueLanguageModerationCleanupJob(jobId, staffChatId, currentTime.toISOString());
+  if (!job?.violation_cycle_id) return;
 
   let state = job.state;
   const cycleId = job.violation_cycle_id;

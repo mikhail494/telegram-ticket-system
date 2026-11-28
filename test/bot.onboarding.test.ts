@@ -132,7 +132,7 @@ test("current staff members are enrolled as agents from private and workspace in
   }
 });
 
-test("system status recognizes the scoped Support Logs topic", async () => {
+test("system status recognizes scoped Support Logs and separates pending from blocked cleanup", async () => {
   let service!: InstallationService;
   const harness = createBotHarness({
     installationServiceFactory: (db) => {
@@ -144,9 +144,23 @@ test("system status recognizes the scoped Support Logs topic", async () => {
     },
   });
   try {
+    for (const violationCycleId of ["valid-empty-cycle", null])
+      harness.db.createLanguageModerationCleanupJob({
+        staff_chat_id: TEST_STAFF_CHAT_ID,
+        chat_id: -100800,
+        user_telegram_id: 42,
+        username: null,
+        chat_title: null,
+        sanction_tier: 1,
+        sanction_kind: "24-hour mute",
+        violation_cycle_id: violationCycleId,
+        cleanup_due_at: "2099-01-01T00:00:00.000Z",
+      });
     await harness.bot.handleUpdate(privateCallback(1, "dashboard:status"));
     const status = String(harness.findApiCalls("editMessageText")[0]?.payload.text);
     assert.match(status, /Support Logs: configured/);
+    assert.match(status, /^Pending moderation cleanup: 1$/m);
+    assert.match(status, /^Blocked moderation cleanup: 1$/m);
   } finally {
     harness.cleanup();
   }

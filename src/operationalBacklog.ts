@@ -15,6 +15,7 @@ export interface OperationalBacklogObservation {
   unknownDeliveryCount: number;
   batchRecovery: DueBacklog;
   moderationCleanup: DueBacklog;
+  moderationCleanupBlockedCount: number;
   archiveRecovery: AgedBacklog;
   batchExportUnknownDeliveryCount: number;
 }
@@ -163,13 +164,18 @@ export function operationalBacklogMetrics(snapshot: OperationalBacklogHealthSnap
     ],
     [
       "moderation_cleanup_due_count",
-      "Due PENDING, CLEANING and LOG_PENDING moderation cleanup jobs.",
+      "Runnable due moderation cleanup jobs in the active staff workspace.",
       observed?.moderationCleanup.count ?? NaN,
     ],
     [
       "moderation_cleanup_oldest_overdue_seconds",
-      "Overdue seconds since the oldest due moderation cleanup_due_at.",
+      "Overdue seconds since the oldest runnable due moderation cleanup_due_at.",
       observed?.moderationCleanup.oldestOverdueSeconds ?? NaN,
+    ],
+    [
+      "moderation_cleanup_blocked_count",
+      "Due unfinished moderation cleanup jobs blocked in the active staff workspace.",
+      observed?.moderationCleanupBlockedCount ?? NaN,
     ],
     [
       "archive_recovery_eligible_count",

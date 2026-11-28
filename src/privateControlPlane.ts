@@ -1670,6 +1670,7 @@ export class PrivateControlPlane {
       `Moderation enabled: ${counts.moderationEnabled}/${counts.publicChats}`,
       `Unhealthy moderation chats: ${counts.unhealthyModerationChats}`,
       `Pending moderation cleanup: ${counts.pendingCleanup}`,
+      `Blocked moderation cleanup: ${counts.blockedCleanup}`,
       `Pending archives: ${counts.pendingArchives}`,
       `Pending batch staff operations: ${counts.pendingBatchStaffOperations}`,
       "Database: available",

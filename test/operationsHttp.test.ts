@@ -146,6 +146,7 @@ describe("OperationalServer", () => {
       const unsampled = await metrics();
       assert.match(unsampled, /^telegram_support_backlog_sample_available 0$/m);
       assert.match(unsampled, /^telegram_support_delivery_review_cases NaN$/m);
+      assert.match(unsampled, /^telegram_support_moderation_cleanup_blocked_count NaN$/m);
       evaluator.evaluateNow();
       for (let index = 0; index < 3; index += 1)
         assert.match(await metrics(), /^telegram_support_delivery_review_cases 0$/m);
@@ -159,6 +160,17 @@ describe("OperationalServer", () => {
         text: "private customer content",
       });
       db.markTicketOutboundDeliveryUnknown("staff-message:secret-id", "private failure");
+      db.createLanguageModerationCleanupJob({
+        staff_chat_id: -100900,
+        chat_id: -100800,
+        user_telegram_id: 1,
+        username: null,
+        chat_title: null,
+        sanction_tier: 1,
+        sanction_kind: "24-hour mute",
+        violation_cycle_id: null,
+        cleanup_due_at: "2026-10-19T12:00:00.000Z",
+      });
       assert.match(await metrics(), /^telegram_support_delivery_review_cases 0$/m);
       evaluator.evaluateNow();
       assert.match(await metrics(), /^telegram_support_delivery_review_cases 1$/m);
@@ -166,6 +178,8 @@ describe("OperationalServer", () => {
       evaluator.evaluateNow();
       const stale = await metrics();
       assert.match(stale, /^telegram_support_delivery_review_cases 1$/m);
+      assert.match(stale, /^telegram_support_moderation_cleanup_due_count 0$/m);
+      assert.match(stale, /^telegram_support_moderation_cleanup_blocked_count 1$/m);
       assert.match(stale, /^telegram_support_backlog_sample_success 0$/m);
       assert.match(stale, /^telegram_support_backlog_observation_failures_total 1$/m);
       assert.equal((await request(server.port!, "/readyz")).status, 200);
