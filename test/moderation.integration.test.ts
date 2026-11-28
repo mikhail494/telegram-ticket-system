@@ -16,6 +16,8 @@ import {
   processModerationRecovery,
 } from "../src/languageModeration.js";
 import { StartupRecoveryBudget } from "../src/startup.js";
+import { BackgroundTaskRegistry } from "../src/lifecycle.js";
+import { OperationalAlertCoordinator, RuntimeHealthRegistry } from "../src/runtimeObservability.js";
 
 const PUBLIC_CHAT_ID = -100777;
 const FIXED_NOW = new Date("2026-07-31T12:00:00.000Z");
@@ -114,7 +116,7 @@ function createDueJob(
   state?: "CLEANING" | "LOG_PENDING",
   cleanupDueAt = "2026-07-31T11:59:59.000Z",
   staffChatId = TEST_STAFF_CHAT_ID,
-  violationCycleId = `test-cycle:${userId}:${sanctionTier - 1}`
+  violationCycleId: string | null = `test-cycle:${userId}:${sanctionTier - 1}`
 ): number {
   const jobId = harness.db.createLanguageModerationCleanupJob({
     staff_chat_id: staffChatId,
@@ -646,6 +648,148 @@ describe("public language moderation sanctions", () => {
 });
 
 describe("moderation cleanup and Support Logs recovery", () => {
+  it("does not recover or alert on a due terminal-only cleanup cycle", async (t) => {
+    const harness = createHarness();
+    const jobId = createDueJob(harness, 39, 1, "CLEANING", "2026-07-30T12:00:00.000Z");
+    for (const messageId of [390, 391]) {
+      seedCycleViolation(harness, 39, messageId);
+      harness.db.recordLanguageModerationViolationCleanupResult({
+        chatId: PUBLIC_CHAT_ID,
+        userId: 39,
+        messageId,
+        state: "TERMINAL_FAILED",
+      });
+    }
+    seedCycleViolation(harness, 39, 392, 1);
+    seedCycleViolation(harness, 390, 393, 0, "test-cycle:39:0");
+    harness.db.addLanguageModerationViolation({
+      chat_id: PUBLIC_CHAT_ID - 1,
+      user_telegram_id: 39,
+      message_id: 394,
+      username: null,
+      cycle_tier: 0,
+    });
+    harness.db.assignLanguageModerationViolationCycle(PUBLIC_CHAT_ID - 1, 39, 0, "test-cycle:39:0");
+    const before = harness.db.getLanguageModerationCleanupJob(jobId);
+    const history = harness.db.listLanguageModerationCycleViolations(PUBLIC_CHAT_ID, 39, 0);
+    const writes = t.mock.method(harness.db, "updateLanguageModerationCleanupJob");
+    const observed = harness.db.observeOperationalBacklog(FIXED_NOW.toISOString())!;
+    const health = new RuntimeHealthRegistry({ backupEnabled: false, backupIntervalMs: 1, now: () => FIXED_NOW });
+    health.setRuntimeState("READY");
+    health.markPollingStarted();
+    health.recordBacklogObservation(observed);
+    const tasks = new BackgroundTaskRegistry();
+    const alerts: string[] = [];
+    const coordinator = new OperationalAlertCoordinator({
+      health,
+      backgroundTasks: tasks,
+      getStaffChatId: () => TEST_STAFF_CHAT_ID,
+      sendMessage: async (_id, text) => {
+        alerts.push(text);
+      },
+      now: () => FIXED_NOW,
+    });
+    coordinator.evaluate();
+    await tasks.drain();
+    const recovery = await processModerationRecovery(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, FIXED_NOW, {
+      budget: new StartupRecoveryBudget({ maxItems: 1 }),
+    });
+    await processModerationCleanupJob(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, jobId, FIXED_NOW);
+    const timers: Array<() => void> = [];
+    createModerationCleanupScheduler(() => TEST_STAFF_CHAT_ID, {
+      backgroundTasks: tasks,
+      createTimer: (callback) => {
+        timers.push(callback);
+        return {};
+      },
+    })(harness.bot.api, harness.db, jobId);
+    timers[0]!();
+    await tasks.drain();
+
+    assert.deepEqual(
+      {
+        due: observed.moderationCleanup,
+        blocked: observed.moderationCleanupBlockedCount,
+        recovery,
+        writes: writes.mock.callCount(),
+        alerts,
+      },
+      {
+        due: { count: 0, oldestOverdueSeconds: 0 },
+        blocked: 1,
+        recovery: { processed: 0, hasMore: false },
+        writes: 0,
+        alerts: [],
+      }
+    );
+    assert.equal(harness.apiCalls.length, 0);
+    assert.deepEqual(harness.db.getLanguageModerationCleanupJob(jobId), before);
+    assert.deepEqual(harness.db.listLanguageModerationCycleViolations(PUBLIC_CHAT_ID, 39, 0), history);
+  });
+
+  it("skips older blocked jobs and drains a mixed cycle before it becomes blocked", async () => {
+    const harness = createHarness();
+    const older = createDueJob(harness, 43, 1, "LOG_PENDING");
+    const mixed = createDueJob(harness, 44);
+    seedCycleViolation(harness, 43, 430);
+    seedCycleViolation(harness, 44, 440);
+    seedCycleViolation(harness, 44, 441);
+    for (const [userId, messageId] of [
+      [43, 430],
+      [44, 440],
+    ] as const)
+      harness.db.recordLanguageModerationViolationCleanupResult({
+        chatId: PUBLIC_CHAT_ID,
+        userId,
+        messageId,
+        state: "TERMINAL_FAILED",
+      });
+    const oldJob = harness.db.getLanguageModerationCleanupJob(older);
+    await processModerationCleanupJob(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, older, FIXED_NOW);
+
+    assert.deepEqual(
+      await processModerationRecovery(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, FIXED_NOW, {
+        budget: new StartupRecoveryBudget({ maxItems: 1 }),
+      }),
+      { processed: 1, hasMore: false }
+    );
+    assert.deepEqual(
+      harness.findApiCalls("deleteMessage").map((call) => call.payload.message_id),
+      [441]
+    );
+    assert.equal(publicLogMessages(harness).length, 0);
+    assert.deepEqual(harness.db.getLanguageModerationCleanupJob(older), oldJob);
+    assert.equal(harness.db.getLanguageModerationCleanupJob(mixed)?.state, "CLEANING");
+    assert.deepEqual(
+      harness.db.listLanguageModerationCycleViolations(PUBLIC_CHAT_ID, 44, 0).map((item) => item.cleanup_state),
+      ["TERMINAL_FAILED", "DELETED"]
+    );
+    const backlog = harness.db.observeOperationalBacklog(FIXED_NOW.toISOString())!;
+    assert.equal(backlog.moderationCleanup.count, 0);
+    assert.equal(backlog.moderationCleanupBlockedCount, 2);
+  });
+
+  it("finishes logging for empty cycles but leaves missing and empty cycle references untouched", async () => {
+    const harness = createHarness();
+    const valid = createDueJob(harness, 45, 1, "LOG_PENDING");
+    for (const cycle of [null, "", "  "]) {
+      const job = createDueJob(harness, 46, 1, "CLEANING", undefined, TEST_STAFF_CHAT_ID, cycle);
+      const before = harness.db.getLanguageModerationCleanupJob(job);
+      await processModerationCleanupJob(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, job, FIXED_NOW);
+      assert.deepEqual(harness.db.getLanguageModerationCleanupJob(job), before);
+    }
+    assert.equal(harness.apiCalls.length, 0);
+    assert.deepEqual(
+      await processModerationRecovery(harness.bot.api, harness.db, TEST_STAFF_CHAT_ID, FIXED_NOW, {
+        budget: new StartupRecoveryBudget({ maxItems: 1 }),
+      }),
+      { processed: 1, hasMore: false }
+    );
+    assert.equal(harness.db.getLanguageModerationCleanupJob(valid)?.state, "COMPLETED");
+    assert.equal(harness.countApiCalls("deleteMessage"), 0);
+    assert.equal(publicLogMessages(harness).length, 1);
+  });
+
   it("bounds startup recovery at cleanup-job boundaries without losing later work", async () => {
     const harness = createHarness();
     const firstJob = createDueJob(harness, 40);

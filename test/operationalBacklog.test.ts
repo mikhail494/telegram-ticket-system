@@ -108,6 +108,7 @@ test("backlog observation distinguishes no workspace, empty queues, and review-o
     assert.equal(empty.unknownDeliveryCount, 0);
     assert.deepEqual(empty.batchRecovery, { count: 0, oldestOverdueSeconds: 0 });
     assert.deepEqual(empty.moderationCleanup, { count: 0, oldestOverdueSeconds: 0 });
+    assert.equal(empty.moderationCleanupBlockedCount, 0);
     assert.deepEqual(empty.archiveRecovery, { count: 0, oldestAgeSeconds: 0 });
     db.upsertUser({ telegramId: 10 });
     db.beginTicketInboundRouting({
@@ -347,17 +348,17 @@ test("Batch counts all runnable families once and excludes future, blocked, term
 test("moderation due time, not job age or future scheduling, determines overdue work", () => {
   fileFixture(
     (db) => {
-      for (let index = 0; index < 6; index += 1)
+      for (let index = 0; index < 9; index += 1)
         db.createLanguageModerationCleanupJob({
-          staff_chat_id: index === 5 ? -100901 : STAFF,
+          staff_chat_id: index === 5 || index === 8 ? -100901 : STAFF,
           chat_id: -100800,
           user_telegram_id: 10 + index,
           username: null,
           chat_title: null,
           sanction_tier: 0,
           sanction_kind: "mute_24h",
-          violation_cycle_id: `cycle-${index}`,
-          cleanup_due_at: index === 3 ? FUTURE : OLD,
+          violation_cycle_id: index >= 6 ? null : `cycle-${index}`,
+          cleanup_due_at: index === 3 || index === 7 ? FUTURE : OLD,
         });
     },
     (sql) => {
@@ -365,8 +366,14 @@ test("moderation due time, not job age or future scheduling, determines overdue 
       sql.prepare("UPDATE language_moderation_cleanup_jobs SET state = 'LOG_PENDING' WHERE id = 3").run();
       sql.prepare("UPDATE language_moderation_cleanup_jobs SET state = 'COMPLETED' WHERE id = 5").run();
     },
-    (db) =>
-      assert.deepEqual(db.observeOperationalBacklog(AT)!.moderationCleanup, { count: 3, oldestOverdueSeconds: 7200 })
+    (db) => {
+      const observed = db.observeOperationalBacklog(AT)!;
+      assert.deepEqual(observed.moderationCleanup, { count: 3, oldestOverdueSeconds: 7200 });
+      assert.equal(observed.moderationCleanupBlockedCount, 1);
+      const counts = db.getInstallationOperationalCounts();
+      assert.equal(counts.pendingCleanup, 4, "System status includes future eligible jobs");
+      assert.equal(counts.blockedCleanup, 2, "System status includes future blocked jobs");
+    }
   );
 });
 
@@ -458,6 +465,11 @@ test("age math clamps future/absent timestamps and all operational SQL is read-o
         );
         assert.doesNotMatch(details, /\bSCAN (?:t|d|i|p|m|a|r|audit)\b/, name);
         assert.match(details, /USING (?:COVERING )?INDEX|USING INTEGER PRIMARY KEY/, name);
+        if (name === "moderation") {
+          assert.match(details, /SEARCH j USING INDEX idx_language_moderation_cleanup_due/);
+          assert.match(details, /SEARCH v USING COVERING INDEX idx_language_moderation_violations_cycle/);
+          assert.doesNotMatch(details, /USE TEMP B-TREE/);
+        }
       }
     },
     () => undefined

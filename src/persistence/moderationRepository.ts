@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { MODERATION_CLEANUP_RUNNABLE, MODERATION_CLEANUP_UNFINISHED } from "./moderationCleanupQueries.js";
 import {
   ADAPTIVE_LEARNING_HORIZON_MS,
   ADAPTIVE_STORAGE_MAINTENANCE_INTERVAL,
@@ -552,13 +553,23 @@ export class ModerationRepository {
       LanguageModerationCleanupJob | undefined;
   }
 
+  getDueLanguageModerationCleanupJob(jobId: number, staffChatId: number, nowIso: string) {
+    return this.db
+      .prepare(
+        `SELECT j.* FROM language_moderation_cleanup_jobs j WHERE j.id = ? AND j.staff_chat_id = ?
+          AND ${MODERATION_CLEANUP_UNFINISHED} AND j.cleanup_due_at <= ? AND ${MODERATION_CLEANUP_RUNNABLE}`
+      )
+      .get(jobId, staffChatId, nowIso) as LanguageModerationCleanupJob | undefined;
+  }
+
   listLanguageModerationRecoveryJobs(
     staffChatId: number,
     nowIso: string,
     limit?: number
   ): LanguageModerationCleanupJob[] {
     const sql =
-      "SELECT * FROM language_moderation_cleanup_jobs WHERE staff_chat_id = ? AND state IN ('PENDING', 'CLEANING', 'LOG_PENDING') AND cleanup_due_at <= ? ORDER BY id ASC" +
+      `SELECT j.* FROM language_moderation_cleanup_jobs j WHERE j.staff_chat_id = ?
+        AND ${MODERATION_CLEANUP_UNFINISHED} AND j.cleanup_due_at <= ? AND ${MODERATION_CLEANUP_RUNNABLE} ORDER BY j.id ASC` +
       (limit === undefined ? "" : " LIMIT ?");
     return this.db
       .prepare(sql)

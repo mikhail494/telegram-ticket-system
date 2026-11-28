@@ -1011,6 +1011,10 @@ export class SupportDatabase {
     return this.moderation.getLanguageModerationCleanupJob(jobId);
   }
 
+  getDueLanguageModerationCleanupJob(jobId: number, staffChatId: number, nowIso: string) {
+    return this.moderation.getDueLanguageModerationCleanupJob(jobId, staffChatId, nowIso);
+  }
+
   listLanguageModerationRecoveryJobs(
     staffChatId: number,
     nowIso: string,
@@ -1299,6 +1303,7 @@ export class SupportDatabase {
     moderationEnabled: number;
     unhealthyModerationChats: number;
     pendingCleanup: number;
+    blockedCleanup: number;
     pendingArchives: number;
     pendingBatchStaffOperations: number;
   } {

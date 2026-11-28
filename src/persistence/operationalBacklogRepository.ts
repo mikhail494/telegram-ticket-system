@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { backlogAgeSeconds, type OperationalBacklogObservation } from "../operationalBacklog.js";
 import { DELIVERY_REVIEW_CASES_SQL } from "./deliveryReconciliationRepository.js";
+import { MODERATION_CLEANUP_RUNNABLE, MODERATION_CLEANUP_UNFINISHED } from "./moderationCleanupQueries.js";
 import {
   BATCH_FAILURE_EVENT_PENDING,
   BATCH_FINAL_SUMMARY_PENDING,
@@ -85,9 +86,11 @@ export const BATCH_BACKLOG_SQL = `SELECT COUNT(*) AS count, MIN(due_at) AS oldes
 export const ARCHIVE_BACKLOG_SQL = `SELECT COUNT(*) AS count, MIN(t.closed_at) AS oldest FROM tickets t
   WHERE t.staff_chat_id = @staffChatId AND t.status = 'CLOSED' AND t.archived_at IS NULL AND ${ARCHIVE_UNBLOCKED}`;
 
-export const MODERATION_BACKLOG_SQL = `SELECT COUNT(*) AS count, MIN(cleanup_due_at) AS oldest
-  FROM language_moderation_cleanup_jobs WHERE staff_chat_id = @staffChatId
-    AND state IN ('PENDING', 'CLEANING', 'LOG_PENDING') AND cleanup_due_at <= @at`;
+export const MODERATION_BACKLOG_SQL = `SELECT COUNT(runnable_due_at) AS count, MIN(runnable_due_at) AS oldest,
+    COUNT(*) - COUNT(runnable_due_at) AS blocked_count
+  FROM (SELECT CASE WHEN ${MODERATION_CLEANUP_RUNNABLE} THEN j.cleanup_due_at END AS runnable_due_at
+    FROM language_moderation_cleanup_jobs j WHERE j.staff_chat_id = @staffChatId
+      AND ${MODERATION_CLEANUP_UNFINISHED} AND j.cleanup_due_at <= @at)`;
 
 const REVIEW_BACKLOG_SQL = `WITH review AS MATERIALIZED (
   SELECT delivery_key, state, updated_at FROM (${DELIVERY_REVIEW_CASES_SQL})), unknown_operations AS (
@@ -128,7 +131,7 @@ export class OperationalBacklogRepository {
     const parameters = { staffChatId, at };
     const review = statements.review.get(parameters) as Aggregate & { unknown_count: number };
     const batch = statements.batch.get(parameters) as Aggregate;
-    const moderation = statements.moderation.get(parameters) as Aggregate;
+    const moderation = statements.moderation.get(parameters) as Aggregate & { blocked_count: number };
     const archive = statements.archive.get(parameters) as Aggregate;
     const exports = statements.exports.get(parameters) as { count: number };
     return {
@@ -138,6 +141,7 @@ export class OperationalBacklogRepository {
       unknownDeliveryCount: review.unknown_count,
       batchRecovery: { count: batch.count, oldestOverdueSeconds: backlogAgeSeconds(at, batch.oldest) },
       moderationCleanup: { count: moderation.count, oldestOverdueSeconds: backlogAgeSeconds(at, moderation.oldest) },
+      moderationCleanupBlockedCount: moderation.blocked_count,
       archiveRecovery: { count: archive.count, oldestAgeSeconds: backlogAgeSeconds(at, archive.oldest) },
       batchExportUnknownDeliveryCount: exports.count,
     };

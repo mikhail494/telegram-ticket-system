@@ -10,6 +10,7 @@ All notable changes to this project are documented in this file. This project fo
 
 ### Fixed
 
+- Terminal-blocked moderation cleanup no longer uses startup recovery slots or triggers overdue alerts. System status and metrics report blocked work separately.
 - Offline adaptive recovery now refuses a pre-commit reset if the matching original key is available or the journal's candidate key is missing or does not match.
 
 - Architecture budgets now ratchet against a trusted CI base across multiple commits. Trusted key-directory symlinks/junctions remain usable without weakening final-file security. Backup output warns that the separate HMAC key is excluded; explicit journaled offline recovery handles permanent key loss without changing delivery history. OWNER pairing prints predefined, sanitized key/opening diagnostics.
